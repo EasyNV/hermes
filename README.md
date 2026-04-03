@@ -74,7 +74,7 @@ See [docs/BUILD-STATUS.md](docs/BUILD-STATUS.md) for full progress.
 |---|---|---|
 | 0 | Scaffolding | ✅ Done |
 | 1 | proxy, contacts, notify | ✅ Done (60 tests) |
-| 2 | wa, campaign | ⬜ Pending |
+| 2 | wa, campaign | ✅ Done (70 tests, 130 total) |
 | 3 | inbox | ⬜ Pending |
 | 4 | gateway, web | ⬜ Pending |
 
@@ -92,6 +92,8 @@ make migrate
 DATABASE_URL="$DATABASE_URL" NATS_URL="nats://localhost:4222" PORT=9101 go run ./cmd/proxy
 DATABASE_URL="$DATABASE_URL" NATS_URL="nats://localhost:4222" PORT=9102 go run ./cmd/contacts
 DATABASE_URL="$DATABASE_URL" NATS_URL="nats://localhost:4222" PORT=9103 go run ./cmd/notify
+DATABASE_URL="$DATABASE_URL" NATS_URL="nats://localhost:4222" PORT=9104 PROXY_SERVICE_ADDR=localhost:9101 go run ./cmd/wa
+DATABASE_URL="$DATABASE_URL" NATS_URL="nats://localhost:4222" PORT=9105 go run ./cmd/campaign
 ```
 
 ## Tech Stack

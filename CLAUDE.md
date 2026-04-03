@@ -333,6 +333,44 @@ func main() {
 
 ---
 
+## Patterns Established in Layer 2
+
+### whatsmeow Containment
+- Only `internal/wa/session/manager.go` and `internal/wa/session/events.go` import whatsmeow types.
+- Handler and sender depend on abstract interfaces (`session.Manager`, `sender.WaClient`).
+- `waClientAdapter` wraps `*whatsmeow.Client` to implement `sender.WaClient`, keeping whatsmeow types out of handler/tests.
+- Tests run without any WhatsApp connection.
+
+### Sender / Typing Delay Pattern
+- `sender.Sender` interface with injectable `sleepFn` for testing.
+- Typing sequence: `SendPresence(composing=true)` → `sleep(duration)` → `SendPresence(composing=false)` → send message.
+- Tests use `NewWithSleep(mockSleep)` to verify timing without real delays.
+
+### Campaign Dispatch Engine
+- One goroutine per running campaign, managed by `engine.Engine`.
+- Engine maintains `map[campaignID]cancelFunc` for start/stop lifecycle.
+- Batch processing: fetches 100 PENDING contacts at a time.
+- Anti-ban timing: `typing_duration_ms = clamp(len(body) * rand(50,80), 1500, 8000)`, `post_send_delay_ms = rand(delay_min, delay_max)`.
+- Progress events published every 10 sends or 5 seconds.
+
+### Spintax Resolver
+- Regex-based: `\{([^{}]+)\}` resolves innermost braces first, iterating outward.
+- `{{variable}}` placeholders protected with sentinels during resolution to prevent spintax matching.
+- Variables resolved AFTER spintax: `resolve_spintax(body)` → `substitute_variables(result, vars)`.
+
+### gRPC Inter-Service Calls
+- wa→proxy: `hermesv1.NewHermesProxyClient(conn)` for GetProxy/GetBestProxy on session connect.
+- campaign→wa: NATS `CampaignSendTask` (async, not gRPC) for send orchestration.
+- Proxy client is optional/nil-guarded — service starts without it if proxy is unavailable.
+
+### NATS Event Envelope
+- All events include `EventMeta`: `event_id` (UUID, used as `Nats-Msg-Id`), `tenant_id`, `timestamp`, `source`.
+- Subject pattern: `hermes.<domain>.<event>.{tenant_id}`.
+- Publishing helper: marshal proto → `js.Publish(subject, data, nats.MsgId(eventID))`.
+- `tenantFn` closure resolves `wa_number_id → tenant_id` (cached in memory to avoid DB hit per event).
+
+---
+
 ## Key Technical Decisions
 
 | Decision | Choice | Reference |
