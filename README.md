@@ -66,6 +66,34 @@ hermes/
 - [Service Contracts](docs/contracts/README.md) — proto definitions, NATS events, WebSocket events
 - [CLAUDE.md](CLAUDE.md) — full project context for AI agents
 
+## Build Status
+
+See [docs/BUILD-STATUS.md](docs/BUILD-STATUS.md) for full progress.
+
+| Layer | Services | Status |
+|---|---|---|
+| 0 | Scaffolding | ✅ Done |
+| 1 | proxy, contacts, notify | ✅ Done (60 tests) |
+| 2 | wa, campaign | ⬜ Pending |
+| 3 | inbox | ⬜ Pending |
+| 4 | gateway, web | ⬜ Pending |
+
+### Running Layer 1 Services
+
+```bash
+# Start infra
+docker compose up -d
+
+# Run migrations
+export DATABASE_URL="postgres://hermes:hermes_dev@localhost:5433/hermes?sslmode=disable"
+make migrate
+
+# Start services (each in a separate terminal)
+DATABASE_URL="$DATABASE_URL" NATS_URL="nats://localhost:4222" PORT=9101 go run ./cmd/proxy
+DATABASE_URL="$DATABASE_URL" NATS_URL="nats://localhost:4222" PORT=9102 go run ./cmd/contacts
+DATABASE_URL="$DATABASE_URL" NATS_URL="nats://localhost:4222" PORT=9103 go run ./cmd/notify
+```
+
 ## Tech Stack
 
 | Component | Choice |

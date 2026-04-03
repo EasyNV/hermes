@@ -272,6 +272,67 @@ type Config struct {
 
 ---
 
+## Patterns Established in Layer 1
+
+These patterns were established during Layer 1 and MUST be followed by all subsequent services:
+
+### Store Interface Pattern
+Every service uses a `Store` interface in `internal/<service>/handler/store.go` that abstracts all DB operations. The handler depends on the interface, not `*pgxpool.Pool` directly. This enables:
+- Unit tests with in-memory mock stores (no test containers needed)
+- Sentinel errors (`ErrNotFound`) instead of leaking `pgx.ErrNoRows`
+- Clean separation: SQL lives in `PgStore`, business logic in handler
+
+### Error Handling
+- Define sentinel errors in the handler package: `var ErrNotFound = errors.New("not found")`
+- `PgStore` translates `pgx.ErrNoRows` → `ErrNotFound`
+- Handler maps domain errors to gRPC status codes: `ErrNotFound` → `codes.NotFound`
+- Always validate required fields at the top of each RPC, return `codes.InvalidArgument`
+
+### Test Pattern
+- Table-driven tests with mock stores (function-field mocks, not code-generated)
+- Each test case seeds initial state and exercises one code path
+- Test files live in the same package as the handler (access to unexported types)
+- No external test dependencies (no testcontainers for unit tests)
+
+### Config Pattern
+- `internal/<service>/config/config.go` with `Load()` function
+- Reads from env vars: `PORT`, `DATABASE_URL`, `NATS_URL` (minimum)
+- Uses `pkg/config.GetEnv()` / `GetEnvInt()` helpers
+
+### Service Entry Point Pattern
+```go
+// cmd/<service>/main.go
+func main() {
+    cfg := config.Load()
+    log := logger.New("hermes-<service>")
+    pool := db.NewPool(cfg.DatabaseURL)  // shared pkg/db
+    js, nc := nats.NewJetStream(cfg.NatsURL)  // shared pkg/nats
+    defer nc.Close()
+    store := handler.NewPgStore(pool)
+    h := handler.New(store, js, log)
+    // Register gRPC server, start listening, handle signals
+}
+```
+
+### NATS Event Publishing
+- Use `Nats-Msg-Id` header (via `nats.MsgId()`) for deduplication
+- Subject pattern: `hermes.<domain>.<event>.{tenant_id}`
+- Nil-guard JetStream context (`if h.js != nil`) so tests skip publishing
+- Consumers: durable names, explicit ACK, max retries per EVENTS.md
+
+### Service Ports (Local Dev)
+| Service | Port |
+|---|---|
+| hermes-proxy | 9101 |
+| hermes-contacts | 9102 |
+| hermes-notify | 9103 |
+| hermes-wa | 9104 |
+| hermes-campaign | 9105 |
+| hermes-inbox | 9106 |
+| hermes-gateway | 8080 |
+
+---
+
 ## Key Technical Decisions
 
 | Decision | Choice | Reference |
