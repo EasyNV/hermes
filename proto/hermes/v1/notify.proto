@@ -1,0 +1,133 @@
+syntax = "proto3";
+
+package hermes.v1;
+
+option go_package = "github.com/hermes-waba/hermes/gen/go/hermes/v1;hermesv1";
+
+import "google/protobuf/timestamp.proto";
+import "hermes/v1/common.proto";
+
+// ======================================================================
+// HermesNotify — notification configuration and delivery.
+//
+// Owns: notification_configs table.
+// Called by: hermes-gateway (gRPC for config CRUD and test)
+// Publishes: (none — delivers notifications directly to external targets)
+// Consumes: notify.dispatch.{tenant_id} (notification requests from inbox/campaign)
+//
+// Notification flow:
+// 1. Inbox service publishes to notify.dispatch.{tenant_id} on new unassigned message.
+// 2. Campaign service publishes to notify.dispatch.{tenant_id} on ban events.
+// 3. Notify service looks up workspace configs, dispatches to each enabled target.
+// ======================================================================
+service HermesNotify {
+
+  // Create or update a notification config for a workspace.
+  // If a config already exists for the same (workspace_id, type, webhook_type), it's updated.
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc ConfigureNotification(NotifyConfigureRequest) returns (NotifyConfigureResponse);
+
+  // Get a notification config by ID.
+  // Called by: gateway
+  rpc GetNotificationConfig(NotifyGetConfigRequest) returns (NotifyGetConfigResponse);
+
+  // List all notification configs for a workspace.
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc ListNotificationConfigs(NotifyListConfigsRequest) returns (NotifyListConfigsResponse);
+
+  // Update an existing notification config.
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc UpdateNotificationConfig(NotifyUpdateConfigRequest) returns (NotifyUpdateConfigResponse);
+
+  // Delete a notification config.
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc DeleteNotificationConfig(NotifyDeleteConfigRequest) returns (NotifyDeleteConfigResponse);
+
+  // Send a test notification using the specified config.
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc TestNotification(NotifyTestRequest) returns (NotifyTestResponse);
+}
+
+// ======================================================================
+// Configure
+// ======================================================================
+
+message NotifyConfigureRequest {
+  string workspace_id = 1;
+  NotificationType type = 2;
+  // Webhook URL. Required when type = WEBHOOK.
+  string webhook_url = 3;
+  // Webhook format/target. Required when type = WEBHOOK.
+  WebhookType webhook_type = 4;
+  // Whether this notification channel is active.
+  bool enabled = 5;
+}
+
+message NotifyConfigureResponse {
+  NotificationConfig config = 1;
+  // True if an existing config was updated (upsert behavior).
+  bool updated = 2;
+}
+
+// ======================================================================
+// Get / List
+// ======================================================================
+
+message NotifyGetConfigRequest {
+  string id = 1;
+}
+
+message NotifyGetConfigResponse {
+  NotificationConfig config = 1;
+}
+
+message NotifyListConfigsRequest {
+  string workspace_id = 1;
+}
+
+message NotifyListConfigsResponse {
+  repeated NotificationConfig configs = 1;
+}
+
+// ======================================================================
+// Update / Delete
+// ======================================================================
+
+message NotifyUpdateConfigRequest {
+  string id = 1;
+  // Fields to update. Only non-empty/non-zero fields are applied.
+  NotificationType type = 2;
+  string webhook_url = 3;
+  WebhookType webhook_type = 4;
+  bool enabled = 5;
+}
+
+message NotifyUpdateConfigResponse {
+  NotificationConfig config = 1;
+}
+
+message NotifyDeleteConfigRequest {
+  string id = 1;
+}
+
+message NotifyDeleteConfigResponse {}
+
+// ======================================================================
+// Test
+// ======================================================================
+
+message NotifyTestRequest {
+  // Config ID to test.
+  string config_id = 1;
+}
+
+message NotifyTestResponse {
+  // Whether the test notification was delivered successfully.
+  bool success = 1;
+  // Error message if delivery failed (e.g. webhook returned 4xx/5xx, invalid URL).
+  string error = 2;
+  // HTTP status code from the webhook (if applicable).
+  int32 http_status = 3;
+  // Latency of the delivery in milliseconds.
+  int32 latency_ms = 4;
+}

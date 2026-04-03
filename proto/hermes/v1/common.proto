@@ -1,0 +1,504 @@
+syntax = "proto3";
+
+package hermes.v1;
+
+option go_package = "github.com/hermes-waba/hermes/gen/go/hermes/v1;hermesv1";
+
+import "google/protobuf/timestamp.proto";
+
+// ──────────────────────────────────────────────────────────────────
+// Pagination
+// ──────────────────────────────────────────────────────────────────
+
+// PageRequest is included in every List* request to control pagination.
+message PageRequest {
+  // 1-based page number. Defaults to 1 if omitted or zero.
+  int32 page = 1;
+  // Items per page. Clamped to [1, 200]. Defaults to 50.
+  int32 page_size = 2;
+}
+
+// PageResponse is included in every List* response alongside the items.
+message PageResponse {
+  // Total number of items matching the query (across all pages).
+  int64 total = 1;
+  // Current page number (mirrors the request).
+  int32 page = 2;
+  // Items per page (mirrors the request, after clamping).
+  int32 page_size = 3;
+  // Total number of pages (ceil(total / page_size)).
+  int32 total_pages = 4;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// RBAC Roles
+// ──────────────────────────────────────────────────────────────────
+
+// Role defines the access level of a user within the system.
+// Roles are hierarchical: superadmin > tenant_admin > workspace_admin > cs_agent.
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+
+  // Platform-level admin. Can manage tenants, all workspaces, all users.
+  ROLE_SUPERADMIN = 1;
+
+  // Tenant-level admin. Manages workspaces, numbers, proxies, users within their tenant.
+  ROLE_TENANT_ADMIN = 2;
+
+  // Workspace-level admin. Manages campaigns, templates, inbox, contacts within their workspace.
+  ROLE_WORKSPACE_ADMIN = 3;
+
+  // Customer-service agent. Can use inbox, view campaigns, send manual replies.
+  ROLE_CS_AGENT = 4;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// WhatsApp Number
+// ──────────────────────────────────────────────────────────────────
+
+// WaNumberStatus reflects the current connection/ban state of a WhatsApp number.
+enum WaNumberStatus {
+  WA_NUMBER_STATUS_UNSPECIFIED = 0;
+
+  // Connected to WhatsApp and operational.
+  WA_NUMBER_STATUS_ACTIVE = 1;
+
+  // Banned by WhatsApp. Cannot send or receive.
+  WA_NUMBER_STATUS_BANNED = 2;
+
+  // Not currently connected (logged out or pod reassignment).
+  WA_NUMBER_STATUS_DISCONNECTED = 3;
+
+  // Temporarily paused sending (e.g. hit daily cap or cooling down after high send rate).
+  WA_NUMBER_STATUS_COOLDOWN = 4;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Proxy
+// ──────────────────────────────────────────────────────────────────
+
+// ProxyType is the protocol used to connect through the proxy.
+enum ProxyType {
+  PROXY_TYPE_UNSPECIFIED = 0;
+  PROXY_TYPE_SOCKS5 = 1;
+  PROXY_TYPE_HTTP = 2;
+}
+
+// ProxyStatus reflects the health state of a proxy.
+enum ProxyStatus {
+  PROXY_STATUS_UNSPECIFIED = 0;
+
+  // Proxy is healthy and available for assignment.
+  PROXY_STATUS_ACTIVE = 1;
+
+  // Proxy is unreachable or non-functional.
+  PROXY_STATUS_DEAD = 2;
+
+  // Proxy has been flagged due to high ban rate on numbers using it.
+  PROXY_STATUS_FLAGGED = 3;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Campaign
+// ──────────────────────────────────────────────────────────────────
+
+// CampaignStatus tracks the lifecycle of a campaign.
+enum CampaignStatus {
+  CAMPAIGN_STATUS_UNSPECIFIED = 0;
+
+  // Campaign created but not yet started.
+  CAMPAIGN_STATUS_DRAFT = 1;
+
+  // Campaign is scheduled for future execution.
+  CAMPAIGN_STATUS_SCHEDULED = 2;
+
+  // Campaign is actively sending messages.
+  CAMPAIGN_STATUS_RUNNING = 3;
+
+  // Campaign was paused (manually or by auto-pause on ban threshold).
+  CAMPAIGN_STATUS_PAUSED = 4;
+
+  // All contacts have been processed.
+  CAMPAIGN_STATUS_COMPLETED = 5;
+
+  // Campaign was manually cancelled before completion.
+  CAMPAIGN_STATUS_CANCELLED = 6;
+}
+
+// ContactSendStatus tracks the delivery state of a campaign message to one contact.
+enum ContactSendStatus {
+  CONTACT_SEND_STATUS_UNSPECIFIED = 0;
+
+  // Queued for sending, not yet attempted.
+  CONTACT_SEND_STATUS_PENDING = 1;
+
+  // Message sent to WhatsApp servers (single tick).
+  CONTACT_SEND_STATUS_SENT = 2;
+
+  // Message delivered to recipient device (double tick).
+  CONTACT_SEND_STATUS_DELIVERED = 3;
+
+  // Send attempt failed (see error field for details).
+  CONTACT_SEND_STATUS_FAILED = 4;
+
+  // Skipped (e.g. contact banned, number banned mid-campaign, duplicate).
+  CONTACT_SEND_STATUS_SKIPPED = 5;
+}
+
+// RotationStrategy determines how numbers are cycled within a campaign.
+enum RotationStrategy {
+  ROTATION_STRATEGY_UNSPECIFIED = 0;
+
+  // Cycle through numbers in order, evenly distributing contacts.
+  ROTATION_STRATEGY_ROUND_ROBIN = 1;
+
+  // Prefer the number with the fewest sends today.
+  ROTATION_STRATEGY_LEAST_USED = 2;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Inbox / Messages
+// ──────────────────────────────────────────────────────────────────
+
+// ConversationStatus indicates the assignment state of a conversation.
+enum ConversationStatus {
+  CONVERSATION_STATUS_UNSPECIFIED = 0;
+
+  // No agent has claimed this conversation yet.
+  CONVERSATION_STATUS_UNASSIGNED = 1;
+
+  // An agent is actively handling this conversation.
+  CONVERSATION_STATUS_ASSIGNED = 2;
+
+  // Conversation has been resolved/closed.
+  CONVERSATION_STATUS_CLOSED = 3;
+}
+
+// MessageDirection indicates whether a message was sent or received.
+enum MessageDirection {
+  MESSAGE_DIRECTION_UNSPECIFIED = 0;
+
+  // Message received from external contact.
+  MESSAGE_DIRECTION_INBOUND = 1;
+
+  // Message sent by an agent or campaign.
+  MESSAGE_DIRECTION_OUTBOUND = 2;
+}
+
+// MessageStatus tracks delivery progress of an outbound message (or receipt state for inbound).
+enum MessageStatus {
+  MESSAGE_STATUS_UNSPECIFIED = 0;
+
+  // Message created locally, not yet sent to WA.
+  MESSAGE_STATUS_PENDING = 1;
+
+  // Sent to WhatsApp servers (single tick).
+  MESSAGE_STATUS_SENT = 2;
+
+  // Delivered to recipient device (double tick).
+  MESSAGE_STATUS_DELIVERED = 3;
+
+  // Read by recipient (blue tick).
+  MESSAGE_STATUS_READ = 4;
+
+  // Send attempt failed.
+  MESSAGE_STATUS_FAILED = 5;
+}
+
+// ContentType is the media type of a message payload.
+enum ContentType {
+  CONTENT_TYPE_UNSPECIFIED = 0;
+  CONTENT_TYPE_TEXT = 1;
+  CONTENT_TYPE_IMAGE = 2;
+  CONTENT_TYPE_DOCUMENT = 3;
+  CONTENT_TYPE_AUDIO = 4;
+  CONTENT_TYPE_VIDEO = 5;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Notification
+// ──────────────────────────────────────────────────────────────────
+
+// NotificationType is the delivery channel for a notification config.
+enum NotificationType {
+  NOTIFICATION_TYPE_UNSPECIFIED = 0;
+  NOTIFICATION_TYPE_BROWSER_PUSH = 1;
+  NOTIFICATION_TYPE_SOUND = 2;
+  NOTIFICATION_TYPE_WEBHOOK = 3;
+}
+
+// WebhookType specifies the format/destination of a webhook notification.
+enum WebhookType {
+  WEBHOOK_TYPE_UNSPECIFIED = 0;
+  WEBHOOK_TYPE_TELEGRAM = 1;
+  WEBHOOK_TYPE_DISCORD = 2;
+  WEBHOOK_TYPE_CUSTOM = 3;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Resource Messages (shared across services)
+// ──────────────────────────────────────────────────────────────────
+
+// Tenant represents a top-level account that owns workspaces, numbers, and proxies.
+message Tenant {
+  string id = 1;
+  string name = 2;
+  // Tenant-wide settings stored as JSON (e.g. default daily caps, branding).
+  string settings_json = 3;
+  // Max WA numbers allowed per proxy. 0 = unlimited. Used by GetBestProxy
+  // to refuse assignment when all active proxies are at capacity.
+  int32 max_numbers_per_proxy = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+// Workspace is an organizational unit within a tenant. Campaigns, templates,
+// and inbox conversations are scoped to a workspace.
+message Workspace {
+  string id = 1;
+  string tenant_id = 2;
+  string name = 3;
+  // Workspace-level settings (JSON). Overrides tenant defaults where applicable.
+  string settings_json = 4;
+  // Default daily send cap per number for campaigns in this workspace.
+  int32 daily_cap = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+// User is an authenticated user of the platform.
+message User {
+  string id = 1;
+  string workspace_id = 2;
+  string email = 3;
+  // Role within the workspace. See Role enum.
+  Role role = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+// WaNumber represents a registered WhatsApp number managed by the platform.
+message WaNumber {
+  string id = 1;
+  string tenant_id = 2;
+  // WhatsApp JID (e.g. "6281234567890@s.whatsapp.net").
+  string jid = 3;
+  // E.164 phone number (e.g. "+6281234567890").
+  string phone = 4;
+  // Display name shown to contacts.
+  string display_name = 5;
+  WaNumberStatus status = 6;
+  // FK to the proxy assigned to this number (sticky assignment).
+  string proxy_id = 7;
+  // Health score 0-100. Derived from delivery rate, ban history, etc.
+  int32 health_score = 8;
+  // Messages sent today (resets at midnight UTC).
+  int32 daily_sent_count = 9;
+  // Lifetime total messages sent.
+  int64 total_sent = 10;
+  // Lifetime ban count.
+  int32 ban_count = 11;
+  // Timestamp of last ban event, if any.
+  google.protobuf.Timestamp last_ban_at = 12;
+  // When the WA session was last connected.
+  google.protobuf.Timestamp connected_at = 13;
+  // ID of the hermes-wa pod currently hosting this session.
+  string pod_id = 14;
+  google.protobuf.Timestamp created_at = 15;
+  // Workspace IDs this number is assigned to.
+  repeated string workspace_ids = 16;
+}
+
+// Proxy represents a network proxy used for WhatsApp connections.
+message Proxy {
+  string id = 1;
+  string tenant_id = 2;
+  string host = 3;
+  int32 port = 4;
+  // Auth credentials. Empty if no auth required.
+  string username = 5;
+  string password = 6;
+  ProxyType type = 7;
+  ProxyStatus status = 8;
+  // How many times numbers using this proxy have been banned.
+  int32 ban_count = 9;
+  // Number of WA numbers currently assigned to this proxy.
+  int32 assigned_count = 10;
+  // Last time a health check was performed.
+  google.protobuf.Timestamp last_health_check = 11;
+  google.protobuf.Timestamp created_at = 12;
+}
+
+// Contact is an external WhatsApp user/recipient.
+message Contact {
+  string id = 1;
+  string tenant_id = 2;
+  // E.164 phone number. Unique within tenant.
+  string phone = 3;
+  string name = 4;
+  // Tags for segmentation (e.g. "vip", "region-jakarta").
+  repeated string tags = 5;
+  // Arbitrary key-value pairs for template variable substitution.
+  map<string, string> custom_fields = 6;
+  // Whether this contact is on the internal ban list.
+  bool is_banned = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+// Template is a message template with spintax and variable placeholders.
+message Template {
+  string id = 1;
+  string workspace_id = 2;
+  string name = 3;
+  // Message body with optional spintax (e.g. "{Hi|Hello} {{name}}").
+  string body = 4;
+  // URL to attached media (image, document, etc.). Empty for text-only.
+  string media_url = 5;
+  // MIME type of the media (e.g. "image/jpeg"). Empty if no media.
+  string media_type = 6;
+  // List of variable names used in the body (e.g. ["name", "company"]).
+  repeated string variables = 7;
+  // User who created this template.
+  string created_by = 8;
+  google.protobuf.Timestamp created_at = 9;
+}
+
+// Campaign defines a bulk messaging campaign.
+message Campaign {
+  string id = 1;
+  string workspace_id = 2;
+  string template_id = 3;
+  string name = 4;
+  CampaignStatus status = 5;
+  // When to start sending. Null/zero means immediately on start.
+  google.protobuf.Timestamp schedule_at = 6;
+  // Max messages per number per day for this campaign.
+  int32 daily_cap_per_num = 7;
+  // Number of bans that triggers auto-pause. 0 = disabled.
+  int32 ban_pause_threshold = 8;
+  RotationStrategy rotation_strategy = 9;
+  // Minimum delay between messages from the same number (ms).
+  int32 delay_min_ms = 10;
+  // Maximum delay between messages from the same number (ms).
+  int32 delay_max_ms = 11;
+  // Total contacts assigned to this campaign.
+  int32 total_contacts = 12;
+  // Contacts that have been sent successfully.
+  int32 sent_count = 13;
+  // Contacts that failed to send.
+  int32 failed_count = 14;
+  // Contacts that replied (tracked via inbound message matching).
+  int32 replied_count = 15;
+  // Numbers banned during this campaign.
+  int32 banned_count = 16;
+  string created_by = 17;
+  google.protobuf.Timestamp created_at = 18;
+  google.protobuf.Timestamp started_at = 19;
+  google.protobuf.Timestamp completed_at = 20;
+}
+
+// CampaignNumber is a WhatsApp number assigned to a campaign.
+message CampaignNumber {
+  string campaign_id = 1;
+  string wa_number_id = 2;
+  // Status of this number within the campaign (active, banned, etc.).
+  WaNumberStatus status = 3;
+  int32 sent_count = 4;
+  int32 failed_count = 5;
+}
+
+// CampaignContact tracks the send status of one contact within a campaign.
+message CampaignContact {
+  string campaign_id = 1;
+  string contact_id = 2;
+  // The WA number that sent (or will send) the message to this contact.
+  string wa_number_id = 3;
+  ContactSendStatus status = 4;
+  google.protobuf.Timestamp sent_at = 5;
+  google.protobuf.Timestamp delivered_at = 6;
+  google.protobuf.Timestamp failed_at = 7;
+  // Error message if status is FAILED.
+  string error = 8;
+}
+
+// Conversation groups messages between an agent and a contact on a specific WA number.
+message Conversation {
+  string id = 1;
+  string workspace_id = 2;
+  string contact_id = 3;
+  string wa_number_id = 4;
+  // User ID of the assigned agent. Empty if unassigned.
+  string assigned_to = 5;
+  ConversationStatus status = 6;
+  google.protobuf.Timestamp last_message_at = 7;
+  // Campaign that originated this conversation, if any.
+  string campaign_id = 8;
+  google.protobuf.Timestamp created_at = 9;
+  // Denormalized contact info for list rendering without join.
+  string contact_name = 10;
+  string contact_phone = 11;
+  // Last message preview (truncated body for list display).
+  string last_message_preview = 12;
+  // Count of unread inbound messages.
+  int32 unread_count = 13;
+  // Seconds between first inbound message and first agent reply.
+  // 0 if no reply yet. Used for agent performance metrics.
+  int32 first_response_time_secs = 14;
+}
+
+// Message is a single chat message within a conversation.
+message Message {
+  string id = 1;
+  string conversation_id = 2;
+  MessageDirection direction = 3;
+  ContentType content_type = 4;
+  // Text body. Null for media-only messages.
+  string body = 5;
+  // URL to the media attachment. Empty for text-only.
+  string media_url = 6;
+  // Template ID if this was a campaign message.
+  string template_id = 7;
+  // Resolved template variables as JSON (for campaign messages).
+  string resolved_vars_json = 8;
+  // WhatsApp-assigned message ID (for delivery receipts).
+  string wa_message_id = 9;
+  MessageStatus status = 10;
+  google.protobuf.Timestamp created_at = 11;
+}
+
+// CannedResponse is a quick-reply shortcut for inbox agents.
+message CannedResponse {
+  string id = 1;
+  string workspace_id = 2;
+  // Trigger shortcut (e.g. "/greeting", "/thanks").
+  string shortcut = 3;
+  // Message body to insert.
+  string body = 4;
+  string created_by = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+// NotificationConfig defines a notification delivery target for a workspace.
+message NotificationConfig {
+  string id = 1;
+  string workspace_id = 2;
+  NotificationType type = 3;
+  // Webhook URL. Required when type = WEBHOOK.
+  string webhook_url = 4;
+  // Webhook format. Required when type = WEBHOOK.
+  WebhookType webhook_type = 5;
+  bool enabled = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Error
+// ──────────────────────────────────────────────────────────────────
+
+// ErrorDetail provides structured error information in gRPC status details.
+message ErrorDetail {
+  // Machine-readable error code (e.g. "TENANT_NOT_FOUND", "DAILY_CAP_EXCEEDED").
+  string code = 1;
+  // Human-readable error message.
+  string message = 2;
+  // Field that caused the error (for validation errors).
+  string field = 3;
+}

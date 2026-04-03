@@ -1,0 +1,229 @@
+syntax = "proto3";
+
+package hermes.v1;
+
+option go_package = "github.com/hermes-waba/hermes/gen/go/hermes/v1;hermesv1";
+
+import "google/protobuf/timestamp.proto";
+import "hermes/v1/common.proto";
+
+// ======================================================================
+// HermesWa — WhatsApp session management and message sending.
+//
+// Runs as a StatefulSet (hermes-wa-0, hermes-wa-1, ...). Each pod owns
+// a shard of WA sessions. The controller assigns sessions to pods.
+//
+// Called by: hermes-gateway (sync gRPC for session ops),
+//           hermes-campaign (async via NATS for campaign sends).
+// Publishes: wa.message.inbound, wa.message.outbound, wa.ban, wa.connection
+// Consumes: wa.send.campaign, wa.send.manual
+// ======================================================================
+service HermesWa {
+
+  // Connect a WA session for a number. Initiates QR pairing if no session exists,
+  // or reconnects using stored session keys.
+  // Called by: gateway (on behalf of tenant_admin/superadmin)
+  rpc ConnectSession(ConnectSessionRequest) returns (ConnectSessionResponse);
+
+  // Disconnect a WA session gracefully. The session data is preserved in DB
+  // for later reconnection.
+  // Called by: gateway (on behalf of tenant_admin/superadmin)
+  rpc DisconnectSession(DisconnectSessionRequest) returns (DisconnectSessionResponse);
+
+  // Get the current status of a WA session (connected, QR pending, etc.).
+  // Called by: gateway (any authenticated user with number access)
+  rpc GetSessionStatus(GetSessionStatusRequest) returns (GetSessionStatusResponse);
+
+  // Send a single WhatsApp message. Used for manual agent replies from inbox.
+  // For campaign sends, use NATS subject hermes.wa.send.campaign.{tenant_id}.
+  // Called by: gateway (on behalf of workspace_admin/cs_agent)
+  rpc SendMessage(WaSendMessageRequest) returns (WaSendMessageResponse);
+
+  // Send a typing indicator ("composing...") to a contact.
+  // Called by: gateway (on behalf of workspace_admin/cs_agent), campaign service (via gRPC)
+  rpc SendTypingIndicator(WaSendTypingIndicatorRequest) returns (WaSendTypingIndicatorResponse);
+
+  // Get the current QR code for a session that is pending pairing.
+  // Returns error if session is already linked.
+  // Called by: gateway (on behalf of tenant_admin/superadmin)
+  rpc GetQRCode(WaGetQRCodeRequest) returns (WaGetQRCodeResponse);
+
+  // List all sessions managed by this specific WA pod.
+  // Called by: gateway or controller (for monitoring/debugging)
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+
+  // Get health/metrics for this WA pod.
+  // Called by: controller, gateway (for dashboard)
+  rpc GetPodHealth(GetPodHealthRequest) returns (GetPodHealthResponse);
+}
+
+// ======================================================================
+// Session Management
+// ======================================================================
+
+message ConnectSessionRequest {
+  // WA number ID to connect.
+  string wa_number_id = 1;
+  // Proxy to use for this session. If empty, uses the number's current proxy_id.
+  string proxy_id = 2;
+}
+
+message ConnectSessionResponse {
+  // Current status after connection attempt.
+  SessionInfo session = 1;
+  // QR code if pairing is needed (first-time connect or session expired).
+  // Empty if already connected.
+  string qr_code = 2;
+}
+
+// SessionState represents the detailed state of a WA session on a pod.
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0;
+
+  // Session is active and connected to WhatsApp.
+  SESSION_STATE_CONNECTED = 1;
+
+  // Session is connecting (WebSocket handshake in progress).
+  SESSION_STATE_CONNECTING = 2;
+
+  // Session is waiting for QR scan to pair.
+  SESSION_STATE_QR_PENDING = 3;
+
+  // Session disconnected (intentionally or by WhatsApp).
+  SESSION_STATE_DISCONNECTED = 4;
+
+  // Session was banned by WhatsApp.
+  SESSION_STATE_BANNED = 5;
+
+  // Session is reconnecting after a transient failure.
+  SESSION_STATE_RECONNECTING = 6;
+}
+
+// SessionInfo contains the detailed runtime state of a WA session.
+message SessionInfo {
+  string wa_number_id = 1;
+  string jid = 2;
+  string phone = 3;
+  SessionState state = 4;
+  // Pod hosting this session (e.g. "hermes-wa-3").
+  string pod_id = 5;
+  // Proxy being used.
+  string proxy_id = 6;
+  // When this session was last connected.
+  google.protobuf.Timestamp connected_at = 7;
+  // Messages sent in this session since last connect.
+  int64 messages_sent = 8;
+  // Messages received in this session since last connect.
+  int64 messages_received = 9;
+  // Memory usage of this session in bytes.
+  int64 memory_bytes = 10;
+}
+
+message DisconnectSessionRequest {
+  string wa_number_id = 1;
+}
+
+message DisconnectSessionResponse {
+  SessionInfo session = 1;
+}
+
+message GetSessionStatusRequest {
+  string wa_number_id = 1;
+}
+
+message GetSessionStatusResponse {
+  SessionInfo session = 1;
+}
+
+// ======================================================================
+// Messaging
+// ======================================================================
+
+message WaSendMessageRequest {
+  // The WA number to send from.
+  string wa_number_id = 1;
+  // Recipient JID (e.g. "6281234567890@s.whatsapp.net").
+  string recipient_jid = 2;
+  ContentType content_type = 3;
+  // Text body. Required for TEXT.
+  string body = 4;
+  // Media URL. Required for IMAGE, DOCUMENT, AUDIO, VIDEO.
+  string media_url = 5;
+  // Original filename for documents.
+  string filename = 6;
+  // Caption for media messages.
+  string caption = 7;
+  // Idempotency key to prevent double sends. Deduped within 5 minutes.
+  string idempotency_key = 8;
+}
+
+message WaSendMessageResponse {
+  // WhatsApp-assigned message ID.
+  string wa_message_id = 1;
+  // Timestamp when WhatsApp server accepted the message.
+  google.protobuf.Timestamp sent_at = 2;
+}
+
+message WaSendTypingIndicatorRequest {
+  // The WA number to send the typing indicator from.
+  string wa_number_id = 1;
+  // Recipient JID.
+  string recipient_jid = 2;
+  // Duration to show typing indicator in milliseconds. Default 3000.
+  // The WA service will send ChatPresenceComposing, wait this duration,
+  // then send ChatPresencePaused.
+  int32 duration_ms = 3;
+}
+
+message WaSendTypingIndicatorResponse {}
+
+// ======================================================================
+// QR Code
+// ======================================================================
+
+message WaGetQRCodeRequest {
+  string wa_number_id = 1;
+}
+
+message WaGetQRCodeResponse {
+  // Base64-encoded QR code PNG.
+  string qr_code = 1;
+  // True if session is already linked (no QR needed).
+  bool is_linked = 2;
+  // Expiry time of the QR code. Client should refresh before this.
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+// ======================================================================
+// Pod Management
+// ======================================================================
+
+message ListSessionsRequest {
+  // Filter by session state. If unspecified, returns all.
+  SessionState state = 1;
+  PageRequest pagination = 2;
+}
+
+message ListSessionsResponse {
+  repeated SessionInfo sessions = 1;
+  PageResponse pagination = 2;
+}
+
+message GetPodHealthRequest {}
+
+message GetPodHealthResponse {
+  // Pod identifier (e.g. "hermes-wa-3").
+  string pod_id = 1;
+  // Total sessions on this pod.
+  int32 total_sessions = 2;
+  // Connected sessions.
+  int32 connected_sessions = 3;
+  // Pod memory usage in bytes.
+  int64 memory_bytes = 4;
+  // Pod CPU usage as percentage (0-100).
+  float cpu_percent = 5;
+  // Pod uptime.
+  google.protobuf.Timestamp started_at = 6;
+  // NATS consumer lag (pending messages).
+  int64 nats_consumer_lag = 7;
+}

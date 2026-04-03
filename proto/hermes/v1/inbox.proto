@@ -1,0 +1,319 @@
+syntax = "proto3";
+
+package hermes.v1;
+
+option go_package = "github.com/hermes-waba/hermes/gen/go/hermes/v1;hermesv1";
+
+import "google/protobuf/timestamp.proto";
+import "hermes/v1/common.proto";
+
+// ======================================================================
+// HermesInbox — conversation and message management for the agent inbox.
+//
+// Owns: conversations, messages, canned_responses tables.
+// Called by: hermes-gateway (gRPC for inbox UI operations)
+// Publishes: wa.send.manual (agent replies → WA service), notify.dispatch (new msg alerts)
+// Consumes: wa.message.inbound (incoming messages → create/update conversations)
+// ======================================================================
+service HermesInbox {
+
+  // ──────────────────────────────────────────────────────────────
+  // Conversations
+  // ──────────────────────────────────────────────────────────────
+
+  // List conversations in a workspace with filters (status, assignment, search).
+  // Called by: gateway (on behalf of workspace_admin/cs_agent)
+  rpc ListConversations(InboxListConversationsRequest) returns (InboxListConversationsResponse);
+
+  // Get a single conversation with full details (contact, WA number, last messages).
+  // Called by: gateway
+  rpc GetConversation(InboxGetConversationRequest) returns (InboxGetConversationResponse);
+
+  // Claim an unassigned conversation. Assigns it to the requesting user.
+  // Fails if conversation is already assigned.
+  // Called by: gateway (on behalf of workspace_admin/cs_agent)
+  rpc ClaimConversation(InboxClaimConversationRequest) returns (InboxClaimConversationResponse);
+
+  // Transfer a conversation to another agent. Caller must be the current assignee
+  // or a workspace_admin+.
+  // Called by: gateway (on behalf of workspace_admin/cs_agent)
+  rpc TransferConversation(InboxTransferConversationRequest) returns (InboxTransferConversationResponse);
+
+  // Close a conversation. Sets status to CLOSED.
+  // Conversation will reopen automatically if the contact sends a new message.
+  // Called by: gateway (on behalf of workspace_admin/cs_agent)
+  rpc CloseConversation(InboxCloseConversationRequest) returns (InboxCloseConversationResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // Messages
+  // ──────────────────────────────────────────────────────────────
+
+  // List messages in a conversation, paginated (newest first by default).
+  // Called by: gateway (on behalf of workspace_admin/cs_agent)
+  rpc ListMessages(InboxListMessagesRequest) returns (InboxListMessagesResponse);
+
+  // Send a manual reply message in a conversation. The inbox service publishes
+  // a send task to NATS (wa.send.manual.{tenant_id}) for the WA service to process.
+  // Called by: gateway (on behalf of workspace_admin/cs_agent with assignment)
+  rpc SendMessage(InboxSendMessageRequest) returns (InboxSendMessageResponse);
+
+  // Search messages across all conversations in a workspace (full-text search).
+  // Called by: gateway
+  rpc SearchMessages(InboxSearchMessagesRequest) returns (InboxSearchMessagesResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // Contact Campaign History
+  // ──────────────────────────────────────────────────────────────
+
+  // Get all campaigns a contact participated in, with template info and send result.
+  // Used in inbox chat view to show contact's campaign history.
+  // Called by: gateway (on behalf of workspace_admin/cs_agent)
+  rpc GetContactCampaignHistory(InboxGetContactCampaignHistoryRequest) returns (InboxGetContactCampaignHistoryResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // Canned Responses
+  // ──────────────────────────────────────────────────────────────
+
+  // Create a canned response (quick-reply shortcut).
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc CreateCannedResponse(InboxCreateCannedResponseRequest) returns (InboxCreateCannedResponseResponse);
+
+  // Get a canned response by ID.
+  // Called by: gateway
+  rpc GetCannedResponse(InboxGetCannedResponseRequest) returns (InboxGetCannedResponseResponse);
+
+  // List canned responses for a workspace.
+  // Called by: gateway (on behalf of any workspace member)
+  rpc ListCannedResponses(InboxListCannedResponsesRequest) returns (InboxListCannedResponsesResponse);
+
+  // Update a canned response.
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc UpdateCannedResponse(InboxUpdateCannedResponseRequest) returns (InboxUpdateCannedResponseResponse);
+
+  // Delete a canned response.
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc DeleteCannedResponse(InboxDeleteCannedResponseRequest) returns (InboxDeleteCannedResponseResponse);
+}
+
+// ======================================================================
+// Conversation Messages
+// ======================================================================
+
+message InboxListConversationsRequest {
+  string workspace_id = 1;
+  // Filter by conversation status. UNSPECIFIED = all.
+  ConversationStatus status = 2;
+  // Filter by assigned agent user ID. Empty = all.
+  string assigned_to = 3;
+  // Filter by WA number.
+  string wa_number_id = 4;
+  // Search by contact name or phone.
+  string search = 5;
+  // Sort order. Default: last_message_at DESC.
+  ConversationSortOrder sort_order = 6;
+  PageRequest pagination = 7;
+}
+
+// ConversationSortOrder controls the list order.
+enum ConversationSortOrder {
+  CONVERSATION_SORT_ORDER_UNSPECIFIED = 0;
+  // Most recent message first (default for inbox view).
+  CONVERSATION_SORT_ORDER_LAST_MESSAGE_DESC = 1;
+  // Oldest message first (useful for queue processing).
+  CONVERSATION_SORT_ORDER_LAST_MESSAGE_ASC = 2;
+  // Newest conversations first.
+  CONVERSATION_SORT_ORDER_CREATED_DESC = 3;
+}
+
+message InboxListConversationsResponse {
+  repeated Conversation conversations = 1;
+  PageResponse pagination = 2;
+}
+
+message InboxGetConversationRequest {
+  string id = 1;
+}
+
+message InboxGetConversationResponse {
+  Conversation conversation = 1;
+  Contact contact = 2;
+  WaNumber wa_number = 3;
+  // Most recent messages (e.g. last 20) for initial chat view.
+  repeated Message recent_messages = 4;
+}
+
+message InboxClaimConversationRequest {
+  string id = 1;
+  // User ID of the agent claiming. Set by gateway from JWT.
+  string user_id = 2;
+}
+
+message InboxClaimConversationResponse {
+  Conversation conversation = 1;
+}
+
+message InboxTransferConversationRequest {
+  string id = 1;
+  // User ID of the agent transferring from (caller). Set by gateway from JWT.
+  string from_user_id = 2;
+  // User ID of the target agent.
+  string to_user_id = 3;
+}
+
+message InboxTransferConversationResponse {
+  Conversation conversation = 1;
+}
+
+message InboxCloseConversationRequest {
+  string id = 1;
+  // User ID of the agent closing. Set by gateway from JWT.
+  string user_id = 2;
+}
+
+message InboxCloseConversationResponse {
+  Conversation conversation = 1;
+}
+
+// ======================================================================
+// Message Messages
+// ======================================================================
+
+message InboxListMessagesRequest {
+  string conversation_id = 1;
+  // Cursor-based pagination: fetch messages before this message ID (for "load more").
+  string before_message_id = 2;
+  // Standard page-based pagination (used for initial load).
+  PageRequest pagination = 3;
+}
+
+message InboxListMessagesResponse {
+  repeated Message messages = 1;
+  PageResponse pagination = 2;
+  // True if there are older messages to load.
+  bool has_more = 3;
+}
+
+message InboxSendMessageRequest {
+  string conversation_id = 1;
+  ContentType content_type = 2;
+  // Text body. Required for TEXT.
+  string body = 3;
+  // Media URL. Required for non-TEXT types.
+  string media_url = 4;
+  // User ID of the sender agent. Set by gateway from JWT.
+  string sender_user_id = 5;
+}
+
+message InboxSendMessageResponse {
+  // The message record created in the DB (status = PENDING until WA confirms).
+  Message message = 1;
+}
+
+message InboxSearchMessagesRequest {
+  string workspace_id = 1;
+  // Full-text search query (searched against message body).
+  string query = 2;
+  // Optional: limit search to a specific conversation.
+  string conversation_id = 3;
+  // Optional: limit search to a date range.
+  google.protobuf.Timestamp from_date = 4;
+  google.protobuf.Timestamp to_date = 5;
+  PageRequest pagination = 6;
+}
+
+// InboxSearchHit is a message matched by full-text search with context.
+message InboxSearchHit {
+  Message message = 1;
+  string conversation_id = 2;
+  // Contact name for display context.
+  string contact_name = 3;
+  string contact_phone = 4;
+  // Highlighted snippet showing the matched text.
+  string highlight = 5;
+}
+
+message InboxSearchMessagesResponse {
+  repeated InboxSearchHit hits = 1;
+  PageResponse pagination = 2;
+}
+
+// ======================================================================
+// Canned Response Messages
+// ======================================================================
+
+message InboxCreateCannedResponseRequest {
+  string workspace_id = 1;
+  // Trigger shortcut (e.g. "/greeting"). Must be unique within workspace.
+  string shortcut = 2;
+  // Response body text.
+  string body = 3;
+  // User who created this canned response.
+  string created_by = 4;
+}
+
+message InboxCreateCannedResponseResponse {
+  CannedResponse canned_response = 1;
+}
+
+message InboxGetCannedResponseRequest {
+  string id = 1;
+}
+
+message InboxGetCannedResponseResponse {
+  CannedResponse canned_response = 1;
+}
+
+message InboxListCannedResponsesRequest {
+  string workspace_id = 1;
+  // Optional search by shortcut or body content.
+  string search = 2;
+  PageRequest pagination = 3;
+}
+
+message InboxListCannedResponsesResponse {
+  repeated CannedResponse canned_responses = 1;
+  PageResponse pagination = 2;
+}
+
+message InboxUpdateCannedResponseRequest {
+  string id = 1;
+  string shortcut = 2;
+  string body = 3;
+}
+
+message InboxUpdateCannedResponseResponse {
+  CannedResponse canned_response = 1;
+}
+
+message InboxDeleteCannedResponseRequest {
+  string id = 1;
+}
+
+message InboxDeleteCannedResponseResponse {}
+
+// ======================================================================
+// Contact Campaign History Messages
+// ======================================================================
+
+message InboxGetContactCampaignHistoryRequest {
+  string contact_id = 1;
+  PageRequest pagination = 2;
+}
+
+message InboxGetContactCampaignHistoryResponse {
+  repeated InboxContactCampaignSummary campaigns = 1;
+  PageResponse pagination = 2;
+}
+
+// InboxContactCampaignSummary shows one campaign a contact participated in.
+message InboxContactCampaignSummary {
+  string campaign_id = 1;
+  string campaign_name = 2;
+  string template_id = 3;
+  string template_name = 4;
+  // The resolved message body sent to this contact.
+  string resolved_body = 5;
+  ContactSendStatus status = 6;
+  google.protobuf.Timestamp sent_at = 7;
+  google.protobuf.Timestamp delivered_at = 8;
+}
