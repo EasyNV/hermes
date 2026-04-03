@@ -1,0 +1,325 @@
+syntax = "proto3";
+
+package hermes.v1;
+
+option go_package = "github.com/hermes-waba/hermes/gen/go/hermes/v1;hermesv1";
+
+import "google/protobuf/timestamp.proto";
+import "proto/common.proto";
+
+// ======================================================================
+// HermesCampaign — campaign lifecycle management and send orchestration.
+//
+// Owns: campaigns, campaign_numbers, campaign_contacts, templates tables.
+// Called by: hermes-gateway (gRPC for CRUD ops)
+// Publishes: campaign.status, campaign.progress, wa.send.campaign (send tasks)
+// Consumes: wa.message.inbound (reply tracking), wa.ban (auto-pause logic)
+// ======================================================================
+service HermesCampaign {
+
+  // ──────────────────────────────────────────────────────────────
+  // Campaign CRUD
+  // ──────────────────────────────────────────────────────────────
+
+  // Create a new campaign in DRAFT status.
+  // Called by: gateway (on behalf of workspace_admin/tenant_admin/superadmin)
+  rpc CreateCampaign(CampaignCreateRequest) returns (CampaignCreateResponse);
+
+  // Get a campaign by ID with aggregated stats.
+  // Called by: gateway
+  rpc GetCampaign(CampaignGetRequest) returns (CampaignGetResponse);
+
+  // List campaigns for a workspace with optional status filter.
+  // Called by: gateway
+  rpc ListCampaigns(CampaignListRequest) returns (CampaignListResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // Campaign Lifecycle
+  // ──────────────────────────────────────────────────────────────
+
+  // Start a DRAFT or SCHEDULED campaign. Validates that numbers and contacts
+  // are assigned, then transitions to RUNNING and begins dispatching send tasks.
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc StartCampaign(CampaignStartRequest) returns (CampaignStartResponse);
+
+  // Pause a RUNNING campaign. Stops dispatching new send tasks.
+  // Messages already in the NATS queue will be processed by WA pods.
+  // Called by: gateway, or internally on ban threshold breach.
+  rpc PauseCampaign(CampaignPauseRequest) returns (CampaignPauseResponse);
+
+  // Resume a PAUSED campaign. Resumes dispatching from where it stopped.
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc ResumeCampaign(CampaignResumeRequest) returns (CampaignResumeResponse);
+
+  // Cancel a campaign (terminal state). Cannot be resumed.
+  // Pending send tasks are cancelled. Already-sent messages are not affected.
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc CancelCampaign(CampaignCancelRequest) returns (CampaignCancelResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // Campaign Numbers & Contacts
+  // ──────────────────────────────────────────────────────────────
+
+  // Add or remove WA numbers assigned to a campaign.
+  // Only allowed when campaign is in DRAFT or PAUSED status.
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc UpdateCampaignNumbers(CampaignUpdateNumbersRequest) returns (CampaignUpdateNumbersResponse);
+
+  // Add or remove contacts assigned to a campaign.
+  // Only allowed when campaign is in DRAFT or PAUSED status.
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc UpdateCampaignContacts(CampaignUpdateContactsRequest) returns (CampaignUpdateContactsResponse);
+
+  // List contacts in a campaign with their individual send status.
+  // Called by: gateway
+  rpc ListCampaignContacts(CampaignListContactsRequest) returns (CampaignListContactsResponse);
+
+  // List numbers assigned to a campaign with their per-campaign stats.
+  // Called by: gateway
+  rpc ListCampaignNumbers(CampaignListNumbersRequest) returns (CampaignListNumbersResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // Template CRUD
+  // ──────────────────────────────────────────────────────────────
+
+  // Create a message template with spintax and variable placeholders.
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc CreateTemplate(TemplateCreateRequest) returns (TemplateCreateResponse);
+
+  // Get a template by ID.
+  // Called by: gateway
+  rpc GetTemplate(TemplateGetRequest) returns (TemplateGetResponse);
+
+  // List templates for a workspace.
+  // Called by: gateway
+  rpc ListTemplates(TemplateListRequest) returns (TemplateListResponse);
+
+  // Update a template. Cannot update templates used by RUNNING campaigns.
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc UpdateTemplate(TemplateUpdateRequest) returns (TemplateUpdateResponse);
+
+  // Delete a template. Cannot delete templates used by active campaigns.
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc DeleteTemplate(TemplateDeleteRequest) returns (TemplateDeleteResponse);
+
+  // Preview a template with sample variables to see resolved output.
+  // Called by: gateway (on behalf of any workspace member)
+  rpc PreviewTemplate(TemplatePreviewRequest) returns (TemplatePreviewResponse);
+}
+
+// ======================================================================
+// Campaign CRUD Messages
+// ======================================================================
+
+message CampaignCreateRequest {
+  string workspace_id = 1;
+  string template_id = 2;
+  string name = 3;
+  // Optional scheduled start time. If empty, starts immediately on StartCampaign.
+  google.protobuf.Timestamp schedule_at = 4;
+  // Max messages per number per day. 0 = use workspace default.
+  int32 daily_cap_per_num = 5;
+  // Bans that trigger auto-pause. 0 = disabled.
+  int32 ban_pause_threshold = 6;
+  RotationStrategy rotation_strategy = 7;
+  // Min delay between consecutive sends from the same number (ms).
+  int32 delay_min_ms = 8;
+  // Max delay between consecutive sends from the same number (ms).
+  int32 delay_max_ms = 9;
+  // WA number IDs to assign.
+  repeated string wa_number_ids = 10;
+  // Contact IDs to include.
+  repeated string contact_ids = 11;
+  // User who created this campaign.
+  string created_by = 12;
+}
+
+message CampaignCreateResponse {
+  Campaign campaign = 1;
+}
+
+message CampaignGetRequest {
+  string id = 1;
+}
+
+message CampaignGetResponse {
+  Campaign campaign = 1;
+  repeated CampaignNumber numbers = 2;
+  Template template = 3;
+}
+
+message CampaignListRequest {
+  string workspace_id = 1;
+  CampaignStatus status = 2;
+  PageRequest pagination = 3;
+}
+
+message CampaignListResponse {
+  repeated Campaign campaigns = 1;
+  PageResponse pagination = 2;
+}
+
+// ======================================================================
+// Campaign Lifecycle Messages
+// ======================================================================
+
+message CampaignStartRequest {
+  string id = 1;
+}
+
+message CampaignStartResponse {
+  Campaign campaign = 1;
+}
+
+message CampaignPauseRequest {
+  string id = 1;
+  // Reason for pause (manual, ban_threshold, daily_cap).
+  string reason = 2;
+}
+
+message CampaignPauseResponse {
+  Campaign campaign = 1;
+}
+
+message CampaignResumeRequest {
+  string id = 1;
+}
+
+message CampaignResumeResponse {
+  Campaign campaign = 1;
+}
+
+message CampaignCancelRequest {
+  string id = 1;
+}
+
+message CampaignCancelResponse {
+  Campaign campaign = 1;
+}
+
+// ======================================================================
+// Campaign Numbers & Contacts Messages
+// ======================================================================
+
+message CampaignUpdateNumbersRequest {
+  string campaign_id = 1;
+  repeated string add_wa_number_ids = 2;
+  repeated string remove_wa_number_ids = 3;
+}
+
+message CampaignUpdateNumbersResponse {
+  Campaign campaign = 1;
+  repeated CampaignNumber numbers = 2;
+}
+
+message CampaignUpdateContactsRequest {
+  string campaign_id = 1;
+  repeated string add_contact_ids = 2;
+  repeated string remove_contact_ids = 3;
+}
+
+message CampaignUpdateContactsResponse {
+  Campaign campaign = 1;
+  // Updated total contact count.
+  int32 total_contacts = 2;
+}
+
+message CampaignListContactsRequest {
+  string campaign_id = 1;
+  ContactSendStatus status = 2;
+  PageRequest pagination = 3;
+}
+
+// CampaignContactRow is an enriched view of a campaign contact with contact details.
+message CampaignContactRow {
+  CampaignContact campaign_contact = 1;
+  // Denormalized contact info for display.
+  string contact_name = 2;
+  string contact_phone = 3;
+}
+
+message CampaignListContactsResponse {
+  repeated CampaignContactRow contacts = 1;
+  PageResponse pagination = 2;
+}
+
+message CampaignListNumbersRequest {
+  string campaign_id = 1;
+  PageRequest pagination = 2;
+}
+
+message CampaignListNumbersResponse {
+  repeated CampaignNumber numbers = 1;
+  PageResponse pagination = 2;
+}
+
+// ======================================================================
+// Template CRUD Messages
+// ======================================================================
+
+message TemplateCreateRequest {
+  string workspace_id = 1;
+  string name = 2;
+  // Body with optional spintax (e.g. "{Hello|Hi} {{name}}") and variable placeholders.
+  string body = 3;
+  // Media URL for image/document/audio/video attachment.
+  string media_url = 4;
+  // MIME type of media (e.g. "image/jpeg"). Required if media_url is set.
+  string media_type = 5;
+  // User who created this template.
+  string created_by = 6;
+}
+
+message TemplateCreateResponse {
+  Template template = 1;
+}
+
+message TemplateGetRequest {
+  string id = 1;
+}
+
+message TemplateGetResponse {
+  Template template = 1;
+}
+
+message TemplateListRequest {
+  string workspace_id = 1;
+  string search = 2;
+  PageRequest pagination = 3;
+}
+
+message TemplateListResponse {
+  repeated Template templates = 1;
+  PageResponse pagination = 2;
+}
+
+message TemplateUpdateRequest {
+  string id = 1;
+  string name = 2;
+  string body = 3;
+  string media_url = 4;
+  string media_type = 5;
+}
+
+message TemplateUpdateResponse {
+  Template template = 1;
+}
+
+message TemplateDeleteRequest {
+  string id = 1;
+}
+
+message TemplateDeleteResponse {}
+
+message TemplatePreviewRequest {
+  string id = 1;
+  // Sample variable values for preview (e.g. {"name": "John", "company": "Acme"}).
+  map<string, string> variables = 2;
+}
+
+message TemplatePreviewResponse {
+  // Resolved message body with variables substituted and spintax resolved.
+  string resolved_body = 1;
+  // Media URL (unchanged from template).
+  string media_url = 2;
+}

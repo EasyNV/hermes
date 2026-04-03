@@ -1,0 +1,331 @@
+syntax = "proto3";
+
+package hermes.v1;
+
+option go_package = "github.com/hermes-waba/hermes/gen/go/hermes/v1;hermesv1";
+
+import "google/protobuf/timestamp.proto";
+import "proto/common.proto";
+
+// ======================================================================
+// NATS JetStream Event Payloads
+//
+// These messages define the payloads for all async events published
+// to NATS JetStream. Each message corresponds to a specific NATS subject.
+// See EVENTS.md for subject patterns, publishers, consumers, and stream config.
+//
+// All events include a common envelope (EventMeta) for tracing and dedup.
+// ======================================================================
+
+// EventMeta is included in every event for tracing, dedup, and ordering.
+message EventMeta {
+  // Unique event ID (UUID). Used as NATS Nats-Msg-Id for deduplication.
+  string event_id = 1;
+  // Tenant that this event belongs to.
+  string tenant_id = 2;
+  // ISO 8601 timestamp of when the event was produced.
+  google.protobuf.Timestamp timestamp = 3;
+  // Distributed trace ID (propagated from the originating request).
+  string trace_id = 4;
+  // Name of the service that produced this event.
+  string source = 5;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// wa.message.inbound.{tenant_id}
+// Publisher: hermes-wa
+// Consumers: hermes-inbox, hermes-campaign, hermes-notify
+// ──────────────────────────────────────────────────────────────────
+
+// WaInboundMessageEvent is published when a message is received from a contact.
+message WaInboundMessageEvent {
+  EventMeta meta = 1;
+  // WA number that received the message.
+  string wa_number_id = 2;
+  // Sender JID (e.g. "6281234567890@s.whatsapp.net").
+  string sender_jid = 3;
+  // Sender phone (E.164).
+  string sender_phone = 4;
+  // WhatsApp-assigned message ID.
+  string wa_message_id = 5;
+  ContentType content_type = 6;
+  // Text body (for TEXT messages).
+  string body = 7;
+  // Media URL (for media messages — downloaded and stored by WA service).
+  string media_url = 8;
+  // MIME type of media (if applicable).
+  string mime_type = 9;
+  // Sender's display name (push name from WhatsApp).
+  string sender_name = 10;
+  // Timestamp from WhatsApp (when the message was actually sent by the contact).
+  google.protobuf.Timestamp wa_timestamp = 11;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// wa.message.outbound.{tenant_id}
+// Publisher: hermes-wa
+// Consumers: hermes-inbox (update message status), hermes-campaign (delivery tracking)
+// ──────────────────────────────────────────────────────────────────
+
+// WaOutboundStatusEvent is published when the delivery status of an outbound message changes
+// (sent → delivered → read → failed).
+message WaOutboundStatusEvent {
+  EventMeta meta = 1;
+  string wa_number_id = 2;
+  // WhatsApp message ID.
+  string wa_message_id = 3;
+  // Recipient JID.
+  string recipient_jid = 4;
+  // New status of the message.
+  MessageStatus status = 5;
+  // Error description if status is FAILED.
+  string error = 6;
+  // Timestamp of the status change from WhatsApp.
+  google.protobuf.Timestamp wa_timestamp = 7;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// wa.send.campaign.{tenant_id}
+// Publisher: hermes-campaign
+// Consumer: hermes-wa
+// ──────────────────────────────────────────────────────────────────
+
+// CampaignSendTask is a work item published by the campaign service for the WA service
+// to process. Each task represents one message to one contact.
+message CampaignSendTask {
+  EventMeta meta = 1;
+  // Campaign that this send belongs to.
+  string campaign_id = 2;
+  // Contact to send to.
+  string contact_id = 3;
+  // WA number to send from (selected by rotation strategy).
+  string wa_number_id = 4;
+  // Recipient JID.
+  string recipient_jid = 5;
+  // Recipient phone (for logging/error reporting).
+  string recipient_phone = 6;
+  // Resolved message body (spintax resolved, variables substituted).
+  string resolved_body = 7;
+  // Media URL (from template, if any).
+  string media_url = 8;
+  // MIME type of media.
+  string media_type = 9;
+  // Typing duration in ms (pre-calculated by campaign service based on body length).
+  int32 typing_duration_ms = 10;
+  // Delay after send in ms (randomized by campaign service within delay_min/max range).
+  int32 post_send_delay_ms = 11;
+  // Template ID (for tracking/audit).
+  string template_id = 12;
+  // Resolved variables as JSON (for message reconstruction).
+  string resolved_vars_json = 13;
+  // Idempotency key = campaign_id + contact_id (prevents double sends on retry).
+  string idempotency_key = 14;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// wa.send.manual.{tenant_id}
+// Publisher: hermes-inbox
+// Consumer: hermes-wa
+// ──────────────────────────────────────────────────────────────────
+
+// ManualSendTask is published when an agent sends a reply from the inbox.
+message ManualSendTask {
+  EventMeta meta = 1;
+  // Conversation this message belongs to.
+  string conversation_id = 2;
+  // Hermès message ID (created by inbox service, status = PENDING).
+  string message_id = 3;
+  // WA number to send from.
+  string wa_number_id = 4;
+  // Recipient JID.
+  string recipient_jid = 5;
+  ContentType content_type = 6;
+  string body = 7;
+  string media_url = 8;
+  // Agent who sent the message (for audit).
+  string sender_user_id = 9;
+  // Idempotency key = message_id.
+  string idempotency_key = 10;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// wa.ban.{tenant_id}
+// Publisher: hermes-wa
+// Consumers: hermes-campaign (auto-pause check), hermes-proxy (flag proxy)
+// ──────────────────────────────────────────────────────────────────
+
+// WaBanEvent is published when a WA number is detected as banned.
+message WaBanEvent {
+  EventMeta meta = 1;
+  // The banned WA number.
+  string wa_number_id = 2;
+  string jid = 3;
+  string phone = 4;
+  // Proxy that was in use when the ban occurred.
+  string proxy_id = 5;
+  // Pod that detected the ban.
+  string pod_id = 6;
+  // Reason code from WhatsApp (if available).
+  string wa_reason = 7;
+  // Timestamp when the ban was detected.
+  google.protobuf.Timestamp detected_at = 8;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// wa.connection.{tenant_id}
+// Publisher: hermes-wa
+// Consumers: hermes-gateway (WebSocket push to frontend)
+// ──────────────────────────────────────────────────────────────────
+
+// WaConnectionEvent is published when a WA session connects or disconnects.
+message WaConnectionEvent {
+  EventMeta meta = 1;
+  string wa_number_id = 2;
+  string jid = 3;
+  string phone = 4;
+  // New connection state.
+  WaConnectionState state = 5;
+  // Pod hosting the session.
+  string pod_id = 6;
+  // Reason for disconnection (if state = DISCONNECTED).
+  string reason = 7;
+}
+
+// WaConnectionState represents connection lifecycle transitions.
+enum WaConnectionState {
+  WA_CONNECTION_STATE_UNSPECIFIED = 0;
+  WA_CONNECTION_STATE_CONNECTED = 1;
+  WA_CONNECTION_STATE_DISCONNECTED = 2;
+  WA_CONNECTION_STATE_QR_READY = 3;
+  WA_CONNECTION_STATE_LOGGED_OUT = 4;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// wa.presence.{tenant_id} (Phase 3)
+// Publisher: hermes-wa
+// Consumers: hermes-gateway (WebSocket push to frontend)
+// ──────────────────────────────────────────────────────────────────
+
+// WaPresenceEvent is published when a contact's typing indicator is detected.
+message WaPresenceEvent {
+  EventMeta meta = 1;
+  // WA number that received the presence event.
+  string wa_number_id = 2;
+  // Contact JID who is typing.
+  string contact_jid = 3;
+  // True if the contact is typing, false if they stopped.
+  bool is_composing = 4;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// campaign.status.{tenant_id}
+// Publisher: hermes-campaign
+// Consumers: hermes-gateway (WebSocket push to frontend)
+// ──────────────────────────────────────────────────────────────────
+
+// CampaignStatusEvent is published when a campaign transitions state.
+message CampaignStatusEvent {
+  EventMeta meta = 1;
+  string campaign_id = 2;
+  string workspace_id = 3;
+  // Previous status.
+  CampaignStatus previous_status = 4;
+  // New status.
+  CampaignStatus new_status = 5;
+  // Reason for the transition (e.g. "manual_start", "ban_threshold", "completed", "manual_cancel").
+  string reason = 6;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// campaign.progress.{tenant_id}
+// Publisher: hermes-campaign
+// Consumers: hermes-gateway (WebSocket push to frontend dashboard)
+// ──────────────────────────────────────────────────────────────────
+
+// CampaignProgressEvent is published periodically (every N sends or every M seconds)
+// to update the real-time campaign progress on the dashboard.
+message CampaignProgressEvent {
+  EventMeta meta = 1;
+  string campaign_id = 2;
+  string workspace_id = 3;
+  int32 total_contacts = 4;
+  int32 sent_count = 5;
+  int32 delivered_count = 6;
+  int32 failed_count = 7;
+  int32 replied_count = 8;
+  int32 banned_count = 9;
+  // Percentage complete (0-100).
+  float progress_percent = 10;
+  // Current send rate (messages per minute).
+  float send_rate_per_min = 11;
+  // Estimated time remaining in seconds.
+  int32 eta_seconds = 12;
+  // Per-number breakdown for campaign dashboard.
+  repeated CampaignNumberProgress number_progress = 13;
+}
+
+// CampaignNumberProgress shows per-number stats within a campaign progress update.
+message CampaignNumberProgress {
+  string wa_number_id = 1;
+  string phone = 2;
+  WaNumberStatus status = 3;
+  int32 sent_count = 4;
+  int32 failed_count = 5;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// contacts.import.done.{tenant_id}
+// Publisher: hermes-contacts
+// Consumers: hermes-gateway (WebSocket push — import complete notification)
+// ──────────────────────────────────────────────────────────────────
+
+// ContactsImportDoneEvent is published when a CSV import completes.
+message ContactsImportDoneEvent {
+  EventMeta meta = 1;
+  // User who initiated the import.
+  string imported_by = 2;
+  // Original filename.
+  string filename = 3;
+  int32 imported_count = 4;
+  int32 skipped_count = 5;
+  int32 updated_count = 6;
+  int32 failed_count = 7;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// notify.dispatch.{tenant_id}
+// Publisher: hermes-inbox, hermes-campaign
+// Consumer: hermes-notify
+// ──────────────────────────────────────────────────────────────────
+
+// NotifyDispatchEvent requests the notify service to send a notification.
+message NotifyDispatchEvent {
+  EventMeta meta = 1;
+  // Target workspace (determines which notification configs to use).
+  string workspace_id = 2;
+  // Notification category (determines content/formatting).
+  NotifyCategory category = 3;
+  // Human-readable title (e.g. "New message from +62812...").
+  string title = 4;
+  // Notification body text.
+  string body = 5;
+  // Optional metadata as JSON (varies by category).
+  string metadata_json = 6;
+}
+
+// NotifyCategory classifies the notification for routing and formatting.
+enum NotifyCategory {
+  NOTIFY_CATEGORY_UNSPECIFIED = 0;
+  // New inbound message in an unassigned conversation.
+  NOTIFY_CATEGORY_NEW_MESSAGE = 1;
+  // A WA number was banned.
+  NOTIFY_CATEGORY_BAN_DETECTED = 2;
+  // Campaign was auto-paused (ban threshold reached).
+  NOTIFY_CATEGORY_CAMPAIGN_PAUSED = 3;
+  // Campaign completed all sends.
+  NOTIFY_CATEGORY_CAMPAIGN_COMPLETED = 4;
+  // Contact import finished.
+  NOTIFY_CATEGORY_IMPORT_DONE = 5;
+  // Proxy pool critically low.
+  NOTIFY_CATEGORY_PROXY_POOL_LOW = 6;
+}

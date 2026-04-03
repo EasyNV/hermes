@@ -1,0 +1,252 @@
+syntax = "proto3";
+
+package hermes.v1;
+
+option go_package = "github.com/hermes-waba/hermes/gen/go/hermes/v1;hermesv1";
+
+import "google/protobuf/timestamp.proto";
+import "proto/common.proto";
+
+// ======================================================================
+// HermesProxy — proxy pool management and health monitoring.
+//
+// Owns: proxies table.
+// Called by: hermes-gateway (gRPC for CRUD), hermes-wa (gRPC for proxy lookup on connect)
+// Publishes: (none — proxy state changes are reflected via gRPC responses)
+// Consumes: wa.ban.{tenant_id} (flags proxies associated with banned numbers)
+// ======================================================================
+service HermesProxy {
+
+  // Add one or more proxies to a tenant's pool. Deduplicates by (host, port, tenant_id).
+  // Called by: gateway (on behalf of tenant_admin/superadmin)
+  rpc AddProxies(ProxyAddRequest) returns (ProxyAddResponse);
+
+  // List proxies for a tenant with optional status filter.
+  // Called by: gateway (on behalf of tenant_admin/superadmin)
+  rpc ListProxies(ProxyListRequest) returns (ProxyListResponse);
+
+  // Get a single proxy by ID.
+  // Called by: gateway, wa service (to fetch proxy details for session connection)
+  rpc GetProxy(ProxyGetRequest) returns (ProxyGetResponse);
+
+  // Update proxy details (host, port, credentials, type, status).
+  // Called by: gateway (on behalf of tenant_admin/superadmin)
+  rpc UpdateProxy(ProxyUpdateRequest) returns (ProxyUpdateResponse);
+
+  // Delete a proxy. Fails if the proxy is assigned to any active WA numbers
+  // (must unassign first).
+  // Called by: gateway (on behalf of tenant_admin/superadmin)
+  rpc DeleteProxy(ProxyDeleteRequest) returns (ProxyDeleteResponse);
+
+  // Assign a proxy to a WA number (sticky assignment for session lifetime).
+  // Called by: gateway (on behalf of tenant_admin/superadmin), wa-controller (auto-assignment)
+  rpc AssignProxy(ProxyAssignRequest) returns (ProxyAssignResponse);
+
+  // Unassign a proxy from a WA number.
+  // Called by: gateway, wa-controller (during rebalancing)
+  rpc UnassignProxy(ProxyUnassignRequest) returns (ProxyUnassignResponse);
+
+  // Run a health check on a specific proxy (latency test, connectivity).
+  // Called by: gateway (on behalf of tenant_admin/superadmin)
+  rpc GetProxyHealth(ProxyGetHealthRequest) returns (ProxyGetHealthResponse);
+
+  // Run health checks on all proxies in a tenant's pool.
+  // Called by: cron job / scheduled task
+  rpc CheckAllProxies(ProxyCheckAllRequest) returns (ProxyCheckAllResponse);
+
+  // Flag a proxy as problematic (e.g. high ban rate on numbers using it).
+  // Sets status to FLAGGED. Called internally by the ban event consumer.
+  // Called by: proxy service internal (on wa.ban event), gateway (manual flag)
+  rpc FlagProxy(ProxyFlagRequest) returns (ProxyFlagResponse);
+
+  // Get the best available proxy for auto-assignment.
+  // Sorts by cleanest first (ban_count ASC), then least loaded (assigned_count ASC).
+  // Refuses if all active proxies are at tenant's max_numbers_per_proxy capacity.
+  // Called by: wa-controller (when connecting a new number without explicit proxy)
+  rpc GetBestProxy(ProxyGetBestRequest) returns (ProxyGetBestResponse);
+}
+
+// ======================================================================
+// Add Proxies
+// ======================================================================
+
+message ProxyAddInput {
+  string host = 1;
+  int32 port = 2;
+  string username = 3;
+  string password = 4;
+  ProxyType type = 5;
+}
+
+message ProxyAddRequest {
+  string tenant_id = 1;
+  repeated ProxyAddInput proxies = 2;
+}
+
+message ProxyAddResponse {
+  // Successfully added proxies.
+  repeated Proxy proxies = 1;
+  // Count of duplicates that were skipped.
+  int32 skipped_count = 2;
+  // Details of skipped duplicates.
+  repeated ProxySkipDetail skipped = 3;
+}
+
+message ProxySkipDetail {
+  string host = 1;
+  int32 port = 2;
+  string reason = 3;
+}
+
+// ======================================================================
+// List / Get
+// ======================================================================
+
+message ProxyListRequest {
+  string tenant_id = 1;
+  // Filter by status. UNSPECIFIED = all.
+  ProxyStatus status = 2;
+  // Filter by type. UNSPECIFIED = all.
+  ProxyType type = 3;
+  PageRequest pagination = 4;
+}
+
+message ProxyListResponse {
+  repeated Proxy proxies = 1;
+  PageResponse pagination = 2;
+}
+
+message ProxyGetRequest {
+  string id = 1;
+}
+
+message ProxyGetResponse {
+  Proxy proxy = 1;
+  // WA numbers currently assigned to this proxy.
+  repeated WaNumberSummary assigned_numbers = 2;
+}
+
+// WaNumberSummary is a lightweight view of a WA number for proxy assignment display.
+message WaNumberSummary {
+  string id = 1;
+  string phone = 2;
+  string display_name = 3;
+  WaNumberStatus status = 4;
+}
+
+// ======================================================================
+// Update / Delete
+// ======================================================================
+
+message ProxyUpdateRequest {
+  string id = 1;
+  string host = 2;
+  int32 port = 3;
+  string username = 4;
+  string password = 5;
+  ProxyType type = 6;
+  // Explicitly set status (e.g. reactivate a FLAGGED proxy after investigation).
+  ProxyStatus status = 7;
+}
+
+message ProxyUpdateResponse {
+  Proxy proxy = 1;
+}
+
+message ProxyDeleteRequest {
+  string id = 1;
+  // Force delete even if assigned to numbers (unassigns them first).
+  bool force = 2;
+}
+
+message ProxyDeleteResponse {
+  // Number of WA numbers that were unassigned (if force = true).
+  int32 unassigned_count = 1;
+}
+
+// ======================================================================
+// Assignment
+// ======================================================================
+
+message ProxyAssignRequest {
+  // WA number to assign the proxy to.
+  string wa_number_id = 1;
+  // Proxy to assign.
+  string proxy_id = 2;
+}
+
+message ProxyAssignResponse {
+  Proxy proxy = 1;
+  // Updated assigned_count on the proxy.
+  int32 assigned_count = 2;
+}
+
+message ProxyUnassignRequest {
+  string wa_number_id = 1;
+}
+
+message ProxyUnassignResponse {}
+
+// ======================================================================
+// Health Check
+// ======================================================================
+
+message ProxyGetHealthRequest {
+  string id = 1;
+}
+
+message ProxyGetHealthResponse {
+  Proxy proxy = 1;
+  // TCP connection latency in milliseconds.
+  int32 latency_ms = 2;
+  // Whether the proxy accepted a connection.
+  bool reachable = 3;
+  // Whether the proxy can route traffic to the internet (tested via HTTP probe).
+  bool can_route = 4;
+  // External IP as seen through the proxy.
+  string external_ip = 5;
+  google.protobuf.Timestamp checked_at = 6;
+}
+
+message ProxyCheckAllRequest {
+  string tenant_id = 1;
+}
+
+message ProxyCheckAllResponse {
+  int32 total = 1;
+  int32 healthy = 2;
+  int32 dead = 3;
+  int32 flagged = 4;
+}
+
+// ======================================================================
+// Flag
+// ======================================================================
+
+message ProxyFlagRequest {
+  string id = 1;
+  // Reason for flagging (e.g. "high_ban_rate", "manual").
+  string reason = 2;
+}
+
+message ProxyFlagResponse {
+  Proxy proxy = 1;
+}
+
+// ======================================================================
+// Auto-Assignment
+// ======================================================================
+
+message ProxyGetBestRequest {
+  string tenant_id = 1;
+  // Preferred proxy type. UNSPECIFIED = any.
+  ProxyType type = 2;
+}
+
+message ProxyGetBestResponse {
+  // The best available proxy: cleanest (lowest ban_count), then least loaded.
+  // Empty if no active proxies available.
+  Proxy proxy = 1;
+  // True if all active proxies have reached max_numbers_per_proxy capacity.
+  bool pool_exhausted = 2;
+}

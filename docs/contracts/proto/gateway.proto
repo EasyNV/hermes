@@ -1,0 +1,1343 @@
+syntax = "proto3";
+
+package hermes.v1;
+
+option go_package = "github.com/hermes-waba/hermes/gen/go/hermes/v1;hermesv1";
+
+import "google/protobuf/timestamp.proto";
+import "proto/common.proto";
+
+// ======================================================================
+// HermesGateway — the frontend-facing API service.
+//
+// This is the ONLY service the frontend (hermes-web) communicates with.
+// Gateway handles authentication, authorization (RBAC), and fans out
+// requests to internal microservices via gRPC.
+//
+// WebSocket connections are also terminated at the gateway, which
+// subscribes to NATS subjects and pushes real-time events to clients.
+// ======================================================================
+service HermesGateway {
+
+  // ──────────────────────────────────────────────────────────────
+  // Auth
+  // ──────────────────────────────────────────────────────────────
+
+  // Authenticate a user with email + password. Returns JWT access + refresh tokens.
+  // Roles: any (unauthenticated)
+  rpc Login(LoginRequest) returns (LoginResponse);
+
+  // Exchange a valid refresh token for a new access + refresh token pair.
+  // Roles: any (with valid refresh token)
+  rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
+
+  // Invalidate the current session's refresh token.
+  // Roles: any authenticated user
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+
+  // Return the currently authenticated user's profile and permissions.
+  // Roles: any authenticated user
+  rpc GetMe(GetMeRequest) returns (GetMeResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // Tenant Management
+  // ──────────────────────────────────────────────────────────────
+
+  // Create a new tenant.
+  // Roles: superadmin
+  rpc CreateTenant(CreateTenantRequest) returns (CreateTenantResponse);
+
+  // Get a tenant by ID.
+  // Roles: superadmin, tenant_admin (own tenant)
+  rpc GetTenant(GetTenantRequest) returns (GetTenantResponse);
+
+  // List all tenants (superadmin) or the caller's tenant.
+  // Roles: superadmin (all), tenant_admin (own)
+  rpc ListTenants(ListTenantsRequest) returns (ListTenantsResponse);
+
+  // Update tenant settings.
+  // Roles: superadmin, tenant_admin (own tenant)
+  rpc UpdateTenant(UpdateTenantRequest) returns (UpdateTenantResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // Workspace Management
+  // ──────────────────────────────────────────────────────────────
+
+  // Create a workspace under a tenant.
+  // Roles: superadmin, tenant_admin
+  rpc CreateWorkspace(CreateWorkspaceRequest) returns (CreateWorkspaceResponse);
+
+  // Get a workspace by ID.
+  // Roles: superadmin, tenant_admin, workspace_admin, cs_agent (own workspace)
+  rpc GetWorkspace(GetWorkspaceRequest) returns (GetWorkspaceResponse);
+
+  // List workspaces within a tenant.
+  // Roles: superadmin (all), tenant_admin (own tenant), workspace_admin/cs_agent (own workspaces)
+  rpc ListWorkspaces(ListWorkspacesRequest) returns (ListWorkspacesResponse);
+
+  // Update workspace settings.
+  // Roles: superadmin, tenant_admin, workspace_admin (own workspace)
+  rpc UpdateWorkspace(UpdateWorkspaceRequest) returns (UpdateWorkspaceResponse);
+
+  // Delete a workspace (soft delete — marks inactive, preserves data).
+  // Roles: superadmin, tenant_admin
+  rpc DeleteWorkspace(DeleteWorkspaceRequest) returns (DeleteWorkspaceResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // User Management
+  // ──────────────────────────────────────────────────────────────
+
+  // Create a user and assign them to a workspace.
+  // Roles: superadmin, tenant_admin, workspace_admin (own workspace, cannot create higher roles)
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+
+  // Get a user by ID.
+  // Roles: superadmin, tenant_admin (own tenant), workspace_admin (own workspace), self
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+
+  // List users in a workspace.
+  // Roles: superadmin, tenant_admin, workspace_admin (own workspace)
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+
+  // Update a user (role, email, etc.).
+  // Roles: superadmin, tenant_admin, workspace_admin (own workspace, cannot promote above own role)
+  rpc UpdateUser(UpdateUserRequest) returns (UpdateUserResponse);
+
+  // Delete (deactivate) a user.
+  // Roles: superadmin, tenant_admin, workspace_admin (own workspace, cannot delete higher roles)
+  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // WhatsApp Numbers
+  // ──────────────────────────────────────────────────────────────
+
+  // Register a new WA number and initiate QR pairing.
+  // Roles: superadmin, tenant_admin
+  rpc RegisterWaNumber(RegisterWaNumberRequest) returns (RegisterWaNumberResponse);
+
+  // Get the QR code for an unlinked WA number session.
+  // Roles: superadmin, tenant_admin
+  rpc GetQRCode(GetQRCodeRequest) returns (GetQRCodeResponse);
+
+  // List all WA numbers for a tenant (optionally filtered by workspace).
+  // Roles: superadmin, tenant_admin, workspace_admin (own workspace numbers)
+  rpc ListWaNumbers(ListWaNumbersRequest) returns (ListWaNumbersResponse);
+
+  // Get a single WA number by ID.
+  // Roles: superadmin, tenant_admin, workspace_admin (if number is in their workspace)
+  rpc GetWaNumber(GetWaNumberRequest) returns (GetWaNumberResponse);
+
+  // Update WA number metadata (display name, proxy assignment, workspace assignments).
+  // Roles: superadmin, tenant_admin
+  rpc UpdateWaNumber(UpdateWaNumberRequest) returns (UpdateWaNumberResponse);
+
+  // Disconnect a WA number session (does not delete — can be reconnected later).
+  // Roles: superadmin, tenant_admin
+  rpc DisconnectWaNumber(DisconnectWaNumberRequest) returns (DisconnectWaNumberResponse);
+
+  // Reconnect a previously disconnected WA number session.
+  // Roles: superadmin, tenant_admin
+  rpc ReconnectWaNumber(ReconnectWaNumberRequest) returns (ReconnectWaNumberResponse);
+
+  // Delete a WA number from the platform (disconnects and removes).
+  // Roles: superadmin, tenant_admin
+  rpc DeleteWaNumber(DeleteWaNumberRequest) returns (DeleteWaNumberResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // Proxy Management
+  // ──────────────────────────────────────────────────────────────
+
+  // Add one or more proxies to a tenant's pool.
+  // Roles: superadmin, tenant_admin
+  rpc AddProxies(AddProxiesRequest) returns (AddProxiesResponse);
+
+  // List proxies for a tenant.
+  // Roles: superadmin, tenant_admin
+  rpc ListProxies(ListProxiesRequest) returns (ListProxiesResponse);
+
+  // Update proxy details.
+  // Roles: superadmin, tenant_admin
+  rpc UpdateProxy(UpdateProxyRequest) returns (UpdateProxyResponse);
+
+  // Remove a proxy from the pool.
+  // Roles: superadmin, tenant_admin
+  rpc DeleteProxy(DeleteProxyRequest) returns (DeleteProxyResponse);
+
+  // Manually assign a proxy to a WA number.
+  // Roles: superadmin, tenant_admin
+  rpc AssignProxy(AssignProxyRequest) returns (AssignProxyResponse);
+
+  // Get health check results for a proxy.
+  // Roles: superadmin, tenant_admin
+  rpc GetProxyHealth(GetProxyHealthRequest) returns (GetProxyHealthResponse);
+
+  // Get the best available proxy for auto-assignment.
+  // Sorts by cleanest first (ban_count ASC), then least loaded (assigned_count ASC).
+  // Refuses if all active proxies are at max_numbers_per_proxy capacity.
+  // Roles: superadmin, tenant_admin (also called internally by wa-controller)
+  rpc GetBestProxy(GetBestProxyRequest) returns (GetBestProxyResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // Contacts
+  // ──────────────────────────────────────────────────────────────
+
+  // Create a single contact via API.
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc CreateContact(CreateContactRequest) returns (CreateContactResponse);
+
+  // Import contacts from CSV upload (streaming or multipart).
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc ImportContacts(ImportContactsRequest) returns (ImportContactsResponse);
+
+  // List contacts for a tenant with optional filters (tags, search).
+  // Roles: superadmin, tenant_admin, workspace_admin, cs_agent
+  rpc ListContacts(ListContactsRequest) returns (ListContactsResponse);
+
+  // Get a single contact by ID.
+  // Roles: superadmin, tenant_admin, workspace_admin, cs_agent
+  rpc GetContact(GetContactRequest) returns (GetContactResponse);
+
+  // Update contact details (name, tags, custom fields).
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc UpdateContact(UpdateContactRequest) returns (UpdateContactResponse);
+
+  // Delete a contact.
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc DeleteContact(DeleteContactRequest) returns (DeleteContactResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // Templates
+  // ──────────────────────────────────────────────────────────────
+
+  // Create a message template.
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc CreateTemplate(CreateTemplateRequest) returns (CreateTemplateResponse);
+
+  // Get a template by ID.
+  // Roles: superadmin, tenant_admin, workspace_admin, cs_agent (own workspace)
+  rpc GetTemplate(GetTemplateRequest) returns (GetTemplateResponse);
+
+  // List templates for a workspace.
+  // Roles: superadmin, tenant_admin, workspace_admin, cs_agent (own workspace)
+  rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
+
+  // Update a template.
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc UpdateTemplate(UpdateTemplateRequest) returns (UpdateTemplateResponse);
+
+  // Delete a template.
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc DeleteTemplate(DeleteTemplateRequest) returns (DeleteTemplateResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // Campaigns
+  // ──────────────────────────────────────────────────────────────
+
+  // Create a new campaign (draft state).
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc CreateCampaign(CreateCampaignRequest) returns (CreateCampaignResponse);
+
+  // Get a campaign by ID with summary stats.
+  // Roles: superadmin, tenant_admin, workspace_admin, cs_agent (own workspace)
+  rpc GetCampaign(GetCampaignRequest) returns (GetCampaignResponse);
+
+  // List campaigns in a workspace.
+  // Roles: superadmin, tenant_admin, workspace_admin, cs_agent (own workspace)
+  rpc ListCampaigns(ListCampaignsRequest) returns (ListCampaignsResponse);
+
+  // Start a draft or scheduled campaign.
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc StartCampaign(StartCampaignRequest) returns (StartCampaignResponse);
+
+  // Pause a running campaign.
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc PauseCampaign(PauseCampaignRequest) returns (PauseCampaignResponse);
+
+  // Resume a paused campaign.
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc ResumeCampaign(ResumeCampaignRequest) returns (ResumeCampaignResponse);
+
+  // Cancel a campaign (terminal state — cannot be resumed).
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc CancelCampaign(CancelCampaignRequest) returns (CancelCampaignResponse);
+
+  // Add/remove WA numbers assigned to a campaign.
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc UpdateCampaignNumbers(UpdateCampaignNumbersRequest) returns (UpdateCampaignNumbersResponse);
+
+  // Add/remove contacts to/from a campaign.
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc UpdateCampaignContacts(UpdateCampaignContactsRequest) returns (UpdateCampaignContactsResponse);
+
+  // List contacts in a campaign with their send status.
+  // Roles: superadmin, tenant_admin, workspace_admin, cs_agent (own workspace)
+  rpc ListCampaignContacts(ListCampaignContactsRequest) returns (ListCampaignContactsResponse);
+
+  // List WA numbers assigned to a campaign with per-campaign stats.
+  // Roles: superadmin, tenant_admin, workspace_admin, cs_agent (own workspace)
+  rpc ListCampaignNumbers(ListCampaignNumbersRequest) returns (ListCampaignNumbersResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // Inbox — Conversations
+  // ──────────────────────────────────────────────────────────────
+
+  // List conversations in a workspace with filters.
+  // Roles: superadmin, tenant_admin, workspace_admin (all conversations),
+  //        cs_agent (own workspace — ONLY unassigned + assigned to self.
+  //        Gateway MUST inject assigned_to=self OR status=UNASSIGNED filter
+  //        for cs_agent callers. Admins see all conversations.)
+  rpc ListConversations(ListConversationsRequest) returns (ListConversationsResponse);
+
+  // Get a conversation by ID.
+  // Roles: superadmin, tenant_admin, workspace_admin, cs_agent (own workspace)
+  rpc GetConversation(GetConversationRequest) returns (GetConversationResponse);
+
+  // Claim an unassigned conversation (assigns to caller).
+  // Roles: workspace_admin, cs_agent (own workspace)
+  rpc ClaimConversation(ClaimConversationRequest) returns (ClaimConversationResponse);
+
+  // Transfer a conversation to another agent.
+  // Roles: superadmin, tenant_admin, workspace_admin, cs_agent (if currently assigned)
+  rpc TransferConversation(TransferConversationRequest) returns (TransferConversationResponse);
+
+  // Close a conversation.
+  // Roles: superadmin, tenant_admin, workspace_admin, cs_agent (if currently assigned)
+  rpc CloseConversation(CloseConversationRequest) returns (CloseConversationResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // Inbox — Messages
+  // ──────────────────────────────────────────────────────────────
+
+  // List messages in a conversation with pagination.
+  // Roles: superadmin, tenant_admin, workspace_admin, cs_agent (own workspace)
+  rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
+
+  // Send a message in a conversation (manual agent reply).
+  // Roles: workspace_admin, cs_agent (own workspace, assigned conversation)
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+
+  // Search messages across conversations in a workspace.
+  // Roles: superadmin, tenant_admin, workspace_admin, cs_agent (own workspace)
+  rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse);
+
+  // Send a typing indicator to the contact (shows "composing..." in WhatsApp).
+  // Roles: workspace_admin, cs_agent (own workspace, assigned conversation)
+  rpc SendTypingIndicator(SendTypingIndicatorRequest) returns (SendTypingIndicatorResponse);
+
+  // Get all campaigns a contact participated in with send results.
+  // Used in inbox chat to show contact's campaign history.
+  // Roles: superadmin, tenant_admin, workspace_admin, cs_agent (own workspace)
+  rpc GetContactCampaignHistory(GetContactCampaignHistoryRequest) returns (GetContactCampaignHistoryResponse);
+
+  // Get CS agent performance metrics (avg response time, conversation count per agent).
+  // Roles: superadmin, tenant_admin, workspace_admin (own workspace)
+  rpc GetAgentPerformance(GetAgentPerformanceRequest) returns (GetAgentPerformanceResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // Canned Responses
+  // ──────────────────────────────────────────────────────────────
+
+  // Create a canned response shortcut.
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc CreateCannedResponse(CreateCannedResponseRequest) returns (CreateCannedResponseResponse);
+
+  // List canned responses for a workspace.
+  // Roles: superadmin, tenant_admin, workspace_admin, cs_agent (own workspace)
+  rpc ListCannedResponses(ListCannedResponsesRequest) returns (ListCannedResponsesResponse);
+
+  // Update a canned response.
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc UpdateCannedResponse(UpdateCannedResponseRequest) returns (UpdateCannedResponseResponse);
+
+  // Delete a canned response.
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc DeleteCannedResponse(DeleteCannedResponseRequest) returns (DeleteCannedResponseResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // Notifications
+  // ──────────────────────────────────────────────────────────────
+
+  // Configure a notification target for a workspace.
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc ConfigureNotification(ConfigureNotificationRequest) returns (ConfigureNotificationResponse);
+
+  // List notification configs for a workspace.
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc ListNotificationConfigs(ListNotificationConfigsRequest) returns (ListNotificationConfigsResponse);
+
+  // Send a test notification to verify config.
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc TestNotification(TestNotificationRequest) returns (TestNotificationResponse);
+
+  // Delete a notification config.
+  // Roles: superadmin, tenant_admin, workspace_admin
+  rpc DeleteNotificationConfig(DeleteNotificationConfigRequest) returns (DeleteNotificationConfigResponse);
+
+  // ──────────────────────────────────────────────────────────────
+  // Dashboard / Stats
+  // ──────────────────────────────────────────────────────────────
+
+  // Get aggregate stats for the dashboard (active numbers, messages today, etc.).
+  // Roles: superadmin, tenant_admin, workspace_admin, cs_agent (own workspace)
+  rpc GetDashboardStats(GetDashboardStatsRequest) returns (GetDashboardStatsResponse);
+}
+
+// ======================================================================
+// Auth Messages
+// ======================================================================
+
+message LoginRequest {
+  string email = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  string access_token = 1;
+  string refresh_token = 2;
+  // Token expiry (access_token lifetime in seconds).
+  int32 expires_in = 3;
+  User user = 4;
+}
+
+message RefreshTokenRequest {
+  string refresh_token = 1;
+}
+
+message RefreshTokenResponse {
+  string access_token = 1;
+  string refresh_token = 2;
+  int32 expires_in = 3;
+}
+
+message LogoutRequest {}
+
+message LogoutResponse {}
+
+message GetMeRequest {}
+
+message GetMeResponse {
+  User user = 1;
+  // The workspace the user belongs to.
+  Workspace workspace = 2;
+  // The tenant the workspace belongs to.
+  Tenant tenant = 3;
+}
+
+// ======================================================================
+// Tenant Messages
+// ======================================================================
+
+message CreateTenantRequest {
+  string name = 1;
+  // Optional initial settings JSON.
+  string settings_json = 2;
+}
+
+message CreateTenantResponse {
+  Tenant tenant = 1;
+}
+
+message GetTenantRequest {
+  string id = 1;
+}
+
+message GetTenantResponse {
+  Tenant tenant = 1;
+}
+
+message ListTenantsRequest {
+  PageRequest pagination = 1;
+}
+
+message ListTenantsResponse {
+  repeated Tenant tenants = 1;
+  PageResponse pagination = 2;
+}
+
+message UpdateTenantRequest {
+  string id = 1;
+  // Fields to update. Only non-empty fields are applied.
+  string name = 2;
+  string settings_json = 3;
+}
+
+message UpdateTenantResponse {
+  Tenant tenant = 1;
+}
+
+// ======================================================================
+// Workspace Messages
+// ======================================================================
+
+message CreateWorkspaceRequest {
+  string tenant_id = 1;
+  string name = 2;
+  string settings_json = 3;
+  int32 daily_cap = 4;
+}
+
+message CreateWorkspaceResponse {
+  Workspace workspace = 1;
+}
+
+message GetWorkspaceRequest {
+  string id = 1;
+}
+
+message GetWorkspaceResponse {
+  Workspace workspace = 1;
+}
+
+message ListWorkspacesRequest {
+  string tenant_id = 1;
+  PageRequest pagination = 2;
+}
+
+message ListWorkspacesResponse {
+  repeated Workspace workspaces = 1;
+  PageResponse pagination = 2;
+}
+
+message UpdateWorkspaceRequest {
+  string id = 1;
+  string name = 2;
+  string settings_json = 3;
+  int32 daily_cap = 4;
+}
+
+message UpdateWorkspaceResponse {
+  Workspace workspace = 1;
+}
+
+message DeleteWorkspaceRequest {
+  string id = 1;
+}
+
+message DeleteWorkspaceResponse {}
+
+// ======================================================================
+// User Messages
+// ======================================================================
+
+message CreateUserRequest {
+  string workspace_id = 1;
+  string email = 2;
+  string password = 3;
+  Role role = 4;
+}
+
+message CreateUserResponse {
+  User user = 1;
+}
+
+message GetUserRequest {
+  string id = 1;
+}
+
+message GetUserResponse {
+  User user = 1;
+}
+
+message ListUsersRequest {
+  string workspace_id = 1;
+  PageRequest pagination = 2;
+}
+
+message ListUsersResponse {
+  repeated User users = 1;
+  PageResponse pagination = 2;
+}
+
+message UpdateUserRequest {
+  string id = 1;
+  string email = 2;
+  Role role = 3;
+  // If non-empty, changes the user's password.
+  string password = 4;
+}
+
+message UpdateUserResponse {
+  User user = 1;
+}
+
+message DeleteUserRequest {
+  string id = 1;
+}
+
+message DeleteUserResponse {}
+
+// ======================================================================
+// WhatsApp Number Messages
+// ======================================================================
+
+message RegisterWaNumberRequest {
+  string tenant_id = 1;
+  // E.164 phone number being registered.
+  string phone = 2;
+  string display_name = 3;
+  // Proxy to assign. If empty, auto-assign from pool.
+  string proxy_id = 4;
+  // Workspaces this number should be available in.
+  repeated string workspace_ids = 5;
+}
+
+message RegisterWaNumberResponse {
+  WaNumber wa_number = 1;
+  // The QR code data to display for pairing (base64-encoded PNG or URI).
+  string qr_code = 2;
+}
+
+message GetQRCodeRequest {
+  string wa_number_id = 1;
+}
+
+message GetQRCodeResponse {
+  // Base64-encoded QR code PNG, or empty if already linked.
+  string qr_code = 1;
+  // True if the number is already linked (no QR needed).
+  bool is_linked = 2;
+}
+
+message ListWaNumbersRequest {
+  string tenant_id = 1;
+  // Optional: filter to numbers assigned to this workspace.
+  string workspace_id = 2;
+  // Optional: filter by status.
+  WaNumberStatus status = 3;
+  PageRequest pagination = 4;
+}
+
+message ListWaNumbersResponse {
+  repeated WaNumber wa_numbers = 1;
+  PageResponse pagination = 2;
+}
+
+message GetWaNumberRequest {
+  string id = 1;
+}
+
+message GetWaNumberResponse {
+  WaNumber wa_number = 1;
+}
+
+message UpdateWaNumberRequest {
+  string id = 1;
+  string display_name = 2;
+  string proxy_id = 3;
+  // Replace the set of workspace assignments.
+  repeated string workspace_ids = 4;
+}
+
+message UpdateWaNumberResponse {
+  WaNumber wa_number = 1;
+}
+
+message DisconnectWaNumberRequest {
+  string id = 1;
+}
+
+message DisconnectWaNumberResponse {
+  WaNumber wa_number = 1;
+}
+
+message ReconnectWaNumberRequest {
+  string id = 1;
+}
+
+message ReconnectWaNumberResponse {
+  WaNumber wa_number = 1;
+  // QR code if re-pairing is needed.
+  string qr_code = 2;
+}
+
+message DeleteWaNumberRequest {
+  string id = 1;
+}
+
+message DeleteWaNumberResponse {}
+
+// ======================================================================
+// Proxy Messages
+// ======================================================================
+
+// ProxyInput is used when bulk-adding proxies.
+message ProxyInput {
+  string host = 1;
+  int32 port = 2;
+  string username = 3;
+  string password = 4;
+  ProxyType type = 5;
+}
+
+message AddProxiesRequest {
+  string tenant_id = 1;
+  repeated ProxyInput proxies = 2;
+}
+
+message AddProxiesResponse {
+  repeated Proxy proxies = 1;
+  // Count of proxies that were duplicates and skipped.
+  int32 skipped_count = 2;
+}
+
+message ListProxiesRequest {
+  string tenant_id = 1;
+  ProxyStatus status = 2;
+  PageRequest pagination = 3;
+}
+
+message ListProxiesResponse {
+  repeated Proxy proxies = 1;
+  PageResponse pagination = 2;
+}
+
+message UpdateProxyRequest {
+  string id = 1;
+  string host = 2;
+  int32 port = 3;
+  string username = 4;
+  string password = 5;
+  ProxyType type = 6;
+  ProxyStatus status = 7;
+}
+
+message UpdateProxyResponse {
+  Proxy proxy = 1;
+}
+
+message DeleteProxyRequest {
+  string id = 1;
+}
+
+message DeleteProxyResponse {}
+
+message AssignProxyRequest {
+  // WA number to assign the proxy to.
+  string wa_number_id = 1;
+  // Proxy to assign. Empty string removes assignment.
+  string proxy_id = 2;
+}
+
+message AssignProxyResponse {
+  WaNumber wa_number = 1;
+}
+
+message GetProxyHealthRequest {
+  string id = 1;
+}
+
+message GetProxyHealthResponse {
+  Proxy proxy = 1;
+  // Latency of last health check in milliseconds.
+  int32 latency_ms = 2;
+  // Whether the proxy is reachable.
+  bool reachable = 3;
+  google.protobuf.Timestamp checked_at = 4;
+}
+
+// ======================================================================
+// Contact Messages
+// ======================================================================
+
+message ImportContactsRequest {
+  string tenant_id = 1;
+  // CSV file content (base64-encoded).
+  bytes csv_data = 2;
+  // Original filename for logging/display.
+  string filename = 3;
+  // CSV column mapping: key = our field name, value = CSV column header.
+  // Required keys: "phone". Optional: "name", "tags" (comma-separated), custom field names.
+  map<string, string> column_mapping = 4;
+  // Tags to apply to all imported contacts.
+  repeated string default_tags = 5;
+}
+
+message ImportContactsResponse {
+  // Number of contacts successfully imported.
+  int32 imported_count = 1;
+  // Number of contacts skipped (duplicates, invalid phone).
+  int32 skipped_count = 2;
+  // Number of contacts that failed to import.
+  int32 failed_count = 3;
+  // Details of failed rows (row number + error).
+  repeated ImportError errors = 4;
+  // Number of imported contacts that are on the internal ban list.
+  int32 banned_count = 5;
+}
+
+message ImportError {
+  int32 row = 1;
+  string phone = 2;
+  string error = 3;
+}
+
+message ListContactsRequest {
+  string tenant_id = 1;
+  // Full-text search on name and phone.
+  string search = 2;
+  // Filter by tags (AND logic — contact must have all specified tags).
+  repeated string tags = 3;
+  // Filter by ban status.
+  bool is_banned = 4;
+  // Whether to apply the is_banned filter (since false is the default).
+  bool filter_banned = 5;
+  PageRequest pagination = 6;
+}
+
+message ListContactsResponse {
+  repeated Contact contacts = 1;
+  PageResponse pagination = 2;
+}
+
+message GetContactRequest {
+  string id = 1;
+}
+
+message GetContactResponse {
+  Contact contact = 1;
+}
+
+message UpdateContactRequest {
+  string id = 1;
+  string name = 2;
+  string phone = 3;
+  repeated string tags = 4;
+  map<string, string> custom_fields = 5;
+  bool is_banned = 6;
+}
+
+message UpdateContactResponse {
+  Contact contact = 1;
+}
+
+message DeleteContactRequest {
+  string id = 1;
+}
+
+message DeleteContactResponse {}
+
+// ======================================================================
+// Template Messages
+// ======================================================================
+
+message CreateTemplateRequest {
+  string workspace_id = 1;
+  string name = 2;
+  // Body with optional spintax and {{variable}} placeholders.
+  string body = 3;
+  string media_url = 4;
+  string media_type = 5;
+}
+
+message CreateTemplateResponse {
+  Template template = 1;
+}
+
+message GetTemplateRequest {
+  string id = 1;
+}
+
+message GetTemplateResponse {
+  Template template = 1;
+}
+
+message ListTemplatesRequest {
+  string workspace_id = 1;
+  // Optional search by name.
+  string search = 2;
+  PageRequest pagination = 3;
+}
+
+message ListTemplatesResponse {
+  repeated Template templates = 1;
+  PageResponse pagination = 2;
+}
+
+message UpdateTemplateRequest {
+  string id = 1;
+  string name = 2;
+  string body = 3;
+  string media_url = 4;
+  string media_type = 5;
+}
+
+message UpdateTemplateResponse {
+  Template template = 1;
+}
+
+message DeleteTemplateRequest {
+  string id = 1;
+}
+
+message DeleteTemplateResponse {}
+
+// ======================================================================
+// Campaign Messages
+// ======================================================================
+
+message CreateCampaignRequest {
+  string workspace_id = 1;
+  string template_id = 2;
+  string name = 3;
+  google.protobuf.Timestamp schedule_at = 4;
+  int32 daily_cap_per_num = 5;
+  int32 ban_pause_threshold = 6;
+  RotationStrategy rotation_strategy = 7;
+  int32 delay_min_ms = 8;
+  int32 delay_max_ms = 9;
+  // WA number IDs to assign to this campaign.
+  repeated string wa_number_ids = 10;
+  // Contact IDs to include in this campaign.
+  repeated string contact_ids = 11;
+}
+
+message CreateCampaignResponse {
+  Campaign campaign = 1;
+}
+
+message GetCampaignRequest {
+  string id = 1;
+}
+
+message GetCampaignResponse {
+  Campaign campaign = 1;
+  // Numbers assigned to this campaign.
+  repeated CampaignNumber numbers = 2;
+  // Template used by this campaign.
+  Template template = 3;
+}
+
+message ListCampaignsRequest {
+  string workspace_id = 1;
+  // Optional: filter by status.
+  CampaignStatus status = 2;
+  PageRequest pagination = 3;
+}
+
+message ListCampaignsResponse {
+  repeated Campaign campaigns = 1;
+  PageResponse pagination = 2;
+}
+
+message StartCampaignRequest {
+  string id = 1;
+}
+
+message StartCampaignResponse {
+  Campaign campaign = 1;
+}
+
+message PauseCampaignRequest {
+  string id = 1;
+}
+
+message PauseCampaignResponse {
+  Campaign campaign = 1;
+}
+
+message ResumeCampaignRequest {
+  string id = 1;
+}
+
+message ResumeCampaignResponse {
+  Campaign campaign = 1;
+}
+
+message CancelCampaignRequest {
+  string id = 1;
+}
+
+message CancelCampaignResponse {
+  Campaign campaign = 1;
+}
+
+message UpdateCampaignNumbersRequest {
+  string campaign_id = 1;
+  // WA number IDs to add.
+  repeated string add_wa_number_ids = 2;
+  // WA number IDs to remove.
+  repeated string remove_wa_number_ids = 3;
+}
+
+message UpdateCampaignNumbersResponse {
+  Campaign campaign = 1;
+  repeated CampaignNumber numbers = 2;
+}
+
+message UpdateCampaignContactsRequest {
+  string campaign_id = 1;
+  // Contact IDs to add.
+  repeated string add_contact_ids = 2;
+  // Contact IDs to remove.
+  repeated string remove_contact_ids = 3;
+}
+
+message UpdateCampaignContactsResponse {
+  Campaign campaign = 1;
+}
+
+message ListCampaignContactsRequest {
+  string campaign_id = 1;
+  // Optional: filter by send status.
+  ContactSendStatus status = 2;
+  PageRequest pagination = 3;
+}
+
+message ListCampaignContactsResponse {
+  repeated CampaignContactDetail contacts = 1;
+  PageResponse pagination = 2;
+}
+
+// Enriched campaign contact with contact details for display.
+message CampaignContactDetail {
+  CampaignContact campaign_contact = 1;
+  Contact contact = 2;
+}
+
+// ======================================================================
+// Inbox — Conversation Messages
+// ======================================================================
+
+message ListConversationsRequest {
+  string workspace_id = 1;
+  // Filter by assignment status.
+  ConversationStatus status = 2;
+  // Filter by assigned agent.
+  string assigned_to = 3;
+  // Filter by WA number.
+  string wa_number_id = 4;
+  // Search by contact name or phone.
+  string search = 5;
+  PageRequest pagination = 6;
+}
+
+message ListConversationsResponse {
+  repeated Conversation conversations = 1;
+  PageResponse pagination = 2;
+}
+
+message GetConversationRequest {
+  string id = 1;
+}
+
+message GetConversationResponse {
+  Conversation conversation = 1;
+  Contact contact = 2;
+  WaNumber wa_number = 3;
+}
+
+message ClaimConversationRequest {
+  string id = 1;
+}
+
+message ClaimConversationResponse {
+  Conversation conversation = 1;
+}
+
+message TransferConversationRequest {
+  string id = 1;
+  // User ID of the agent to transfer to.
+  string target_user_id = 2;
+}
+
+message TransferConversationResponse {
+  Conversation conversation = 1;
+}
+
+message CloseConversationRequest {
+  string id = 1;
+}
+
+message CloseConversationResponse {
+  Conversation conversation = 1;
+}
+
+// ======================================================================
+// Inbox — Message Messages
+// ======================================================================
+
+message ListMessagesRequest {
+  string conversation_id = 1;
+  PageRequest pagination = 2;
+}
+
+message ListMessagesResponse {
+  repeated Message messages = 1;
+  PageResponse pagination = 2;
+}
+
+message SendMessageRequest {
+  string conversation_id = 1;
+  ContentType content_type = 2;
+  // Text body. Required for TEXT content type.
+  string body = 3;
+  // Media URL. Required for non-TEXT content types.
+  string media_url = 4;
+}
+
+message SendMessageResponse {
+  Message message = 1;
+}
+
+message SearchMessagesRequest {
+  string workspace_id = 1;
+  // Full-text search query.
+  string query = 2;
+  // Optional: limit to a specific conversation.
+  string conversation_id = 3;
+  PageRequest pagination = 4;
+}
+
+message SearchMessagesResponse {
+  repeated SearchMessageHit hits = 1;
+  PageResponse pagination = 2;
+}
+
+// SearchMessageHit is a message matched by search, with context.
+message SearchMessageHit {
+  Message message = 1;
+  // Conversation the message belongs to.
+  string conversation_id = 2;
+  // Contact name for display.
+  string contact_name = 3;
+  // Highlighted snippet of the matched text.
+  string highlight = 4;
+}
+
+message SendTypingIndicatorRequest {
+  string conversation_id = 1;
+}
+
+message SendTypingIndicatorResponse {}
+
+// ======================================================================
+// Canned Response Messages
+// ======================================================================
+
+message CreateCannedResponseRequest {
+  string workspace_id = 1;
+  string shortcut = 2;
+  string body = 3;
+}
+
+message CreateCannedResponseResponse {
+  CannedResponse canned_response = 1;
+}
+
+message ListCannedResponsesRequest {
+  string workspace_id = 1;
+  // Optional search by shortcut or body.
+  string search = 2;
+  PageRequest pagination = 3;
+}
+
+message ListCannedResponsesResponse {
+  repeated CannedResponse canned_responses = 1;
+  PageResponse pagination = 2;
+}
+
+message UpdateCannedResponseRequest {
+  string id = 1;
+  string shortcut = 2;
+  string body = 3;
+}
+
+message UpdateCannedResponseResponse {
+  CannedResponse canned_response = 1;
+}
+
+message DeleteCannedResponseRequest {
+  string id = 1;
+}
+
+message DeleteCannedResponseResponse {}
+
+// ======================================================================
+// Notification Messages
+// ======================================================================
+
+message ConfigureNotificationRequest {
+  string workspace_id = 1;
+  NotificationType type = 2;
+  string webhook_url = 3;
+  WebhookType webhook_type = 4;
+  bool enabled = 5;
+}
+
+message ConfigureNotificationResponse {
+  NotificationConfig config = 1;
+}
+
+message ListNotificationConfigsRequest {
+  string workspace_id = 1;
+}
+
+message ListNotificationConfigsResponse {
+  repeated NotificationConfig configs = 1;
+}
+
+message TestNotificationRequest {
+  string config_id = 1;
+}
+
+message TestNotificationResponse {
+  bool success = 1;
+  // Error message if the test failed.
+  string error = 2;
+}
+
+message DeleteNotificationConfigRequest {
+  string id = 1;
+}
+
+message DeleteNotificationConfigResponse {}
+
+// ======================================================================
+// Contact Campaign History Messages
+// ======================================================================
+
+message GetContactCampaignHistoryRequest {
+  string contact_id = 1;
+  PageRequest pagination = 2;
+}
+
+message GetContactCampaignHistoryResponse {
+  repeated ContactCampaignSummary campaigns = 1;
+  PageResponse pagination = 2;
+}
+
+// ContactCampaignSummary shows a contact's participation in one campaign.
+message ContactCampaignSummary {
+  string campaign_id = 1;
+  string campaign_name = 2;
+  string template_id = 3;
+  string template_name = 4;
+  // The resolved message body that was sent to this contact.
+  string resolved_body = 5;
+  ContactSendStatus status = 6;
+  google.protobuf.Timestamp sent_at = 7;
+  google.protobuf.Timestamp delivered_at = 8;
+}
+
+// ======================================================================
+// Agent Performance Messages
+// ======================================================================
+
+message GetAgentPerformanceRequest {
+  string workspace_id = 1;
+  // Optional: filter to a specific agent. If empty, returns all agents in workspace.
+  string user_id = 2;
+  // Time range for metrics.
+  google.protobuf.Timestamp from_date = 3;
+  google.protobuf.Timestamp to_date = 4;
+}
+
+message GetAgentPerformanceResponse {
+  repeated AgentPerformanceMetrics agents = 1;
+}
+
+message AgentPerformanceMetrics {
+  string user_id = 1;
+  string email = 2;
+  // Average first response time in seconds.
+  float avg_response_time_secs = 3;
+  // Median first response time in seconds.
+  float median_response_time_secs = 4;
+  // Total conversations handled in the time range.
+  int32 total_conversations = 5;
+  // Conversations currently assigned.
+  int32 active_conversations = 6;
+  // Total messages sent by this agent.
+  int32 messages_sent = 7;
+}
+
+// ======================================================================
+// Campaign Number List Messages (gateway)
+// ======================================================================
+
+message ListCampaignNumbersRequest {
+  string campaign_id = 1;
+  PageRequest pagination = 2;
+}
+
+message ListCampaignNumbersResponse {
+  repeated CampaignNumberDetail numbers = 1;
+  PageResponse pagination = 2;
+}
+
+// CampaignNumberDetail enriches CampaignNumber with WA number info for display.
+message CampaignNumberDetail {
+  CampaignNumber campaign_number = 1;
+  string phone = 2;
+  string display_name = 3;
+  WaNumberStatus current_status = 4;
+}
+
+// ======================================================================
+// Create Contact Messages
+// ======================================================================
+
+message CreateContactRequest {
+  string tenant_id = 1;
+  // E.164 phone number (required).
+  string phone = 2;
+  string name = 3;
+  repeated string tags = 4;
+  map<string, string> custom_fields = 5;
+}
+
+message CreateContactResponse {
+  Contact contact = 1;
+  // True if this phone already existed (returned existing contact instead of creating).
+  bool already_existed = 2;
+}
+
+// ======================================================================
+// GetBestProxy Messages
+// ======================================================================
+
+message GetBestProxyRequest {
+  string tenant_id = 1;
+  // Preferred proxy type. UNSPECIFIED = any.
+  ProxyType type = 2;
+}
+
+message GetBestProxyResponse {
+  // The best available proxy (cleanest + least loaded). Empty if none available.
+  Proxy proxy = 1;
+  // True if all proxies are at max_numbers_per_proxy capacity.
+  bool pool_exhausted = 2;
+}
+
+// ======================================================================
+// Dashboard Messages
+// ======================================================================
+
+message GetDashboardStatsRequest {
+  // Scope: workspace_id for workspace-level stats, tenant_id for tenant-wide.
+  string workspace_id = 1;
+  string tenant_id = 2;
+}
+
+message GetDashboardStatsResponse {
+  // Active (connected) WA numbers.
+  int32 active_numbers = 1;
+  // Total WA numbers (all statuses).
+  int32 total_numbers = 2;
+  // Messages sent today across all numbers.
+  int64 messages_sent_today = 3;
+  // Messages received today.
+  int64 messages_received_today = 4;
+  // Currently running campaigns.
+  int32 active_campaigns = 5;
+  // Conversations with status UNASSIGNED.
+  int32 unassigned_conversations = 6;
+  // Active (healthy) proxies.
+  int32 active_proxies = 7;
+  // Total proxies.
+  int32 total_proxies = 8;
+  // Bans detected today.
+  int32 bans_today = 9;
+  // Total contacts in tenant.
+  int64 total_contacts = 10;
+}

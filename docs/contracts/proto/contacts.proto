@@ -1,0 +1,269 @@
+syntax = "proto3";
+
+package hermes.v1;
+
+option go_package = "github.com/hermes-waba/hermes/gen/go/hermes/v1;hermesv1";
+
+import "google/protobuf/timestamp.proto";
+import "proto/common.proto";
+
+// ======================================================================
+// HermesContacts — contact management and CSV import.
+//
+// Owns: contacts, contact_tags, contact_custom_fields tables.
+// Called by: hermes-gateway (gRPC for CRUD), hermes-campaign (gRPC for contact lookup)
+// Publishes: contacts.import.done.{tenant_id}
+// Consumes: (none in Phase 1)
+// ======================================================================
+service HermesContacts {
+
+  // Create a single contact.
+  // Called by: gateway (on behalf of workspace_admin/tenant_admin/superadmin)
+  rpc CreateContact(ContactsCreateRequest) returns (ContactsCreateResponse);
+
+  // Import contacts from a CSV file. Deduplicates by (tenant_id, phone).
+  // New contacts are inserted; duplicates are skipped (or optionally updated).
+  // Publishes contacts.import.done.{tenant_id} when complete.
+  // Called by: gateway (on behalf of workspace_admin/tenant_admin/superadmin)
+  rpc ImportContacts(ContactsImportRequest) returns (ContactsImportResponse);
+
+  // List contacts for a tenant with filters (search, tags, ban status).
+  // Called by: gateway, campaign service (for campaign contact resolution)
+  rpc ListContacts(ContactsListRequest) returns (ContactsListResponse);
+
+  // Get a single contact by ID.
+  // Called by: gateway, inbox service (for conversation context)
+  rpc GetContact(ContactsGetRequest) returns (ContactsGetResponse);
+
+  // Get a contact by phone number within a tenant.
+  // Called by: inbox service (to resolve inbound messages to contacts)
+  rpc GetContactByPhone(ContactsGetByPhoneRequest) returns (ContactsGetByPhoneResponse);
+
+  // Update contact details (name, tags, custom fields, ban status).
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc UpdateContact(ContactsUpdateRequest) returns (ContactsUpdateResponse);
+
+  // Delete a contact permanently.
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc DeleteContact(ContactsDeleteRequest) returns (ContactsDeleteResponse);
+
+  // Bulk delete contacts by ID list.
+  // Called by: gateway (on behalf of workspace_admin+)
+  rpc BulkDeleteContacts(ContactsBulkDeleteRequest) returns (ContactsBulkDeleteResponse);
+
+  // Check if a contact's phone is on the internal ban list.
+  // Phase 1: checks internal DB only. Phase 2 will add WA IsOnWhatsApp + external blacklists.
+  // Called by: campaign service (before queueing sends), gateway
+  rpc BanCheck(ContactsBanCheckRequest) returns (ContactsBanCheckResponse);
+
+  // Bulk ban check for a list of phones.
+  // Called by: campaign service (pre-flight check before starting campaign)
+  rpc BulkBanCheck(ContactsBulkBanCheckRequest) returns (ContactsBulkBanCheckResponse);
+
+  // List all unique tags used by contacts in a tenant (for tag autocomplete/filter).
+  // Called by: gateway
+  rpc ListTags(ContactsListTagsRequest) returns (ContactsListTagsResponse);
+}
+
+// ======================================================================
+// Create Single Contact
+// ======================================================================
+
+message ContactsCreateRequest {
+  string tenant_id = 1;
+  // E.164 phone number (required).
+  string phone = 2;
+  string name = 3;
+  repeated string tags = 4;
+  map<string, string> custom_fields = 5;
+}
+
+message ContactsCreateResponse {
+  Contact contact = 1;
+  // True if this phone already existed in the tenant (returned existing contact).
+  bool already_existed = 2;
+}
+
+// ======================================================================
+// Import
+// ======================================================================
+
+// ImportDuplicateStrategy controls what happens when a phone number already exists.
+enum ImportDuplicateStrategy {
+  IMPORT_DUPLICATE_STRATEGY_UNSPECIFIED = 0;
+  // Skip duplicate rows (default).
+  IMPORT_DUPLICATE_STRATEGY_SKIP = 1;
+  // Update existing contact's name, tags, custom fields with CSV values.
+  IMPORT_DUPLICATE_STRATEGY_UPDATE = 2;
+}
+
+message ContactsImportRequest {
+  string tenant_id = 1;
+  // CSV file content (base64-encoded).
+  bytes csv_data = 2;
+  // Original filename (for audit logging).
+  string filename = 3;
+  // Mapping from Hermès field names to CSV column headers.
+  // Required: "phone". Optional: "name", "tags" (comma-delimited in CSV).
+  // Any other keys are treated as custom field names.
+  map<string, string> column_mapping = 4;
+  // Tags to apply to all imported contacts (in addition to per-row tags).
+  repeated string default_tags = 5;
+  // What to do when a duplicate phone is found.
+  ImportDuplicateStrategy duplicate_strategy = 6;
+  // User who initiated the import (for audit).
+  string imported_by = 7;
+}
+
+message ContactsImportResponse {
+  // Contacts successfully created.
+  int32 imported_count = 1;
+  // Contacts skipped (duplicate phone).
+  int32 skipped_count = 2;
+  // Contacts updated (when duplicate_strategy = UPDATE).
+  int32 updated_count = 3;
+  // Rows that failed to process.
+  int32 failed_count = 4;
+  // Error details per failed row.
+  repeated ContactsImportError errors = 5;
+  // Number of imported contacts that are on the internal ban list.
+  int32 banned_count = 6;
+}
+
+message ContactsImportError {
+  // 1-based row number in the CSV (excluding header).
+  int32 row = 1;
+  // Phone value from the row (if parseable).
+  string phone = 2;
+  // Error description (e.g. "invalid phone format", "missing required field").
+  string error = 3;
+}
+
+// ======================================================================
+// List / Get
+// ======================================================================
+
+message ContactsListRequest {
+  string tenant_id = 1;
+  // Full-text search on name and phone.
+  string search = 2;
+  // Filter by tags. AND logic: contact must have ALL specified tags.
+  repeated string tags = 3;
+  // Filter by ban status. Only applies when filter_banned is true.
+  bool is_banned = 4;
+  bool filter_banned = 5;
+  PageRequest pagination = 6;
+}
+
+message ContactsListResponse {
+  repeated Contact contacts = 1;
+  PageResponse pagination = 2;
+}
+
+message ContactsGetRequest {
+  string id = 1;
+}
+
+message ContactsGetResponse {
+  Contact contact = 1;
+}
+
+message ContactsGetByPhoneRequest {
+  string tenant_id = 1;
+  // E.164 phone number.
+  string phone = 2;
+}
+
+message ContactsGetByPhoneResponse {
+  // Contact if found, empty if not.
+  Contact contact = 1;
+  bool found = 2;
+}
+
+// ======================================================================
+// Update / Delete
+// ======================================================================
+
+message ContactsUpdateRequest {
+  string id = 1;
+  // Fields to update. Only non-empty/non-zero fields are applied.
+  string name = 2;
+  string phone = 3;
+  // Replace tags entirely.
+  repeated string tags = 4;
+  // Merge custom fields (upsert keys; to remove a key, set value to empty string).
+  map<string, string> custom_fields = 5;
+  bool is_banned = 6;
+}
+
+message ContactsUpdateResponse {
+  Contact contact = 1;
+}
+
+message ContactsDeleteRequest {
+  string id = 1;
+}
+
+message ContactsDeleteResponse {}
+
+message ContactsBulkDeleteRequest {
+  repeated string ids = 1;
+}
+
+message ContactsBulkDeleteResponse {
+  int32 deleted_count = 1;
+}
+
+// ======================================================================
+// Ban Check
+// ======================================================================
+
+message ContactsBanCheckRequest {
+  string tenant_id = 1;
+  // Phone number to check.
+  string phone = 2;
+}
+
+message ContactsBanCheckResponse {
+  // True if the phone is on the ban list.
+  bool is_banned = 1;
+  // Reason for ban (if available).
+  string reason = 2;
+}
+
+message ContactsBulkBanCheckRequest {
+  string tenant_id = 1;
+  repeated string phones = 2;
+}
+
+message ContactsBulkBanCheckResponse {
+  // Map of phone → ban status.
+  repeated BanCheckResult results = 1;
+}
+
+message BanCheckResult {
+  string phone = 1;
+  bool is_banned = 2;
+  string reason = 3;
+}
+
+// ======================================================================
+// Tags
+// ======================================================================
+
+message ContactsListTagsRequest {
+  string tenant_id = 1;
+  // Optional prefix filter for autocomplete (e.g. "reg" → "region-jakarta", "region-bali").
+  string prefix = 2;
+}
+
+message ContactsListTagsResponse {
+  // Unique tag values with usage counts.
+  repeated TagCount tags = 1;
+}
+
+message TagCount {
+  string tag = 1;
+  // Number of contacts with this tag.
+  int32 count = 2;
+}
