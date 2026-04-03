@@ -371,6 +371,46 @@ func main() {
 
 ---
 
+## Patterns Established in Layer 3
+
+### Inbox RBAC Scoping (CRITICAL for Gateway)
+- `ListConversations` has an RBAC constraint: **CS agents see only UNASSIGNED + own assigned conversations.**
+- Gateway MUST inject `assigned_to=self OR status=UNASSIGNED` filter when the caller is a cs_agent.
+- Admins (workspace_admin, tenant_admin, superadmin) see ALL conversations.
+- This is NOT enforced in the inbox service — it's the gateway's responsibility.
+
+### Message Storage Strategy
+- Campaign-sent messages: `template_id` + `resolved_vars_json` (not full text, reconstructable)
+- Inbound replies: full `body` text
+- Manual agent messages: full `body` text
+- Media: `media_url` stored
+
+### Conversation State Machine
+```
+UNASSIGNED  →  ASSIGNED  (on ClaimConversation)
+ASSIGNED    →  CLOSED    (on CloseConversation)
+CLOSED      →  UNASSIGNED (on new inbound message — auto-reopen)
+```
+- `ClaimConversation` fails if already ASSIGNED (must transfer instead)
+- `TransferConversation` requires caller to be current assignee or admin
+
+### FTS Search Pattern
+- Uses PostgreSQL `to_tsvector('simple', body)` + `plainto_tsquery` matching the GIN index from migrations
+- `ts_headline` returns highlighted snippets with `<mark>` tags for frontend display
+- Search scoped to workspace_id, optionally to a single conversation
+
+### Cross-Service Reads
+- Inbox reads from contacts, wa_numbers, wa_number_workspaces, campaign_contacts, campaigns, templates
+- This is a pragmatic shared-DB pattern — no gRPC calls needed for co-located data
+- All cross-service reads are SELECT-only (no writes to other services' tables)
+
+### first_response_time_secs
+- Calculated as `time.Since(conversation.created_at)` on the first outbound message
+- Guard: `WHERE first_response_time_secs = 0` prevents overwriting on subsequent messages
+- Used by `GetAgentPerformance` for avg/median calculations
+
+---
+
 ## Key Technical Decisions
 
 | Decision | Choice | Reference |

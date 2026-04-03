@@ -10,7 +10,7 @@
 | **1** | hermes-notify | 6/6 | 26 pass | ✅ Done | `5456f9e` |
 | **2** | hermes-wa | 8/8 | 28 pass | ✅ Done | `cb8f9e9` |
 | **2** | hermes-campaign | 17/17 | 42 pass | ✅ Done | `cb8f9e9` |
-| **3** | hermes-inbox | 0/12 | — | ⬜ Pending | — |
+| **3** | hermes-inbox | 14/14 | 29 pass | ✅ Done | `acea288` |
 | **4** | hermes-gateway | 0/75 | — | ⬜ Pending | — |
 | **4** | hermes-web | — | — | ⬜ Pending | — |
 
@@ -28,7 +28,8 @@
 |---|---|---|---|
 | Layer 1 | 60 | 60 | 0 |
 | Layer 2 | 70 | 70 | 0 |
-| **Total** | **130** | **130** | **0** |
+| Layer 3 | 29 | 29 | 0 |
+| **Total** | **159** | **159** | **0** |
 
 ## Service Ports (Local Dev)
 

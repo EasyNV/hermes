@@ -75,7 +75,7 @@ See [docs/BUILD-STATUS.md](docs/BUILD-STATUS.md) for full progress.
 | 0 | Scaffolding | ✅ Done |
 | 1 | proxy, contacts, notify | ✅ Done (60 tests) |
 | 2 | wa, campaign | ✅ Done (70 tests, 130 total) |
-| 3 | inbox | ⬜ Pending |
+| 3 | inbox | ✅ Done (29 tests, 159 total) |
 | 4 | gateway, web | ⬜ Pending |
 
 ### Running Layer 1 Services
@@ -94,6 +94,7 @@ DATABASE_URL="$DATABASE_URL" NATS_URL="nats://localhost:4222" PORT=9102 go run .
 DATABASE_URL="$DATABASE_URL" NATS_URL="nats://localhost:4222" PORT=9103 go run ./cmd/notify
 DATABASE_URL="$DATABASE_URL" NATS_URL="nats://localhost:4222" PORT=9104 PROXY_SERVICE_ADDR=localhost:9101 go run ./cmd/wa
 DATABASE_URL="$DATABASE_URL" NATS_URL="nats://localhost:4222" PORT=9105 go run ./cmd/campaign
+DATABASE_URL="$DATABASE_URL" NATS_URL="nats://localhost:4222" PORT=9106 go run ./cmd/inbox
 ```
 
 ## Tech Stack
