@@ -151,7 +151,7 @@ func ensureStreams(js natsgo.JetStreamContext) error {
 		subjects []string
 		maxAge   time.Duration
 	}{
-		{"HERMES_WA", []string{"hermes.wa.>"}, 7 * 24 * time.Hour},
+		{"HERMES_WA", []string{"hermes.wa.message.>", "hermes.wa.ban.>", "hermes.wa.connection.>", "hermes.wa.presence.>"}, 7 * 24 * time.Hour},
 		{"HERMES_CAMPAIGN", []string{"hermes.campaign.>", "hermes.wa.send.campaign.>"}, 30 * 24 * time.Hour},
 		{"HERMES_INBOX", []string{"hermes.wa.send.manual.>"}, 24 * time.Hour},
 		{"HERMES_CONTACTS", []string{"hermes.contacts.>"}, 24 * time.Hour},

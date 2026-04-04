@@ -89,7 +89,7 @@ func ensureStreams(js natsgo.JetStreamContext) error {
 	// HERMES_WA stream (ban events, inbound messages come from here)
 	if _, err := js.AddStream(&natsgo.StreamConfig{
 		Name:     "HERMES_WA",
-		Subjects: []string{"hermes.wa.>"},
+		Subjects: []string{"hermes.wa.message.>", "hermes.wa.ban.>", "hermes.wa.connection.>", "hermes.wa.presence.>"},
 		Storage:  natsgo.FileStorage,
 		MaxAge:   7 * 24 * time.Hour,
 	}); err != nil {

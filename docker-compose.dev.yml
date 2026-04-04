@@ -1,0 +1,359 @@
+# Hermès — Full Local Dev Stack
+# Usage: docker compose -f docker-compose.dev.yml up --build
+#
+# Starts: PostgreSQL, Redis, NATS + all 7 Go services + frontend dev server
+# Services resolve each other by container name on hermes-net bridge network.
+
+services:
+  # ═══════════════════════════════════════════════════════════════
+  # Infrastructure
+  # ═══════════════════════════════════════════════════════════════
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: hermes
+      POSTGRES_USER: hermes
+      POSTGRES_PASSWORD: hermes_dev
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hermes"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - hermes-net
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - hermes-net
+
+  nats:
+    image: nats:2-alpine
+    command: >
+      -js
+      -sd /data
+      -m 8222
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - natsdata:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - hermes-net
+
+  # ═══════════════════════════════════════════════════════════════
+  # Database Migrations (run-once init container)
+  # ═══════════════════════════════════════════════════════════════
+
+  migrate:
+    image: migrate/migrate:v4.18.2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+    entrypoint: /bin/sh
+    command: |
+      -c '
+      for svc in gateway wa campaign inbox contacts proxy notify; do
+        echo "Migrating $$svc..."
+        /migrate -path /migrations/$$svc \
+          -database "postgres://hermes:hermes_dev@postgres:5432/hermes?sslmode=disable&x-migrations-table=schema_migrations_$$svc" \
+          up || true
+      done
+      echo "All migrations complete."
+      '
+    networks:
+      - hermes-net
+
+  # ═══════════════════════════════════════════════════════════════
+  # Backend Services (Layer 1 — no gRPC deps on other services)
+  # ═══════════════════════════════════════════════════════════════
+
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        SERVICE: proxy
+    environment:
+      PORT: "9101"
+      DATABASE_URL: postgres://hermes:hermes_dev@postgres:5432/hermes?sslmode=disable
+      NATS_URL: nats://nats:4222
+      BAN_FLAG_THRESHOLD: "3"
+      LOG_LEVEL: debug
+    ports:
+      - "9101:9101"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:9101/ 2>&1 || nc -z localhost 9101"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - hermes-net
+
+  contacts:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        SERVICE: contacts
+    environment:
+      PORT: "9102"
+      DATABASE_URL: postgres://hermes:hermes_dev@postgres:5432/hermes?sslmode=disable
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: debug
+    ports:
+      - "9102:9102"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9102"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - hermes-net
+
+  notify:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        SERVICE: notify
+    environment:
+      PORT: "9103"
+      DATABASE_URL: postgres://hermes:hermes_dev@postgres:5432/hermes?sslmode=disable
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: debug
+    ports:
+      - "9103:9103"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9103"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - hermes-net
+
+  # ═══════════════════════════════════════════════════════════════
+  # Backend Services (Layer 2 — wa depends on proxy)
+  # ═══════════════════════════════════════════════════════════════
+
+  wa:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        SERVICE: wa
+    environment:
+      PORT: "9104"
+      DATABASE_URL: postgres://hermes:hermes_dev@postgres:5432/hermes?sslmode=disable
+      NATS_URL: nats://nats:4222
+      REDIS_URL: redis://redis:6379
+      POD_ID: hermes-wa-0
+      PROXY_SERVICE_ADDR: proxy:9101
+      LOG_LEVEL: debug
+    ports:
+      - "9104:9104"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      proxy:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9104"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - hermes-net
+
+  campaign:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        SERVICE: campaign
+    environment:
+      PORT: "9105"
+      DATABASE_URL: postgres://hermes:hermes_dev@postgres:5432/hermes?sslmode=disable
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: debug
+    ports:
+      - "9105:9105"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9105"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - hermes-net
+
+  inbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        SERVICE: inbox
+    environment:
+      PORT: "9106"
+      DATABASE_URL: postgres://hermes:hermes_dev@postgres:5432/hermes?sslmode=disable
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: debug
+    ports:
+      - "9106:9106"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9106"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - hermes-net
+
+  # ═══════════════════════════════════════════════════════════════
+  # Gateway (Layer 4 — depends on all backend services)
+  # ═══════════════════════════════════════════════════════════════
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        SERVICE: gateway
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://hermes:hermes_dev@postgres:5432/hermes?sslmode=disable
+      NATS_URL: nats://nats:4222
+      JWT_SECRET: hermes-dev-jwt-secret-change-in-prod
+      WA_ADDR: wa:9104
+      PROXY_ADDR: proxy:9101
+      CONTACTS_ADDR: contacts:9102
+      CAMPAIGN_ADDR: campaign:9105
+      INBOX_ADDR: inbox:9106
+      NOTIFY_ADDR: notify:9103
+      LOG_LEVEL: debug
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      proxy:
+        condition: service_started
+      contacts:
+        condition: service_started
+      notify:
+        condition: service_started
+      wa:
+        condition: service_started
+      campaign:
+        condition: service_started
+      inbox:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - hermes-net
+
+  # ═══════════════════════════════════════════════════════════════
+  # Frontend (Vite dev server with hot reload)
+  # ═══════════════════════════════════════════════════════════════
+
+  web:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
+    volumes:
+      - ./web:/app
+      - web_node_modules:/app/node_modules
+    ports:
+      - "5173:5173"
+    environment:
+      # Vite uses this for proxy targets (overrides vite.config.ts server.proxy)
+      VITE_API_URL: http://gateway:8080
+      VITE_WS_URL: ws://gateway:8081
+    depends_on:
+      gateway:
+        condition: service_started
+    networks:
+      - hermes-net
+
+volumes:
+  pgdata:
+  natsdata:
+  web_node_modules:
+
+networks:
+  hermes-net:
+    driver: bridge

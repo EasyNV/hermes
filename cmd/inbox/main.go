@@ -86,7 +86,7 @@ func ensureStreams(js natsgo.JetStreamContext) error {
 	// HERMES_WA — consumed for inbound/outbound events.
 	if _, err := js.AddStream(&natsgo.StreamConfig{
 		Name:     "HERMES_WA",
-		Subjects: []string{"hermes.wa.>"},
+		Subjects: []string{"hermes.wa.message.>", "hermes.wa.ban.>", "hermes.wa.connection.>", "hermes.wa.presence.>"},
 		Storage:  natsgo.FileStorage,
 		MaxAge:   7 * 24 * time.Hour,
 	}); err != nil {
