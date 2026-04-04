@@ -22,18 +22,20 @@ import (
 
 // Adapter wraps a HermesGateway gRPC handler and exposes it as REST/JSON.
 type Adapter struct {
-	gw        hermesv1.HermesGatewayServer
-	jwtSecret []byte
-	log       zerolog.Logger
-	marshaler protojson.MarshalOptions
+	gw          hermesv1.HermesGatewayServer
+	jwtSecret   []byte
+	log         zerolog.Logger
+	marshaler   protojson.MarshalOptions
+	waHTTPAddr  string // WA service HTTP endpoint for phone pairing (e.g. "wa:9105")
 }
 
 // New creates a REST adapter for the given gRPC handler.
-func New(gw hermesv1.HermesGatewayServer, jwtSecret []byte, log zerolog.Logger) *Adapter {
+func New(gw hermesv1.HermesGatewayServer, jwtSecret []byte, log zerolog.Logger, waHTTPAddr string) *Adapter {
 	return &Adapter{
-		gw:        gw,
-		jwtSecret: jwtSecret,
-		log:       log.With().Str("component", "rest").Logger(),
+		gw:         gw,
+		jwtSecret:  jwtSecret,
+		log:        log.With().Str("component", "rest").Logger(),
+		waHTTPAddr: waHTTPAddr,
 		marshaler: protojson.MarshalOptions{
 			EmitDefaultValues: true,
 			UseProtoNames:     false, // camelCase for frontend
@@ -141,6 +143,9 @@ func (a *Adapter) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/canned-responses", a.auth(a.listCannedResponses))
 	mux.HandleFunc("PUT /api/v1/canned-responses/{id}", a.auth(a.updateCannedResponse))
 	mux.HandleFunc("DELETE /api/v1/canned-responses/{id}", a.auth(a.deleteCannedResponse))
+
+	// Phone pairing
+	mux.HandleFunc("POST /api/v1/wa-numbers/{id}/pair-phone", a.auth(a.pairPhone))
 
 	// Notifications
 	mux.HandleFunc("POST /api/v1/notifications", a.auth(a.configureNotification))

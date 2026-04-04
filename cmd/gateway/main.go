@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -100,7 +101,9 @@ func main() {
 	}
 
 	// REST adapter — JSON-over-HTTP for the frontend
-	restAdapter := gwrest.New(h, []byte(cfg.JWTSecret), log)
+	// WA HTTP addr is WA gRPC addr with port+1 (e.g. wa:9104 → wa:9105)
+	waHTTPAddr := strings.Replace(cfg.WaAddr, "9104", "9105", 1)
+	restAdapter := gwrest.New(h, []byte(cfg.JWTSecret), log, waHTTPAddr)
 
 	// HTTP server for REST API + WebSocket endpoint
 	mux := http.NewServeMux()

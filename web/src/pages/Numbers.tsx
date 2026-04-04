@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAuthStore } from '@/stores/auth'
-import { listWaNumbers, registerWaNumber, getQRCode, disconnectWaNumber, reconnectWaNumber, deleteWaNumber } from '@/api/numbers'
+import { listWaNumbers, registerWaNumber, getQRCode, disconnectWaNumber, reconnectWaNumber, deleteWaNumber, pairPhone } from '@/api/numbers'
 import { listWorkspaces } from '@/api/workspaces'
 import type { WaNumber, WaNumberStatus } from '@/api/types'
 import { WA_STATUS } from '@/lib/constants'
@@ -152,6 +152,21 @@ export default function Numbers() {
       displayName: regDisplayName,
       workspaceIds: regWorkspaceIds,
     })
+  }
+
+  // --- Phone pairing state ---
+  const [pairState, setPairState] = useState<{ phone: string; code: string; loading: boolean; error: string }>({
+    phone: '', code: '', loading: false, error: '',
+  })
+
+  async function handlePairPhone() {
+    setPairState(s => ({ ...s, loading: true, error: '' }))
+    try {
+      const res = await pairPhone(qrModal.waNumberId, pairState.phone)
+      setPairState(s => ({ ...s, code: res.pairingCode, loading: false }))
+    } catch (err) {
+      setPairState(s => ({ ...s, loading: false, error: err instanceof Error ? err.message : 'Failed to generate pairing code' }))
+    }
   }
 
   function toggleWorkspace(wsId: string) {
@@ -342,30 +357,73 @@ export default function Numbers() {
         </DialogContent>
       </Dialog>
 
-      {/* QR Code Modal */}
-      <Dialog open={qrModal.open} onOpenChange={(v) => { if (!v) setQrModal({ open: false, waNumberId: '', qrCode: '' }) }}>
-        <DialogContent>
+      {/* QR Code / Phone Pairing Modal */}
+      <Dialog open={qrModal.open} onOpenChange={(v) => { if (!v) { setQrModal({ open: false, waNumberId: '', qrCode: '' }); setPairState({ phone: '', code: '', loading: false, error: '' }) } }}>
+        <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Scan QR Code</DialogTitle>
+            <DialogTitle>Link WhatsApp Number</DialogTitle>
             <DialogDescription>
-              Open WhatsApp on your phone and scan this QR code to link the number.
+              Choose how to link this number to WhatsApp.
             </DialogDescription>
           </DialogHeader>
-          <div className="flex flex-col items-center gap-4 py-4">
-            {qrModal.qrCode ? (
-              <img
-                src={`data:image/png;base64,${qrModal.qrCode}`}
-                alt="WhatsApp QR Code"
-                className="h-64 w-64 rounded-lg border"
-              />
+
+          {/* QR Code Section */}
+          <div className="space-y-3">
+            <h3 className="text-sm font-medium">Option 1: Scan QR Code</h3>
+            <div className="flex flex-col items-center gap-3">
+              {qrModal.qrCode ? (
+                <img
+                  src={`data:image/png;base64,${qrModal.qrCode}`}
+                  alt="WhatsApp QR Code"
+                  className="h-48 w-48 rounded-lg border"
+                />
+              ) : (
+                <div className="flex h-48 w-48 items-center justify-center rounded-lg border">
+                  <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+                </div>
+              )}
+              <p className="text-xs text-muted-foreground">
+                WhatsApp → Settings → Linked Devices → Link a Device
+              </p>
+            </div>
+          </div>
+
+          <div className="relative my-2">
+            <div className="absolute inset-0 flex items-center"><span className="w-full border-t" /></div>
+            <div className="relative flex justify-center text-xs uppercase"><span className="bg-background px-2 text-muted-foreground">or</span></div>
+          </div>
+
+          {/* Phone Number Pairing Section */}
+          <div className="space-y-3">
+            <h3 className="text-sm font-medium">Option 2: Link with Phone Number</h3>
+            {pairState.code ? (
+              <div className="rounded-lg border bg-muted/50 p-4 text-center">
+                <p className="text-sm text-muted-foreground mb-2">Enter this code in WhatsApp:</p>
+                <p className="text-3xl font-mono font-bold tracking-widest">{pairState.code}</p>
+                <p className="text-xs text-muted-foreground mt-2">
+                  WhatsApp → Linked Devices → Link a Device → "Link with phone number instead"
+                </p>
+              </div>
             ) : (
-              <div className="flex h-64 w-64 items-center justify-center rounded-lg border">
-                <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+              <div className="flex gap-2">
+                <Input
+                  placeholder="Phone number (e.g. 628123456789)"
+                  value={pairState.phone}
+                  onChange={(e) => setPairState(s => ({ ...s, phone: e.target.value, error: '' }))}
+                  disabled={pairState.loading}
+                />
+                <Button
+                  onClick={handlePairPhone}
+                  disabled={!pairState.phone || pairState.loading}
+                  size="sm"
+                >
+                  {pairState.loading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Get Code'}
+                </Button>
               </div>
             )}
-            <p className="text-sm text-muted-foreground">
-              Waiting for scan... Polling every 3 seconds.
-            </p>
+            {pairState.error && (
+              <p className="text-sm text-destructive">{pairState.error}</p>
+            )}
           </div>
         </DialogContent>
       </Dialog>

@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -87,6 +89,35 @@ func main() {
 	h := handler.NewHandler(store, mgr, snd, proxyClient, cfg.PodID, log)
 	grpcServer := grpc.NewServer()
 	hermesv1.RegisterHermesWaServer(grpcServer, h)
+
+	// HTTP endpoint for phone pairing (called by gateway REST adapter).
+	go func() {
+		pairMux := http.NewServeMux()
+		pairMux.HandleFunc("POST /pair-phone", func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				WaNumberID  string `json:"waNumberId"`
+				PhoneNumber string `json:"phoneNumber"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, `{"error":"bad request"}`, 400)
+				return
+			}
+			code, err := mgr.PairPhone(r.Context(), req.WaNumberID, req.PhoneNumber)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(500)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"pairingCode": code})
+		})
+		pairAddr := fmt.Sprintf(":%d", cfg.Port+1)
+		log.Info().Str("addr", pairAddr).Msg("phone pairing HTTP endpoint started")
+		if err := http.ListenAndServe(pairAddr, pairMux); err != nil {
+			log.Error().Err(err).Msg("phone pairing HTTP server failed")
+		}
+	}()
 
 	// NATS consumers for campaign and manual sends.
 	if err := startCampaignConsumer(js, mgr, snd, store, log); err != nil {

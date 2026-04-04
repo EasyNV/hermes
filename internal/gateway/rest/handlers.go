@@ -1,6 +1,10 @@
 package rest
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -970,6 +974,51 @@ func (a *Adapter) deleteNotificationConfig(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	a.writeProto(w, resp)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Phone Pairing (proxies to WA service HTTP endpoint)
+// ═══════════════════════════════════════════════════════════════
+
+func (a *Adapter) pairPhone(w http.ResponseWriter, r *http.Request) {
+	waNumberID := r.PathValue("id")
+	if waNumberID == "" {
+		a.writeError(w, 400, "BAD_REQUEST", "wa number id required")
+		return
+	}
+
+	// Read phone number from request body.
+	var body struct {
+		PhoneNumber string `json:"phoneNumber"`
+	}
+	if err := readJSON(r, &body); err != nil || body.PhoneNumber == "" {
+		a.writeError(w, 400, "BAD_REQUEST", "phoneNumber is required")
+		return
+	}
+
+	// First ensure the session is connected and in QR_PENDING state.
+	// The WA service's ConnectSession should have been called already (via RegisterWaNumber or ReconnectWaNumber).
+
+	// Call the WA service's HTTP pair-phone endpoint.
+	reqBody, _ := json.Marshal(map[string]string{
+		"waNumberId":  waNumberID,
+		"phoneNumber": body.PhoneNumber,
+	})
+
+	waURL := fmt.Sprintf("http://%s/pair-phone", a.waHTTPAddr)
+	resp, err := http.Post(waURL, "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		a.log.Error().Err(err).Str("url", waURL).Msg("failed to call WA pair-phone")
+		a.writeError(w, 502, "WA_UNAVAILABLE", "could not reach WA service for phone pairing")
+		return
+	}
+	defer resp.Body.Close()
+
+	// Forward the response.
+	respBody, _ := io.ReadAll(resp.Body)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	w.Write(respBody)
 }
 
 // Unused import guard.

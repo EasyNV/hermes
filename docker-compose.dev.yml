@@ -195,6 +195,7 @@ services:
       LOG_LEVEL: debug
     ports:
       - "9104:9104"
+      - "9114:9105"
     depends_on:
       postgres:
         condition: service_healthy

@@ -41,3 +41,7 @@ export function reconnectWaNumber(id: string) {
 export function deleteWaNumber(id: string) {
   return api.del<void>(`/wa-numbers/${id}`)
 }
+
+export function pairPhone(waNumberId: string, phoneNumber: string) {
+  return api.post<{ pairingCode: string }>(`/wa-numbers/${waNumberId}/pair-phone`, { phoneNumber })
+}

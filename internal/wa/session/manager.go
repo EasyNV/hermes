@@ -16,6 +16,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
+	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -26,6 +27,7 @@ type Manager interface {
 	GetSession(waNumberID string) (*Info, bool)
 	GetClient(waNumberID string) (sender.WaClient, bool)
 	GetQRCode(waNumberID string) (qr string, expiresAt time.Time, isLinked bool, err error)
+	PairPhone(ctx context.Context, waNumberID, phoneNumber string) (string, error)
 	ListSessions() []*Info
 	GetPodStats() PodStats
 	Close()
@@ -157,7 +159,7 @@ func (m *realManager) Connect(ctx context.Context, waNumberID, phone, jid, proxy
 	}
 	if client == nil {
 		device := m.container.NewDevice()
-		client = whatsmeow.NewClient(device, nil)
+		client = whatsmeow.NewClient(device, zerologWaLogger{m.log.With().Str("wa_number_id", waNumberID).Logger()})
 	}
 
 	// Configure proxy.
@@ -183,7 +185,10 @@ func (m *realManager) Connect(ctx context.Context, waNumberID, phone, jid, proxy
 	// Determine if QR pairing is needed.
 	if client.Store.ID == nil {
 		// New device — need QR code.
-		qrChan, err := client.GetQRChannel(ctx)
+		// Use background context — the QR session must outlive the gRPC request.
+		// If we pass the request ctx, it gets cancelled when ConnectSession returns,
+		// which kills the whatsmeow websocket and invalidates the QR code.
+		qrChan, err := client.GetQRChannel(context.Background())
 		if err != nil {
 			delete(m.sessions, waNumberID)
 			return nil, "", fmt.Errorf("getting QR channel: %w", err)
@@ -194,9 +199,19 @@ func (m *realManager) Connect(ctx context.Context, waNumberID, phone, jid, proxy
 			return nil, "", fmt.Errorf("connecting: %w", err)
 		}
 
+		m.log.Info().
+			Str("wa_number_id", waNumberID).
+			Bool("connected_after_connect", client.IsConnected()).
+			Msg("client.Connect() returned, waiting for QR")
+
 		// Wait for first QR code.
 		for evt := range qrChan {
 			if evt.Event == "code" {
+				m.log.Info().
+					Str("wa_number_id", waNumberID).
+					Int("code_len", len(evt.Code)).
+					Bool("connected", client.IsConnected()).
+					Msg("first QR code received")
 				sess.state = hermesv1.SessionState_SESSION_STATE_QR_PENDING
 				sess.qrCode = evt.Code
 				sess.qrExpiresAt = time.Now().Add(60 * time.Second)
@@ -300,6 +315,39 @@ func (m *realManager) GetQRCode(waNumberID string) (string, time.Time, bool, err
 	return sess.qrCode, sess.qrExpiresAt, false, nil
 }
 
+func (m *realManager) PairPhone(ctx context.Context, waNumberID, phoneNumber string) (string, error) {
+	m.mu.RLock()
+	sess, ok := m.sessions[waNumberID]
+	m.mu.RUnlock()
+	if !ok {
+		return "", fmt.Errorf("session not found: %s (call Connect first)", waNumberID)
+	}
+
+	m.log.Info().
+		Str("wa_number_id", waNumberID).
+		Str("state", sess.state.String()).
+		Bool("connected", sess.client.IsConnected()).
+		Bool("logged_in", sess.client.IsLoggedIn()).
+		Msg("PairPhone: session state check")
+
+	if !sess.client.IsConnected() {
+		return "", fmt.Errorf("websocket not connected (state=%s)", sess.state)
+	}
+
+	code, err := sess.client.PairPhone(ctx, phoneNumber, true, whatsmeow.PairClientChrome, "Chrome (Linux)")
+	if err != nil {
+		return "", fmt.Errorf("pair phone: %w", err)
+	}
+
+	m.log.Info().
+		Str("wa_number_id", waNumberID).
+		Str("phone", phoneNumber).
+		Str("code", code).
+		Msg("phone pairing code generated")
+
+	return code, nil
+}
+
 func (m *realManager) ListSessions() []*Info {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -400,6 +448,19 @@ func buildProxyURL(p *ProxyConfig) string {
 		u.User = url.UserPassword(p.Username, p.Password)
 	}
 	return u.String()
+}
+
+// zerologWaLogger adapts zerolog to whatsmeow's Logger interface.
+type zerologWaLogger struct {
+	log zerolog.Logger
+}
+
+func (l zerologWaLogger) Warnf(msg string, args ...interface{})  { l.log.Warn().Msgf(msg, args...) }
+func (l zerologWaLogger) Errorf(msg string, args ...interface{}) { l.log.Error().Msgf(msg, args...) }
+func (l zerologWaLogger) Infof(msg string, args ...interface{})  { l.log.Info().Msgf(msg, args...) }
+func (l zerologWaLogger) Debugf(msg string, args ...interface{}) { l.log.Debug().Msgf(msg, args...) }
+func (l zerologWaLogger) Sub(module string) waLog.Logger {
+	return zerologWaLogger{l.log.With().Str("wm", module).Logger()}
 }
 
 // waClientAdapter wraps *whatsmeow.Client to implement sender.WaClient.

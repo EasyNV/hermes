@@ -81,6 +81,7 @@ type mockManager struct {
 	getSessionFn   func(waNumberID string) (*session.Info, bool)
 	getClientFn    func(waNumberID string) (sender.WaClient, bool)
 	getQRCodeFn    func(waNumberID string) (string, time.Time, bool, error)
+	pairPhoneFn    func(ctx context.Context, waNumberID, phoneNumber string) (string, error)
 	listSessionsFn func() []*session.Info
 	getPodStatsFn  func() session.PodStats
 }
@@ -121,6 +122,13 @@ func (m *mockManager) ListSessions() []*session.Info {
 	}
 	return nil
 }
+func (m *mockManager) PairPhone(ctx context.Context, waNumberID, phoneNumber string) (string, error) {
+	if m.pairPhoneFn != nil {
+		return m.pairPhoneFn(ctx, waNumberID, phoneNumber)
+	}
+	return "ABCD-EFGH", nil
+}
+
 func (m *mockManager) GetPodStats() session.PodStats {
 	if m.getPodStatsFn != nil {
 		return m.getPodStatsFn()
