@@ -164,18 +164,47 @@ func (m *realManager) handleInboundMessage(waNumberID string, msg *events.Messag
 		return
 	}
 
-	// Only process 1:1 messages from individual users.
-	// Skip groups (@g.us), broadcasts (@broadcast), status, newsletters, LID-only contacts.
-	if msg.Info.Chat.Server != types.DefaultUserServer {
+	// Only process 1:1 messages (not groups, broadcasts, newsletters, bots).
+	if msg.Info.IsGroup {
 		return
 	}
-	// Skip messages where sender phone is not a valid phone number (LID contacts).
-	if len(msg.Info.Sender.User) > 15 || len(msg.Info.Sender.User) < 7 {
+	switch msg.Info.Chat.Server {
+	case types.DefaultUserServer, types.HiddenUserServer:
+		// OK — individual chat (phone-addressed or LID-addressed)
+	default:
+		m.log.Debug().
+			Str("wa_number_id", waNumberID).
+			Str("chat_server", msg.Info.Chat.Server).
+			Str("sender", msg.Info.Sender.String()).
+			Msg("inbound: filtered (non-user chat server)")
 		return
 	}
 
-	senderJID := msg.Info.Sender.String()
+	// Resolve the phone number. If sender is LID, try SenderAlt for the phone JID.
 	senderPhone := msg.Info.Sender.User
+	senderJIDStr := msg.Info.Sender.String()
+	if msg.Info.Sender.Server == types.HiddenUserServer {
+		if msg.Info.SenderAlt.Server == types.DefaultUserServer && msg.Info.SenderAlt.User != "" {
+			senderPhone = msg.Info.SenderAlt.User
+			senderJIDStr = msg.Info.SenderAlt.String()
+		} else {
+			// No phone mapping available — use LID as-is. The inbox will auto-create a contact.
+			m.log.Debug().
+				Str("lid", msg.Info.Sender.String()).
+				Str("push_name", msg.Info.PushName).
+				Msg("inbound: LID sender with no phone mapping, using LID")
+		}
+	}
+
+	m.log.Info().
+		Str("wa_number_id", waNumberID).
+		Str("sender_phone", senderPhone).
+		Str("sender_jid", senderJIDStr).
+		Str("chat_server", msg.Info.Chat.Server).
+		Str("push_name", msg.Info.PushName).
+		Msg("inbound: publishing to NATS")
+
+	// senderPhone and senderJIDStr already resolved above (with LID fallback).
 	waMessageID := msg.Info.ID
 	senderName := msg.Info.PushName
 
@@ -205,7 +234,7 @@ func (m *realManager) handleInboundMessage(waNumberID string, msg *events.Messag
 		body = msg.Message.GetVideoMessage().GetCaption()
 	}
 
-	m.eventPub.PublishInbound(waNumberID, senderJID, senderPhone, waMessageID, contentType, body, mediaURL, mimeType, senderName)
+	m.eventPub.PublishInbound(waNumberID, senderJIDStr, senderPhone, waMessageID, contentType, body, mediaURL, mimeType, senderName)
 }
 
 func (m *realManager) handleReceipt(waNumberID string, receipt *events.Receipt) {
