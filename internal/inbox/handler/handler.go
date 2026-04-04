@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -526,7 +527,9 @@ func (h *Handler) SendMessage(ctx context.Context, req *hermesv1.InboxSendMessag
 			contact, _ := h.store.GetConversationContact(ctx, conv.ContactID)
 			recipientJID := ""
 			if contact != nil {
-				recipientJID = contact.Phone + "@s.whatsapp.net"
+				// Strip '+' prefix — WhatsApp JIDs use bare country code (e.g. 628xxx, not +628xxx).
+				phone := strings.TrimPrefix(contact.Phone, "+")
+				recipientJID = phone + "@s.whatsapp.net"
 			}
 
 			eventID := uuid.New().String()

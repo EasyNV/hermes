@@ -13,6 +13,7 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // register "pgx" driver for database/sql (whatsmeow)
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	hermesv1 "github.com/hermes-waba/hermes/gen/go/hermes/v1"
 	waconfig "github.com/hermes-waba/hermes/internal/wa/config"
@@ -123,7 +124,7 @@ func main() {
 	if err := startCampaignConsumer(js, mgr, snd, store, log); err != nil {
 		log.Fatal().Err(err).Msg("failed to start campaign send consumer")
 	}
-	if err := startManualConsumer(js, mgr, snd, store, log); err != nil {
+	if err := startManualConsumer(js, mgr, snd, store, pool, log); err != nil {
 		log.Fatal().Err(err).Msg("failed to start manual send consumer")
 	}
 
@@ -251,7 +252,7 @@ func startCampaignConsumer(js natsgo.JetStreamContext, mgr session.Manager, snd 
 
 // startManualConsumer subscribes to manual send tasks from inbox agents.
 // Flow: send message immediately → ACK.
-func startManualConsumer(js natsgo.JetStreamContext, mgr session.Manager, snd sender.Sender, store handler.Store, log zerolog.Logger) error {
+func startManualConsumer(js natsgo.JetStreamContext, mgr session.Manager, snd sender.Sender, store handler.Store, pool *pgxpool.Pool, log zerolog.Logger) error {
 	_, err := js.Subscribe("hermes.wa.send.manual.*", func(msg *natsgo.Msg) {
 		var task hermesv1.ManualSendTask
 		if err := proto.Unmarshal(msg.Data, &task); err != nil {
@@ -262,20 +263,47 @@ func startManualConsumer(js natsgo.JetStreamContext, mgr session.Manager, snd se
 
 		client, ok := mgr.GetClient(task.WaNumberId)
 		if !ok {
+			log.Warn().
+				Str("wa_number_id", task.WaNumberId).
+				Str("message_id", task.MessageId).
+				Str("recipient", task.RecipientJid).
+				Msg("manual send: WA client not connected, NAKing for retry")
 			msg.Nak()
 			return
 		}
 
+		log.Info().
+			Str("wa_number_id", task.WaNumberId).
+			Str("recipient", task.RecipientJid).
+			Int("body_len", len(task.Body)).
+			Msg("manual send: sending message via whatsmeow")
+
 		ctx := context.Background()
-		_, _, err := snd.SendMessage(ctx, client, task.RecipientJid, task.ContentType, task.Body, task.MediaUrl, "", "")
+		waMessageID, _, err := snd.SendMessage(ctx, client, task.RecipientJid, task.ContentType, task.Body, task.MediaUrl, "", "")
 		if err != nil {
-			log.Error().Err(err).Str("message_id", task.MessageId).Msg("manual send failed")
+			log.Error().Err(err).Str("message_id", task.MessageId).Str("recipient", task.RecipientJid).Msg("manual send failed")
 			msg.Nak()
 			return
 		}
+
+		log.Info().
+			Str("message_id", task.MessageId).
+			Str("wa_message_id", waMessageID).
+			Str("recipient", task.RecipientJid).
+			Msg("manual send: delivered via whatsmeow")
 
 		if err := store.IncrementSentCount(ctx, task.WaNumberId); err != nil {
 			log.Error().Err(err).Str("wa_number_id", task.WaNumberId).Msg("failed to increment sent count")
+		}
+
+		// Update message status from pending → sent and record wa_message_id.
+		if task.MessageId != "" {
+			if _, err := pool.Exec(ctx,
+				"UPDATE messages SET status='sent', wa_message_id=$1 WHERE id=$2 AND status='pending'",
+				waMessageID, task.MessageId,
+			); err != nil {
+				log.Error().Err(err).Str("message_id", task.MessageId).Msg("failed to update message status")
+			}
 		}
 
 		msg.Ack()
