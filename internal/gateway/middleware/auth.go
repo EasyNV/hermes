@@ -23,10 +23,11 @@ const (
 )
 
 // Claims represents the JWT claims embedded in access tokens.
+// JSON tags MUST match handler.Claims which generates the tokens: uid, tid, wid, role.
 type Claims struct {
-	UserID      string `json:"user_id"`
-	TenantID    string `json:"tenant_id"`
-	WorkspaceID string `json:"workspace_id"`
+	UserID      string `json:"uid"`
+	TenantID    string `json:"tid"`
+	WorkspaceID string `json:"wid"`
 	Role        string `json:"role"`
 	jwt.RegisteredClaims
 }
