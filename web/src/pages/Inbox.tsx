@@ -23,6 +23,7 @@ import { cn, truncate, formatPhone } from '@/lib/utils'
 
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
@@ -341,14 +342,15 @@ export default function Inbox() {
     sendMutation.mutate({ conversationId: activeConversationId, body: messageText.trim() })
   }, [messageText, activeConversationId, sendMutation])
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSend()
     }
+    // Shift+Enter inserts newline (default textarea behavior).
   }, [handleSend])
 
-  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value
     setMessageText(value)
     setShowCanned(value.startsWith('/') && value.length >= 1)
@@ -555,12 +557,20 @@ export default function Inbox() {
                     onClose={() => setShowCanned(false)}
                   />
                 )}
-                <Input
+                <Textarea
                   placeholder="Type a message... (type / for canned responses)"
                   value={messageText}
                   onChange={handleInputChange}
                   onKeyDown={handleKeyDown}
-                  className="flex-1"
+                  rows={1}
+                  className="flex-1 min-h-[38px] max-h-[120px] resize-none py-2"
+                  style={{ height: 'auto', overflow: 'hidden' }}
+                  onInput={(e) => {
+                    const t = e.currentTarget
+                    t.style.height = 'auto'
+                    t.style.height = Math.min(t.scrollHeight, 120) + 'px'
+                    t.style.overflow = t.scrollHeight > 120 ? 'auto' : 'hidden'
+                  }}
                 />
                 <Button
                   size="icon"
