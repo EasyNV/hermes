@@ -577,7 +577,13 @@ func (s *PgStore) ListCampaignContacts(ctx context.Context, campaignID, status s
 
 func (s *PgStore) GetPendingContacts(ctx context.Context, campaignID string, limit int32) ([]*PendingContactRow, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT cc.contact_id, COALESCE(c.phone,''), COALESCE(c.name,''), COALESCE(c.custom_fields, '{}')
+		`SELECT cc.contact_id, COALESCE(c.phone,''), COALESCE(c.name,''),
+		        COALESCE(
+		            (SELECT json_object_agg(cf.key, cf.value)
+		             FROM contact_custom_fields cf
+		             WHERE cf.contact_id = c.id),
+		            '{}'
+		        )::text
 		 FROM campaign_contacts cc
 		 JOIN contacts c ON c.id = cc.contact_id
 		 WHERE cc.campaign_id = $1 AND cc.status = 'pending'
