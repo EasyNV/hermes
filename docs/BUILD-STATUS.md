@@ -11,8 +11,8 @@
 | **2** | hermes-wa | 8/8 | 28 pass | ✅ Done | `cb8f9e9` |
 | **2** | hermes-campaign | 17/17 | 42 pass | ✅ Done | `cb8f9e9` |
 | **3** | hermes-inbox | 14/14 | 29 pass | ✅ Done | `acea288` |
-| **4** | hermes-gateway | 75/75 | 23 pass | ✅ Done | (pending) |
-| **4** | hermes-web | 11 pages | 0 (TypeScript strict) | ✅ Done | (pending) |
+| **4** | hermes-gateway | 75/75 | 23 pass | ✅ Done | `f5617ee` |
+| **4** | hermes-web | 11 pages | 0 (TypeScript strict) | ✅ Done | `f5617ee` |
 
 ## Infrastructure
 
