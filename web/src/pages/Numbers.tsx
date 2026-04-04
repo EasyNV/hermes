@@ -96,7 +96,9 @@ export default function Numbers() {
     if (qrData?.isLinked) {
       setQrModal({ open: false, waNumberId: '', qrCode: '' })
       queryClient.invalidateQueries({ queryKey: ['wa-numbers'] })
-    } else if (qrData?.qrCode) {
+    } else if (qrData?.qrCode && qrData.qrCode.length > 0) {
+      // Only update if the poll returned a non-empty QR (whatsmeow may return
+      // empty between QR rotations — don't overwrite the current valid QR).
       setQrModal((prev) => ({ ...prev, qrCode: qrData.qrCode }))
     }
   }, [qrData, queryClient])
@@ -252,7 +254,12 @@ export default function Numbers() {
                         onReconnect={() => reconnectMutation.mutate(num.id)}
                         onDelete={() => setConfirmDelete({ open: true, number: num })}
                         onShowQr={() => {
-                          setQrModal({ open: true, waNumberId: num.id, qrCode: '' })
+                          // For disconnected numbers, trigger reconnect to get a fresh QR.
+                          if (num.status === 'WA_NUMBER_STATUS_DISCONNECTED' || num.status === 'WA_NUMBER_STATUS_BANNED') {
+                            reconnectMutation.mutate(num.id)
+                          } else {
+                            setQrModal({ open: true, waNumberId: num.id, qrCode: '' })
+                          }
                         }}
                       />
                     </TableCell>

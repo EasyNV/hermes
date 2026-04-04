@@ -2,9 +2,11 @@ package handler
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 
 	"github.com/rs/zerolog"
+	qrcode "github.com/skip2/go-qrcode"
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -12,6 +14,19 @@ import (
 	hermesv1 "github.com/hermes-waba/hermes/gen/go/hermes/v1"
 	"github.com/hermes-waba/hermes/internal/gateway/middleware"
 )
+
+// qrStringToPNGBase64 converts a whatsmeow QR string (e.g. "2@ABC...") into
+// a base64-encoded PNG image suitable for <img src="data:image/png;base64,...">.
+func qrStringToPNGBase64(qrStr string) string {
+	if qrStr == "" {
+		return ""
+	}
+	png, err := qrcode.Encode(qrStr, qrcode.Medium, 512)
+	if err != nil {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(png)
+}
 
 // ---------------------------------------------------------------------------
 // Handler struct
@@ -465,7 +480,7 @@ func (h *Handler) RegisterWaNumber(ctx context.Context, req *hermesv1.RegisterWa
 			h.log.Warn().Err(err).Str("wa_number_id", waNumberID).Msg("connect session failed (number registered but not connected)")
 			// Non-fatal — return the number without QR. User can reconnect later.
 		} else {
-			qrCode = resp.GetQrCode()
+			qrCode = qrStringToPNGBase64(resp.GetQrCode())
 			if resp.GetSession() != nil {
 				waNumber.Jid = resp.GetSession().GetJid()
 				waNumber.PodId = resp.GetSession().GetPodId()
@@ -496,7 +511,7 @@ func (h *Handler) GetQRCode(ctx context.Context, req *hermesv1.GetQRCodeRequest)
 	}
 
 	return &hermesv1.GetQRCodeResponse{
-		QrCode:   resp.GetQrCode(),
+		QrCode:   qrStringToPNGBase64(resp.GetQrCode()),
 		IsLinked: resp.GetIsLinked(),
 	}, nil
 }
@@ -643,7 +658,7 @@ func (h *Handler) ReconnectWaNumber(ctx context.Context, req *hermesv1.Reconnect
 
 	return &hermesv1.ReconnectWaNumberResponse{
 		WaNumber: waNumber,
-		QrCode:   resp.GetQrCode(),
+		QrCode:   qrStringToPNGBase64(resp.GetQrCode()),
 	}, nil
 }
 
