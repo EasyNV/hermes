@@ -44,9 +44,12 @@ type mockStore struct {
 	getDashboardStatsFn     func(ctx context.Context, tenantID, workspaceID string) (*DashboardStatsRow, error)
 	createWaNumberFn           func(ctx context.Context, tenantID, phone, displayName, proxyID string) (string, error)
 	assignWaNumberWorkspacesFn func(ctx context.Context, waNumberID string, workspaceIDs []string) error
-	listWaNumbersFn            func(ctx context.Context, tenantID, workspaceID, statusFilter string, page, pageSize int32) ([]*WaNumberRow, int64, error)
-	getWaNumberByIDFn          func(ctx context.Context, id string) (*WaNumberRow, error)
-	getWaNumberWorkspaceIDsFn  func(ctx context.Context, waNumberID string) ([]string, error)
+	listWaNumbersFn              func(ctx context.Context, tenantID, workspaceID, statusFilter string, page, pageSize int32) ([]*WaNumberRow, int64, error)
+	getWaNumberByIDFn            func(ctx context.Context, id string) (*WaNumberRow, error)
+	getWaNumberWorkspaceIDsFn    func(ctx context.Context, waNumberID string) ([]string, error)
+	deleteWaNumberFn             func(ctx context.Context, id string) error
+	updateWaNumberFn             func(ctx context.Context, id, displayName, proxyID string) (*WaNumberRow, error)
+	replaceWaNumberWorkspacesFn  func(ctx context.Context, waNumberID string, workspaceIDs []string) error
 }
 
 func (m *mockStore) GetUserByEmail(ctx context.Context, email string) (*UserRow, error) {
@@ -236,6 +239,27 @@ func (m *mockStore) GetWaNumberWorkspaceIDs(ctx context.Context, waNumberID stri
 		return m.getWaNumberWorkspaceIDsFn(ctx, waNumberID)
 	}
 	return nil, nil
+}
+
+func (m *mockStore) DeleteWaNumber(ctx context.Context, id string) error {
+	if m.deleteWaNumberFn != nil {
+		return m.deleteWaNumberFn(ctx, id)
+	}
+	return nil
+}
+
+func (m *mockStore) UpdateWaNumber(ctx context.Context, id, displayName, proxyID string) (*WaNumberRow, error) {
+	if m.updateWaNumberFn != nil {
+		return m.updateWaNumberFn(ctx, id, displayName, proxyID)
+	}
+	return &WaNumberRow{ID: id, DisplayName: displayName, Status: "disconnected"}, nil
+}
+
+func (m *mockStore) ReplaceWaNumberWorkspaces(ctx context.Context, waNumberID string, workspaceIDs []string) error {
+	if m.replaceWaNumberWorkspacesFn != nil {
+		return m.replaceWaNumberWorkspacesFn(ctx, waNumberID, workspaceIDs)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

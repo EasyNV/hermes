@@ -562,11 +562,32 @@ func (h *Handler) GetWaNumber(ctx context.Context, req *hermesv1.GetWaNumberRequ
 	return &hermesv1.GetWaNumberResponse{WaNumber: n}, nil
 }
 
-func (h *Handler) UpdateWaNumber(_ context.Context, _ *hermesv1.UpdateWaNumberRequest) (*hermesv1.UpdateWaNumberResponse, error) {
-	// Updating WA number metadata (display name, proxy, workspace assignments) requires
-	// shared-DB writes. No direct WA service RPC exists.
-	// TODO: implement via shared-DB store methods.
-	return nil, status.Error(codes.Unimplemented, "UpdateWaNumber not yet routed")
+func (h *Handler) UpdateWaNumber(ctx context.Context, req *hermesv1.UpdateWaNumberRequest) (*hermesv1.UpdateWaNumberResponse, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+
+	row, err := h.store.UpdateWaNumber(ctx, req.GetId(), req.GetDisplayName(), req.GetProxyId())
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, status.Error(codes.NotFound, "wa number not found")
+		}
+		h.log.Error().Err(err).Str("id", req.GetId()).Msg("failed to update wa_number")
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+
+	// Replace workspace assignments if provided.
+	if len(req.GetWorkspaceIds()) > 0 {
+		if err := h.store.ReplaceWaNumberWorkspaces(ctx, req.GetId(), req.GetWorkspaceIds()); err != nil {
+			h.log.Error().Err(err).Str("id", req.GetId()).Msg("failed to update workspace assignments")
+		}
+	}
+
+	n := waNumberRowToProto(row)
+	wsIDs, _ := h.store.GetWaNumberWorkspaceIDs(ctx, row.ID)
+	n.WorkspaceIds = wsIDs
+
+	return &hermesv1.UpdateWaNumberResponse{WaNumber: n}, nil
 }
 
 func (h *Handler) DisconnectWaNumber(ctx context.Context, req *hermesv1.DisconnectWaNumberRequest) (*hermesv1.DisconnectWaNumberResponse, error) {
@@ -627,19 +648,27 @@ func (h *Handler) ReconnectWaNumber(ctx context.Context, req *hermesv1.Reconnect
 }
 
 func (h *Handler) DeleteWaNumber(ctx context.Context, req *hermesv1.DeleteWaNumberRequest) (*hermesv1.DeleteWaNumberResponse, error) {
-	if h.waClient == nil {
-		return nil, status.Error(codes.Unavailable, "wa service not available")
-	}
 	if req.GetId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "id is required")
 	}
 
-	_, err := h.waClient.DisconnectSession(ctx, &hermesv1.DisconnectSessionRequest{
-		WaNumberId: req.GetId(),
-	})
-	if err != nil {
-		// Log but proceed -- we still want to clean up even if disconnect fails.
-		h.log.Warn().Err(err).Str("id", req.GetId()).Msg("disconnect failed during delete, proceeding")
+	// 1. Try to disconnect the WA session (best-effort).
+	if h.waClient != nil {
+		_, err := h.waClient.DisconnectSession(ctx, &hermesv1.DisconnectSessionRequest{
+			WaNumberId: req.GetId(),
+		})
+		if err != nil {
+			h.log.Warn().Err(err).Str("id", req.GetId()).Msg("disconnect failed during delete, proceeding with DB cleanup")
+		}
+	}
+
+	// 2. Delete the DB row (cascades to wa_number_workspaces).
+	if err := h.store.DeleteWaNumber(ctx, req.GetId()); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, status.Error(codes.NotFound, "wa number not found")
+		}
+		h.log.Error().Err(err).Str("id", req.GetId()).Msg("failed to delete wa_number")
+		return nil, status.Error(codes.Internal, "internal error")
 	}
 
 	return &hermesv1.DeleteWaNumberResponse{}, nil

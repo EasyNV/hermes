@@ -120,6 +120,9 @@ type Store interface {
 	ListWaNumbers(ctx context.Context, tenantID, workspaceID, statusFilter string, page, pageSize int32) ([]*WaNumberRow, int64, error)
 	GetWaNumberByID(ctx context.Context, id string) (*WaNumberRow, error)
 	GetWaNumberWorkspaceIDs(ctx context.Context, waNumberID string) ([]string, error)
+	DeleteWaNumber(ctx context.Context, id string) error
+	UpdateWaNumber(ctx context.Context, id, displayName, proxyID string) (*WaNumberRow, error)
+	ReplaceWaNumberWorkspaces(ctx context.Context, waNumberID string, workspaceIDs []string) error
 }
 
 // ---------------------------------------------------------------------------
@@ -650,4 +653,57 @@ func (s *PgStore) GetWaNumberWorkspaceIDs(ctx context.Context, waNumberID string
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+func (s *PgStore) DeleteWaNumber(ctx context.Context, id string) error {
+	// wa_number_workspaces has ON DELETE CASCADE, so just delete the parent row.
+	tag, err := s.pool.Exec(ctx, "DELETE FROM wa_numbers WHERE id=$1", id)
+	if err != nil {
+		return fmt.Errorf("deleting wa_number: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PgStore) UpdateWaNumber(ctx context.Context, id, displayName, proxyID string) (*WaNumberRow, error) {
+	var setClauses []string
+	var args []any
+	idx := 1
+
+	if displayName != "" {
+		setClauses = append(setClauses, fmt.Sprintf("display_name=$%d", idx))
+		args = append(args, displayName)
+		idx++
+	}
+	if proxyID != "" {
+		setClauses = append(setClauses, fmt.Sprintf("proxy_id=$%d", idx))
+		args = append(args, proxyID)
+		idx++
+	}
+	if len(setClauses) == 0 {
+		return s.GetWaNumberByID(ctx, id)
+	}
+
+	query := fmt.Sprintf("UPDATE wa_numbers SET %s WHERE id=$%d RETURNING %s",
+		strings.Join(setClauses, ", "), idx, waNumberCols)
+	args = append(args, id)
+	return scanWaNumber(s.pool.QueryRow(ctx, query, args...))
+}
+
+func (s *PgStore) ReplaceWaNumberWorkspaces(ctx context.Context, waNumberID string, workspaceIDs []string) error {
+	// Delete all existing assignments, then re-insert.
+	if _, err := s.pool.Exec(ctx, "DELETE FROM wa_number_workspaces WHERE wa_number_id=$1", waNumberID); err != nil {
+		return fmt.Errorf("clearing wa_number_workspaces: %w", err)
+	}
+	for _, wsID := range workspaceIDs {
+		if _, err := s.pool.Exec(ctx,
+			"INSERT INTO wa_number_workspaces (wa_number_id, workspace_id) VALUES ($1, $2)",
+			waNumberID, wsID,
+		); err != nil {
+			return fmt.Errorf("assigning workspace %s: %w", wsID, err)
+		}
+	}
+	return nil
 }
