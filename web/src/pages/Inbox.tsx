@@ -298,7 +298,11 @@ export default function Inbox() {
   }, [activeTab, unassignedQuery.data, myQuery.data, setConversations])
 
   useEffect(() => {
-    if (messagesQuery.data) setMessages(messagesQuery.data.messages)
+    if (messagesQuery.data) {
+      // API returns newest-first; chat UI needs oldest-first (newest at bottom).
+      const sorted = [...messagesQuery.data.messages].reverse()
+      setMessages(sorted)
+    }
   }, [messagesQuery.data, setMessages])
 
   // ── WebSocket subscription for active conversation ──

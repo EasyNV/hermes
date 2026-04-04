@@ -164,6 +164,16 @@ func (m *realManager) handleInboundMessage(waNumberID string, msg *events.Messag
 		return
 	}
 
+	// Only process 1:1 messages from individual users.
+	// Skip groups (@g.us), broadcasts (@broadcast), status, newsletters, LID-only contacts.
+	if msg.Info.Chat.Server != types.DefaultUserServer {
+		return
+	}
+	// Skip messages where sender phone is not a valid phone number (LID contacts).
+	if len(msg.Info.Sender.User) > 15 || len(msg.Info.Sender.User) < 7 {
+		return
+	}
+
 	senderJID := msg.Info.Sender.String()
 	senderPhone := msg.Info.Sender.User
 	waMessageID := msg.Info.ID
