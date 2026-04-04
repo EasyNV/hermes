@@ -17,11 +17,14 @@ import (
 
 // qrStringToPNGBase64 converts a whatsmeow QR string (e.g. "2@ABC...") into
 // a base64-encoded PNG image suitable for <img src="data:image/png;base64,...">.
+// The raw whatsmeow string is encoded directly — no wrapping, no modification.
+// WhatsApp multi-device format: 2@<ref>,<noise_key>,<identity_key>,<adv_secret>
 func qrStringToPNGBase64(qrStr string) string {
 	if qrStr == "" {
 		return ""
 	}
-	png, err := qrcode.Encode(qrStr, qrcode.Medium, 512)
+	// Low recovery level to keep the QR simple and fast to scan.
+	png, err := qrcode.Encode(qrStr, qrcode.Low, 256)
 	if err != nil {
 		return ""
 	}
