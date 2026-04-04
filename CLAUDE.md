@@ -411,6 +411,69 @@ CLOSED      →  UNASSIGNED (on new inbound message — auto-reopen)
 
 ---
 
+## Patterns Established in Layer 4
+
+### Gateway Routing Architecture
+- Gateway is the ONLY service the frontend talks to (75 RPCs).
+- Owns: tenants, workspaces, users, auth (JWT + refresh tokens), RBAC — stored in its own PG tables.
+- Routes: all other RPCs are forwarded to backend services via gRPC client connections.
+- Backend clients are nil-guarded — gateway starts even if a backend service is down; affected RPCs return `codes.Unavailable`.
+- Two listeners: gRPC (port 8080) + HTTP/WebSocket (port 8081).
+
+### Auth + RBAC
+- JWT access tokens (HS256, 15 min TTL) contain: `user_id`, `tenant_id`, `workspace_id`, `role`.
+- Refresh tokens stored in `refresh_tokens` table (opaque, 30-day TTL).
+- Auth interceptor extracts + validates JWT from `Authorization` metadata; skips `Login` and `RefreshToken`.
+- RBAC interceptor checks role against `rpcRoles` map (75 entries). Superadmin bypasses all checks.
+- Interceptor chain: `AuthInterceptor` → `RBACInterceptor` → handler.
+
+### WebSocket Hub Architecture
+- `Hub` manages all active clients in a `map[*Client]struct{}` with RWMutex.
+- Client auth: JWT from `?token=` query param or `Authorization` header on upgrade.
+- Max 3 connections per user.
+- Heartbeat: server pings every 30s, closes after 3 missed pongs (90s).
+- Client messages: `ping`, `auth` (re-auth), `subscribe_conversation`, `unsubscribe_conversation`.
+- Non-blocking send: `select { case c.send <- data: default: }` — drops messages if client is slow.
+- Read/write pumps as separate goroutines per client.
+
+### NATS → WebSocket Event Bridge
+- `EventSubscriber` subscribes to 8 NATS subjects and translates proto events to JSON WebSocket messages.
+- Subject mapping:
+  - `hermes.wa.message.inbound.*` → `new_message` (tenant-scoped)
+  - `hermes.wa.message.outbound.*` → `message_status_updated` (tenant-scoped)
+  - `hermes.wa.connection.*` → `number_status_changed` (tenant-scoped)
+  - `hermes.wa.ban.*` → `ban_detected` (tenant-scoped)
+  - `hermes.campaign.status.*` → `campaign_status_changed` (workspace-scoped)
+  - `hermes.campaign.progress.*` → `campaign_progress` (workspace-scoped)
+  - `hermes.contacts.import.done.*` → `import_complete` (user-scoped)
+  - `hermes.wa.presence.*` → `typing_indicator` (tenant-scoped)
+- Durable consumers with manual ACK.
+- Proto → JSON conversion happens once per event, then fanned out to matching clients.
+
+### NATS Stream Setup
+- Gateway ensures 5 streams on startup:
+  - `HERMES_WA` (7d retention) — WA events
+  - `HERMES_CAMPAIGN` (30d retention) — campaign events + send tasks
+  - `HERMES_INBOX` (24h retention) — manual sends
+  - `HERMES_CONTACTS` (24h retention) — import events
+  - `HERMES_NOTIFY` (1h retention) — notification events
+- Streams are idempotent (`AddStream` is a no-op if exists with same config).
+
+### Frontend State Management
+- **Zustand** for client state (auth, WebSocket connection, campaign form state).
+- **TanStack Query** for server state (cached API responses with automatic invalidation).
+- **TanStack Router** for type-safe file-based routing.
+- Auth store: JWT tokens in memory (not localStorage), auto-refresh on 401.
+- WebSocket store: single connection, reconnect with exponential backoff, event dispatch to Zustand stores.
+
+### API Client Generation
+- Hand-written TypeScript API client in `web/src/api/` mapping to gateway RPCs.
+- Each domain has its own module: `auth.ts`, `campaigns.ts`, `contacts.ts`, `inbox.ts`, etc.
+- Shared types in `web/src/api/types.ts` mirror proto message types.
+- All calls go through `web/src/api/client.ts` base client with JWT injection.
+
+---
+
 ## Key Technical Decisions
 
 | Decision | Choice | Reference |

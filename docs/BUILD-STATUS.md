@@ -1,6 +1,6 @@
 # Hermès — Build Status
 
-## Phase 1 MVP Progress
+## Phase 1 MVP: ✅ COMPLETE
 
 | Layer | Service | RPCs | Tests | Status | Commit |
 |---|---|---|---|---|---|
@@ -11,8 +11,8 @@
 | **2** | hermes-wa | 8/8 | 28 pass | ✅ Done | `cb8f9e9` |
 | **2** | hermes-campaign | 17/17 | 42 pass | ✅ Done | `cb8f9e9` |
 | **3** | hermes-inbox | 14/14 | 29 pass | ✅ Done | `acea288` |
-| **4** | hermes-gateway | 0/75 | — | ⬜ Pending | — |
-| **4** | hermes-web | — | — | ⬜ Pending | — |
+| **4** | hermes-gateway | 75/75 | 23 pass | ✅ Done | (pending) |
+| **4** | hermes-web | 11 pages | 0 (TypeScript strict) | ✅ Done | (pending) |
 
 ## Infrastructure
 
@@ -20,7 +20,7 @@
 - Redis 7: `localhost:6380` ✅
 - NATS JetStream 2: `localhost:4222` ✅
 - Proto codegen (buf): 16 Go files from 9 protos ✅
-- Database migrations: 18 application tables ✅
+- Database migrations: 20 application tables (18 + refresh_tokens) ✅
 
 ## Test Summary
 
@@ -29,17 +29,50 @@
 | Layer 1 | 60 | 60 | 0 |
 | Layer 2 | 70 | 70 | 0 |
 | Layer 3 | 29 | 29 | 0 |
-| **Total** | **159** | **159** | **0** |
+| Layer 4 | 23 | 23 | 0 |
+| **Total** | **182** | **182** | **0** |
+
+*Full test run: 68 top-level tests, 208 subtests, 276 total assertions — all pass.*
 
 ## Service Ports (Local Dev)
 
-| Service | Port |
-|---|---|
-| hermes-proxy | 9101 |
-| hermes-contacts | 9102 |
-| hermes-notify | 9103 |
-| hermes-wa | 9104 |
-| hermes-campaign | 9105 |
-| hermes-inbox | 9106 |
-| hermes-gateway | 8080 |
-| hermes-web | 5173 |
+| Service | gRPC Port | Notes |
+|---|---|---|
+| hermes-proxy | 9101 | |
+| hermes-contacts | 9102 | |
+| hermes-notify | 9103 | |
+| hermes-wa | 9104 | |
+| hermes-campaign | 9105 | |
+| hermes-inbox | 9106 | |
+| hermes-gateway | 8080 | gRPC API |
+| hermes-gateway (WS) | 8081 | WebSocket hub |
+| hermes-web | 5173 | Vite dev server |
+
+## Frontend Pages
+
+| Page | Route | Description |
+|---|---|---|
+| Login | `/login` | Email + password auth |
+| Dashboard | `/` | Workspace stats overview |
+| Numbers | `/numbers` | WA number management + QR linking |
+| Proxies | `/proxies` | Proxy pool management |
+| Contacts | `/contacts` | Contact list + CSV import |
+| Templates | `/templates` | Message template editor (spintax) |
+| Campaign List | `/campaigns` | Campaign overview + status |
+| Campaign Create | `/campaigns/new` | Campaign creation wizard |
+| Campaign Detail | `/campaigns/:id` | Campaign progress + controls |
+| Inbox | `/inbox` | Agent conversation view |
+| Settings | `/settings` | Notification config |
+
+## What's Deferred to Phase 2
+
+- Production Dockerfiles (multi-stage builds)
+- Kubernetes manifests (StatefulSet for WA pods)
+- Prometheus + Grafana observability
+- whatsmeow session persistence (SQLite → PostgreSQL)
+- Number rotation engine (anti-ban layer 4)
+- Media message support (images, documents)
+- Contact group management
+- Advanced campaign scheduling (time-zone aware)
+- Rate limiting middleware
+- Audit logging
