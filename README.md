@@ -5,218 +5,144 @@ Multi-tenant WhatsApp automation platform. Manages bulk campaigns with anti-ban 
 ## Architecture
 
 ```
-┌──────────┐     ┌──────────────────┐     ┌��─────────┬──────────┬──────────┐
-│ hermes-  │────▶│ hermes-gateway   │────▶│ wa       │ campaign │ inbox    │
-│ web      │ WS  │ (API + Auth +    │gRPC │ proxy    │ contacts │ notify   │
-│ (React)  │◀────│  RBAC + WS hub)  │◀────│          │          │          │
-└──────────┘     └──────────────────���     └──────────┴──────────┴──────────┘
-                         ↕ NATS JetStream (8 event subjects)
-                    PostgreSQL 17  ·  Redis 7  ·  NATS 2
+┌──────────────┐     ┌────────────────────────────┐     ┌──────────┬──────────┬──────────┐
+│  hermes-web  │────▶│     hermes-gateway         │────▶│ wa       │ campaign │ inbox    │
+│  (React SPA) │ WS  │  gRPC :8080                │gRPC │ proxy    │ contacts │ notify   │
+│  :5173       │◀────│  REST + WS :8081           │◀────│          │          │          │
+└──────────────┘     └────────────────────────────┘     └──────────┴──────────┴──────────┘
+                              ↕ NATS JetStream (8 event subjects)
+                         PostgreSQL 17  ·  Redis 7  ·  NATS 2
 ```
 
 **8 services:**
 
-| Service | Purpose | Port |
-|---------|---------|------|
-| `hermes-gateway` | API gateway, JWT auth, RBAC, WebSocket hub | 8080 (gRPC), 8081 (WS) |
-| `hermes-wa` | WhatsApp session management via whatsmeow | 9104 |
-| `hermes-campaign` | Bulk send engine with anti-ban controls | 9105 |
-| `hermes-inbox` | Agent conversation view, message search | 9106 |
-| `hermes-contacts` | Contact CRUD + CSV import | 9102 |
-| `hermes-proxy` | SOCKS5/HTTP proxy pool management | 9101 |
-| `hermes-notify` | Webhook + push notification dispatch | 9103 |
-| `hermes-web` | React SPA (Vite + TypeScript) | 5173 |
+| Service | Port | Description |
+|---------|------|-------------|
+| `hermes-gateway` | 8080 (gRPC), 8081 (REST + WS) | API gateway, JWT auth, RBAC, WebSocket hub, REST adapter |
+| `hermes-wa` | 9104 (gRPC), 9105 (HTTP pair) | WhatsApp session management via whatsmeow |
+| `hermes-campaign` | 9105 | Bulk send engine with anti-ban controls |
+| `hermes-inbox` | 9106 | Agent conversation view, message search |
+| `hermes-contacts` | 9102 | Contact CRUD + CSV import |
+| `hermes-proxy` | 9101 | SOCKS5/HTTP proxy pool management |
+| `hermes-notify` | 9103 | Webhook + push notification dispatch |
+| `hermes-web` | 5173 | React SPA (Vite + TypeScript) |
 
-**75 gRPC RPCs** across 11 domains. See [docs/API.md](docs/API.md) for the complete API reference.
-
-## Prerequisites
-
-- Go 1.22+
-- Node.js 20+
-- Docker + Docker Compose
-- `buf` CLI: `go install github.com/bufbuild/buf/cmd/buf@latest`
-- `protoc-gen-go` + `protoc-gen-go-grpc` (installed via `make tools`)
-
-## Quickstart
+## Quick Start
 
 ```bash
-# 1. Start infrastructure (PostgreSQL, Redis, NATS)
-docker compose up -d
+# Start everything (infrastructure + all services + frontend)
+docker compose -f docker-compose.dev.yml up --build
 
-# 2. Install Go tools
-make tools
-
-# 3. Generate proto stubs
-make proto-gen
-
-# 4. Run database migrations
-export DATABASE_URL="postgres://hermes:hermes_dev@localhost:5433/hermes?sslmode=disable"
-make migrate
-
-# 5. Build all services
-make build
-
-# 6. Start services (each in a separate terminal, or use make dev)
-make dev
-
-# 7. Start frontend
-cd web && npm install && npm run dev
+# Wait for all containers to be healthy (~30s), then open:
+# http://localhost:5173
 ```
 
-The frontend will be available at `http://localhost:5173`.
+**Login:** `admin@hermes.local` / `admin123`
 
-## Environment Variables
+## API
 
-### All Services
+The gateway exposes three protocols:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATABASE_URL` | `postgres://hermes:hermes_dev@localhost:5433/hermes?sslmode=disable` | PostgreSQL connection string |
-| `NATS_URL` | `nats://localhost:4222` | NATS server URL |
-| `PORT` | service-specific | gRPC listen port |
+| Protocol | Port | Use |
+|----------|------|-----|
+| REST/JSON | 8081 | Frontend API — 76 endpoints under `/api/v1/` |
+| gRPC | 8080 | Internal service-to-service communication |
+| WebSocket | 8081 `/ws` | Real-time events (messages, campaign progress, number status) |
 
-### Gateway Only
+See [docs/API.md](docs/API.md) for the complete REST API reference.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `JWT_SECRET` | `hermes-dev-jwt-secret-change-in-prod` | HMAC secret for JWT signing |
-| `WA_ADDR` | `localhost:9104` | hermes-wa gRPC address |
-| `CAMPAIGN_ADDR` | `localhost:9105` | hermes-campaign gRPC address |
-| `INBOX_ADDR` | `localhost:9106` | hermes-inbox gRPC address |
-| `CONTACTS_ADDR` | `localhost:9102` | hermes-contacts gRPC address |
-| `PROXY_ADDR` | `localhost:9101` | hermes-proxy gRPC address |
-| `NOTIFY_ADDR` | `localhost:9103` | hermes-notify gRPC address |
-
-### WA Service
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PROXY_SERVICE_ADDR` | `localhost:9101` | hermes-proxy gRPC address |
-| `REDIS_URL` | `redis://localhost:6380` | Redis for session caching |
-
-## Docker Compose
-
-```bash
-# Start all infrastructure
-docker compose up -d
-
-# Check service health
-docker compose ps
-
-# View logs
-docker compose logs -f nats
-```
-
-Infrastructure services:
-- **PostgreSQL 17**: `localhost:5433` (user: `hermes`, pass: `hermes_dev`, db: `hermes`)
-- **Redis 7**: `localhost:6380`
-- **NATS JetStream 2**: `localhost:4222` (monitoring: `localhost:8222`)
-
-## Directory Structure
+## Project Structure
 
 ```
 hermes/
-├── cmd/                  # Service entry points (main.go per service)
-│   ├── gateway/          # API gateway + WS hub
-│   ├── wa/               # WhatsApp sessions
-│   ├── campaign/         # Campaign engine
-│   ��── inbox/            # Conversations
-│   ├── contacts/         # Contact management
-│   ├── proxy/            # Proxy pool
-│   └── notify/           # Notifications
-├── internal/             # Service-specific code
+├── cmd/                      # Service entry points (main.go per service)
+│   ├── gateway/              # API gateway + REST adapter + WS hub
+│   ├── wa/                   # WhatsApp sessions + NATS consumers
+│   ├── campaign/             # Campaign dispatch engine
+│   ├── inbox/                # Conversation management + NATS consumers
+│   ├── contacts/             # Contact CRUD
+│   ├── proxy/                # Proxy pool
+│   └── notify/               # Notification dispatch
+├── internal/                 # Service-specific code
 │   ├── gateway/
-│   │   ├── handler/      # 75 RPC handlers (auth, routing, gateway-owned CRUD)
-│   │   ├── middleware/    # JWT auth interceptor + RBAC interceptor
-│   ���   ├── websocket/    # WebSocket hub + NATS→WS event bridge
-│   │   └── config/
+│   │   ├── handler/          # 75 RPC handler implementations
+│   │   ├── middleware/       # JWT auth + RBAC interceptors
+│   │   ├── rest/             # REST-to-gRPC adapter (76 HTTP routes)
+│   │   └── websocket/        # WebSocket hub + NATS→WS event bridge
 │   ├── wa/
-│   │   ├── handler/      # 8 RPC handlers
-│   │   ���── session/      # whatsmeow session manager
-│   │   └── sender/       # Message send + typing indicators
-���   ├── campaign/
-│   ��   ├── handler/      # 17 RPC handlers
-│   │   ├── engine/       # Dispatch engine + number rotation
-│   │   └── spintax/      # Spintax resolver
+│   │   ├── handler/          # 8 RPC handlers
+│   │   ├── session/          # whatsmeow session manager + event publisher
+│   │   └── sender/           # Message send + typing indicators
+│   ├── campaign/
+│   │   ├── handler/          # 17 RPC handlers
+│   │   ├── engine/           # Dispatch engine + number rotation
+│   │   └── spintax/          # Spintax resolver
 │   ├── inbox/
-│   │   ├── handler/      # 14 RPC handlers
-│   │   └── conversation/ # State machine
-│   ├── contacts/
-│   │   ├── handler/      # 11 RPC handlers
-│   │   └── importer/     # CSV parser + dedup
-│   ├─�� proxy/
-│   ���   ├── handler/      # 11 RPC handlers
-│   │   └── health/       # Proxy health checker
+│   │   ├── handler/          # 14 RPC handlers
+│   │   └── conversation/     # State machine
+│   ├── contacts/handler/     # 11 RPC handlers
+│   ├── proxy/handler/        # 11 RPC handlers
 │   └── notify/
-│       ├── handler/      # 6 RPC handlers
-│       └── dispatch/     # Webhook + push dispatch
-├── pkg/                  # Shared packages
-│   ├── db/               # PostgreSQL pool + migration helpers
-��   ├── nats/             # NATS JetStream client
-│   ├── config/           # Env-based config loading
-│   └── logger/           # Structured logging (zerolog)
-├── proto/                # Proto source files
-├── gen/                  # Generated Go stubs (DO NOT EDIT)
-├── migrations/           # DB migrations per service (golang-migrate)
-├���─ web/                  # React frontend (hermes-web)
-│   ├── src/
-│   │   ├��─ api/          # API client (typed, per-domain modules)
-│   │   ├── pages/        # 11 page components
-│   │   ├── components/   # Layout + shared + shadcn/ui
-│   │   ├── hooks/        # useAuth, useWebSocket, useDebounce
-│   │   └── stores/       # Zustand stores (auth, inbox, campaigns, websocket)
-│   └── dist/             # Production build output
+│       ├── handler/          # 6 RPC handlers
+│       └── dispatch/         # Webhook dispatch
+├── pkg/                      # Shared packages (db, nats, config, logger)
+├── proto/hermes/v1/          # Proto source files (9 files)
+├── gen/go/hermes/v1/         # Generated Go stubs (DO NOT EDIT)
+├── migrations/               # DB migrations per service (golang-migrate)
+├── web/                      # React frontend
+│   └── src/
+│       ├── api/              # Typed API client (per-domain modules)
+│       ├── pages/            # 11 page components
+│       ├── components/       # Layout + shared + shadcn/ui
+│       ├── hooks/            # useAuth, useWebSocket, useDebounce
+│       └── stores/           # Zustand stores (auth, inbox, campaigns, websocket)
+├── docker-compose.dev.yml    # Full local dev stack (12 containers)
+├── Dockerfile.dev            # Multi-stage Go builder
 └── docs/
-    ├── API.md            # Complete API reference (75 RPCs)
-    ├── BUILD-STATUS.md   # Layer-by-layer build progress
-    ├── research/
-    │   └── ARCHITECTURE.md
-    └── contracts/
-        ├── proto/        # Contract proto files (source of truth)
-        ├── EVENTS.md     # NATS event schemas
-        └── WEBSOCKET.md  # WebSocket event schemas
+    ├── API.md                # Complete REST API reference (76 endpoints)
+    ├── ARCHITECTURE.md       # Deep technical documentation
+    ├── DEPLOYMENT.md         # Docker Compose setup + env vars + troubleshooting
+    └── BUILD-STATUS.md       # Phase 1 complete, Phase 2 roadmap
 ```
 
 ## Testing
 
 ```bash
 # Run all tests
-make test
+go test ./... -count=1
 
 # Run tests for a specific service
 go test ./internal/gateway/... -v -count=1
-go test ./internal/campaign/... -v -count=1
 
-# Build all binaries (compile check)
+# Build all binaries
 make build
 ```
 
-**Current status:** 182 tests across 12 test files, all passing. See [docs/BUILD-STATUS.md](docs/BUILD-STATUS.md).
-
-## Documentation
-
-- [API Reference](docs/API.md) — 75 RPCs grouped by domain with RBAC matrix
-- [Architecture](docs/research/ARCHITECTURE.md) — library choices, DB schema, anti-ban strategy
-- [Service Contracts](docs/contracts/README.md) — proto definitions, NATS events, WebSocket events
-- [Build Status](docs/BUILD-STATUS.md) — layer-by-layer progress
-- [CLAUDE.md](CLAUDE.md) — full project context for AI agents
+**Current:** 12 packages, 276 test assertions, all passing.
 
 ## Tech Stack
 
 | Component | Choice |
 |-----------|--------|
-| Backend | Go 1.22 (monorepo, microservices) |
+| Backend | Go 1.25 (monorepo, 8 microservices) |
 | Frontend | React 19 + Vite + TypeScript |
 | UI | Tailwind CSS + shadcn/ui + Radix |
 | State | Zustand (client) + TanStack Query (server) |
 | Routing | TanStack Router |
-| Database | PostgreSQL 17 |
+| Database | PostgreSQL 17 (shared cluster, per-service migrations) |
 | Cache | Redis 7 |
 | Message Broker | NATS JetStream 2 |
-| WA Library | whatsmeow |
+| WA Library | whatsmeow (Go native, identifies as MacOS Desktop) |
+| QR Code | go-qrcode (server-side PNG generation) |
 | Proto Codegen | buf |
-| Dev Infra | Docker Compose |
-| Prod Deploy | AWS EKS (Phase 2) |
+| Dev Infra | Docker Compose (12 containers) |
+
+## Documentation
+
+- [API Reference](docs/API.md) — 76 REST endpoints grouped by domain
+- [Architecture](docs/ARCHITECTURE.md) — service graph, NATS events, DB schema, auth flow
+- [Deployment](docs/DEPLOYMENT.md) — Docker Compose setup, env vars, troubleshooting
+- [Build Status](docs/BUILD-STATUS.md) — Phase 1 complete, Phase 2 roadmap
 
 ## License
 
