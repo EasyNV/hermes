@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -129,13 +130,39 @@ func startInboundConsumer(js natsgo.JetStreamContext, store handler.Store, log z
 		ctx := context.Background()
 
 		// 1. Look up contact by sender phone.
-		contact, _, err := store.FindContactByPhone(ctx, event.SenderPhone)
+		// Normalize: strip '+' prefix for matching (whatsmeow sends without +, DB may have +).
+		senderPhone := strings.TrimPrefix(event.SenderPhone, "+")
+
+		// Try exact match, then with + prefix.
+		contact, _, err := store.FindContactByPhone(ctx, senderPhone)
 		if err != nil {
-			log.Warn().
-				Str("phone", event.SenderPhone).
-				Msg("contact not found for inbound message, skipping")
-			msg.Ack()
-			return
+			contact, _, err = store.FindContactByPhone(ctx, "+"+senderPhone)
+		}
+		if err != nil {
+			// Auto-create contact for unknown senders.
+			_, tenantID, tenantErr := store.GetWorkspaceIDForWaNumber(ctx, event.WaNumberId)
+			if tenantErr != nil {
+				log.Warn().
+					Str("phone", senderPhone).
+					Err(tenantErr).
+					Msg("cannot resolve tenant for auto-create contact, skipping")
+				msg.Ack()
+				return
+			}
+			contact, err = store.AutoCreateContact(ctx, tenantID, senderPhone, event.SenderName)
+			if err != nil {
+				log.Error().
+					Str("phone", senderPhone).
+					Err(err).
+					Msg("failed to auto-create contact")
+				msg.Nak()
+				return
+			}
+			log.Info().
+				Str("phone", senderPhone).
+				Str("name", event.SenderName).
+				Str("contact_id", contact.ID).
+				Msg("auto-created contact for unknown sender")
 		}
 
 		// 2. Resolve workspace from WA number.

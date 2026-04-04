@@ -136,6 +136,7 @@ type Store interface {
 	// Contact lookup (cross-service read)
 	FindContactByPhone(ctx context.Context, phone string) (*ContactRow, string, error) // returns contact + tenantID
 	GetWorkspaceIDForWaNumber(ctx context.Context, waNumberID string) (string, string, error) // returns workspaceID, tenantID
+	AutoCreateContact(ctx context.Context, tenantID, phone, name string) (*ContactRow, error) // auto-create from inbound message
 
 	// Canned responses
 	CreateCannedResponse(ctx context.Context, workspaceID, shortcut, body string, createdBy *string) (*CannedResponseRow, error)
@@ -878,4 +879,21 @@ func (s *PgStore) GetAgentPerformance(ctx context.Context, workspaceID, userID s
 		result = append(result, a)
 	}
 	return result, rows.Err()
+}
+
+func (s *PgStore) AutoCreateContact(ctx context.Context, tenantID, phone, name string) (*ContactRow, error) {
+	if name == "" {
+		name = phone
+	}
+	c := &ContactRow{}
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO contacts (tenant_id, phone, name) VALUES ($1, $2, $3)
+		 ON CONFLICT (tenant_id, phone) DO UPDATE SET name = EXCLUDED.name
+		 RETURNING id, phone, name`,
+		tenantID, phone, name,
+	).Scan(&c.ID, &c.Phone, &c.Name)
+	if err != nil {
+		return nil, fmt.Errorf("auto-creating contact: %w", err)
+	}
+	return c, nil
 }

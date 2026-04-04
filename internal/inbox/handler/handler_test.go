@@ -42,6 +42,7 @@ type mockStore struct {
 	deleteCannedResponseFn     func(ctx context.Context, id string) error
 	getContactCampaignHistoryFn func(ctx context.Context, contactID string, page, pageSize int32) ([]*CampaignHistoryRow, int64, error)
 	getAgentPerformanceFn      func(ctx context.Context, workspaceID, userID string, fromDate, toDate *time.Time) ([]*AgentPerfRow, error)
+	autoCreateContactFn        func(ctx context.Context, tenantID, phone, name string) (*ContactRow, error)
 }
 
 func (m *mockStore) ListConversations(ctx context.Context, workspaceID, st, assignedTo, waNumberID, search string, sortOrder int32, page, pageSize int32) ([]*ConversationRow, int64, error) {
@@ -193,6 +194,13 @@ func (m *mockStore) GetAgentPerformance(ctx context.Context, workspaceID, userID
 		return m.getAgentPerformanceFn(ctx, workspaceID, userID, fromDate, toDate)
 	}
 	return nil, fmt.Errorf("GetAgentPerformance not mocked")
+}
+
+func (m *mockStore) AutoCreateContact(ctx context.Context, tenantID, phone, name string) (*ContactRow, error) {
+	if m.autoCreateContactFn != nil {
+		return m.autoCreateContactFn(ctx, tenantID, phone, name)
+	}
+	return &ContactRow{ID: "auto-" + phone, Phone: phone, Name: name}, nil
 }
 
 // ---------------------------------------------------------------------------

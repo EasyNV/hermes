@@ -140,11 +140,27 @@ func (m *realManager) handleInboundMessage(waNumberID string, msg *events.Messag
 	sess, ok := m.sessions[waNumberID]
 	m.mu.RUnlock()
 	if !ok {
+		m.log.Warn().Str("wa_number_id", waNumberID).Msg("inbound message: session not found")
 		return
 	}
 	sess.messagesRecvd.Add(1)
 
+	// Skip messages from self (history sync, status broadcasts, etc.)
+	if msg.Info.IsFromMe {
+		return
+	}
+
+	m.log.Info().
+		Str("wa_number_id", waNumberID).
+		Str("sender", msg.Info.Sender.String()).
+		Str("sender_phone", msg.Info.Sender.User).
+		Str("wa_msg_id", msg.Info.ID).
+		Str("push_name", msg.Info.PushName).
+		Bool("from_me", msg.Info.IsFromMe).
+		Msg("inbound message received")
+
 	if m.eventPub == nil {
+		m.log.Warn().Msg("inbound message: eventPub is nil, cannot publish")
 		return
 	}
 
