@@ -13,12 +13,33 @@ import (
 	"github.com/hermes-waba/hermes/internal/wa/sender"
 	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waWa6"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 )
+
+func init() {
+	// Identify as WhatsApp Desktop on macOS so linked devices show
+	// "MacOS" instead of "Other App" on the phone.
+	store.DeviceProps.Os = proto.String("Mac OS")
+	store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_DESKTOP.Enum()
+	store.DeviceProps.RequireFullSync = proto.Bool(false)
+	store.DeviceProps.Version = &waCompanionReg.DeviceProps_AppVersion{
+		Primary:   proto.Uint32(2),
+		Secondary: proto.Uint32(2450),
+		Tertiary:  proto.Uint32(6),
+	}
+
+	// Match the UserAgent to macOS desktop client.
+	store.BaseClientPayload.UserAgent.Platform = waWa6.ClientPayload_UserAgent_MACOS.Enum()
+	store.BaseClientPayload.UserAgent.Device = proto.String("Desktop")
+	store.BaseClientPayload.WebInfo.WebSubPlatform = waWa6.ClientPayload_WebInfo_DARWIN.Enum()
+}
 
 // Manager manages whatsmeow client sessions in memory.
 type Manager interface {
