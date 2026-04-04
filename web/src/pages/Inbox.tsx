@@ -261,6 +261,11 @@ export default function Inbox() {
     onSuccess: (data) => {
       appendMessage(data.message)
       setMessageText('')
+      // Refetch messages to ensure DB state is reflected.
+      queryClient.invalidateQueries({ queryKey: ['messages', activeConversationId] })
+    },
+    onError: (err) => {
+      console.error('Send message failed:', err)
     },
   })
 
