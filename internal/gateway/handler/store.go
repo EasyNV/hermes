@@ -46,6 +46,24 @@ type WorkspaceRow struct {
 	CreatedAt    time.Time
 }
 
+type WaNumberRow struct {
+	ID             string
+	TenantID       string
+	JID            string
+	Phone          string
+	DisplayName    string
+	Status         string
+	ProxyID        *string
+	HealthScore    int32
+	DailySentCount int32
+	TotalSent      int64
+	BanCount       int32
+	LastBanAt      *time.Time
+	ConnectedAt    *time.Time
+	PodID          string
+	CreatedAt      time.Time
+}
+
 type DashboardStatsRow struct {
 	ActiveNumbers           int32
 	TotalNumbers            int32
@@ -95,6 +113,13 @@ type Store interface {
 
 	// Dashboard
 	GetDashboardStats(ctx context.Context, tenantID, workspaceID string) (*DashboardStatsRow, error)
+
+	// WA Numbers (gateway creates the record, wa service manages sessions)
+	CreateWaNumber(ctx context.Context, tenantID, phone, displayName, proxyID string) (string, error) // returns UUID
+	AssignWaNumberWorkspaces(ctx context.Context, waNumberID string, workspaceIDs []string) error
+	ListWaNumbers(ctx context.Context, tenantID, workspaceID, statusFilter string, page, pageSize int32) ([]*WaNumberRow, int64, error)
+	GetWaNumberByID(ctx context.Context, id string) (*WaNumberRow, error)
+	GetWaNumberWorkspaceIDs(ctx context.Context, waNumberID string) ([]string, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -510,4 +535,119 @@ func (s *PgStore) GetDashboardStats(ctx context.Context, tenantID, workspaceID s
 		Scan(&stats.TotalContacts)
 
 	return stats, nil
+}
+
+// ---------------------------------------------------------------------------
+// WA Numbers (gateway writes the record, WA service manages the session)
+// ---------------------------------------------------------------------------
+
+func (s *PgStore) CreateWaNumber(ctx context.Context, tenantID, phone, displayName, proxyID string) (string, error) {
+	var id string
+	// proxy_id is UUID type — pass nil instead of empty string.
+	var proxyArg any
+	if proxyID != "" {
+		proxyArg = proxyID
+	}
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO wa_numbers (tenant_id, phone, display_name, proxy_id, status, pod_id)
+		 VALUES ($1, $2, $3, $4, 'disconnected', '')
+		 ON CONFLICT (tenant_id, phone) DO UPDATE SET display_name = EXCLUDED.display_name
+		 RETURNING id`,
+		tenantID, phone, displayName, proxyArg,
+	).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("creating wa_number: %w", err)
+	}
+	return id, nil
+}
+
+func (s *PgStore) AssignWaNumberWorkspaces(ctx context.Context, waNumberID string, workspaceIDs []string) error {
+	for _, wsID := range workspaceIDs {
+		if _, err := s.pool.Exec(ctx,
+			`INSERT INTO wa_number_workspaces (wa_number_id, workspace_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+			waNumberID, wsID,
+		); err != nil {
+			return fmt.Errorf("assigning workspace %s: %w", wsID, err)
+		}
+	}
+	return nil
+}
+
+const waNumberCols = "id, tenant_id, jid, phone, display_name, status, proxy_id, health_score, daily_sent_count, total_sent, ban_count, last_ban_at, connected_at, pod_id, created_at"
+
+func scanWaNumber(row pgx.Row) (*WaNumberRow, error) {
+	w := &WaNumberRow{}
+	err := row.Scan(&w.ID, &w.TenantID, &w.JID, &w.Phone, &w.DisplayName, &w.Status, &w.ProxyID, &w.HealthScore, &w.DailySentCount, &w.TotalSent, &w.BanCount, &w.LastBanAt, &w.ConnectedAt, &w.PodID, &w.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+func (s *PgStore) ListWaNumbers(ctx context.Context, tenantID, workspaceID, statusFilter string, page, pageSize int32) ([]*WaNumberRow, int64, error) {
+	where := "WHERE w.tenant_id=$1"
+	args := []any{tenantID}
+	idx := 2
+
+	if workspaceID != "" {
+		where += fmt.Sprintf(" AND w.id IN (SELECT wa_number_id FROM wa_number_workspaces WHERE workspace_id=$%d)", idx)
+		args = append(args, workspaceID)
+		idx++
+	}
+	if statusFilter != "" {
+		where += fmt.Sprintf(" AND w.status=$%d", idx)
+		args = append(args, statusFilter)
+		idx++
+	}
+
+	var total int64
+	if err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM wa_numbers w "+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("counting wa_numbers: %w", err)
+	}
+
+	offset := (page - 1) * pageSize
+	query := fmt.Sprintf("SELECT %s FROM wa_numbers w %s ORDER BY w.created_at DESC LIMIT $%d OFFSET $%d",
+		"w.id, w.tenant_id, w.jid, w.phone, w.display_name, w.status, w.proxy_id, w.health_score, w.daily_sent_count, w.total_sent, w.ban_count, w.last_ban_at, w.connected_at, w.pod_id, w.created_at",
+		where, idx, idx+1)
+	args = append(args, pageSize, offset)
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("listing wa_numbers: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*WaNumberRow
+	for rows.Next() {
+		w := &WaNumberRow{}
+		if err := rows.Scan(&w.ID, &w.TenantID, &w.JID, &w.Phone, &w.DisplayName, &w.Status, &w.ProxyID, &w.HealthScore, &w.DailySentCount, &w.TotalSent, &w.BanCount, &w.LastBanAt, &w.ConnectedAt, &w.PodID, &w.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		result = append(result, w)
+	}
+	return result, total, rows.Err()
+}
+
+func (s *PgStore) GetWaNumberByID(ctx context.Context, id string) (*WaNumberRow, error) {
+	return scanWaNumber(s.pool.QueryRow(ctx, "SELECT "+waNumberCols+" FROM wa_numbers WHERE id=$1", id))
+}
+
+func (s *PgStore) GetWaNumberWorkspaceIDs(ctx context.Context, waNumberID string) ([]string, error) {
+	rows, err := s.pool.Query(ctx, "SELECT workspace_id FROM wa_number_workspaces WHERE wa_number_id=$1", waNumberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

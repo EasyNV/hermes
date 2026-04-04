@@ -417,39 +417,66 @@ func (h *Handler) DeleteUser(ctx context.Context, req *hermesv1.DeleteUserReques
 // ===========================================================================
 
 func (h *Handler) RegisterWaNumber(ctx context.Context, req *hermesv1.RegisterWaNumberRequest) (*hermesv1.RegisterWaNumberResponse, error) {
-	if h.waClient == nil {
-		return nil, status.Error(codes.Unavailable, "wa service not available")
-	}
 	if req.GetPhone() == "" {
 		return nil, status.Error(codes.InvalidArgument, "phone is required")
 	}
 
-	resp, err := h.waClient.ConnectSession(ctx, &hermesv1.ConnectSessionRequest{
-		WaNumberId: req.GetPhone(),
-		ProxyId:    req.GetProxyId(),
-	})
-	if err != nil {
-		return nil, err // Pass through gRPC status from backend.
+	// Resolve tenant from JWT context.
+	tenantID := req.GetTenantId()
+	if tenantID == "" {
+		tenantID = middleware.TenantIDFromCtx(ctx)
+	}
+	if tenantID == "" {
+		return nil, status.Error(codes.InvalidArgument, "tenant_id is required")
 	}
 
-	var waNumber *hermesv1.WaNumber
-	if resp.GetSession() != nil {
-		s := resp.GetSession()
-		waNumber = &hermesv1.WaNumber{
-			Id:          s.GetWaNumberId(),
-			TenantId:    req.GetTenantId(),
-			Jid:         s.GetJid(),
-			Phone:       s.GetPhone(),
-			DisplayName: req.GetDisplayName(),
-			ProxyId:     s.GetProxyId(),
-			PodId:       s.GetPodId(),
-			ConnectedAt: s.GetConnectedAt(),
+	// 1. Create the wa_number DB record (or upsert if phone exists).
+	waNumberID, err := h.store.CreateWaNumber(ctx, tenantID, req.GetPhone(), req.GetDisplayName(), req.GetProxyId())
+	if err != nil {
+		h.log.Error().Err(err).Str("phone", req.GetPhone()).Msg("failed to create wa_number")
+		return nil, status.Errorf(codes.Internal, "failed to create number: %v", err)
+	}
+
+	// 2. Assign to workspaces.
+	if len(req.GetWorkspaceIds()) > 0 {
+		if err := h.store.AssignWaNumberWorkspaces(ctx, waNumberID, req.GetWorkspaceIds()); err != nil {
+			h.log.Error().Err(err).Str("wa_number_id", waNumberID).Msg("failed to assign workspaces")
+			// Non-fatal — number is created, workspace assignment can be retried.
+		}
+	}
+
+	waNumber := &hermesv1.WaNumber{
+		Id:           waNumberID,
+		TenantId:     tenantID,
+		Phone:        req.GetPhone(),
+		DisplayName:  req.GetDisplayName(),
+		ProxyId:      req.GetProxyId(),
+		WorkspaceIds: req.GetWorkspaceIds(),
+	}
+
+	// 3. Optionally connect the session (triggers QR code).
+	var qrCode string
+	if h.waClient != nil {
+		resp, err := h.waClient.ConnectSession(ctx, &hermesv1.ConnectSessionRequest{
+			WaNumberId: waNumberID,
+			ProxyId:    req.GetProxyId(),
+		})
+		if err != nil {
+			h.log.Warn().Err(err).Str("wa_number_id", waNumberID).Msg("connect session failed (number registered but not connected)")
+			// Non-fatal — return the number without QR. User can reconnect later.
+		} else {
+			qrCode = resp.GetQrCode()
+			if resp.GetSession() != nil {
+				waNumber.Jid = resp.GetSession().GetJid()
+				waNumber.PodId = resp.GetSession().GetPodId()
+				waNumber.ConnectedAt = resp.GetSession().GetConnectedAt()
+			}
 		}
 	}
 
 	return &hermesv1.RegisterWaNumberResponse{
 		WaNumber: waNumber,
-		QrCode:   resp.GetQrCode(),
+		QrCode:   qrCode,
 	}, nil
 }
 
@@ -474,42 +501,65 @@ func (h *Handler) GetQRCode(ctx context.Context, req *hermesv1.GetQRCodeRequest)
 	}, nil
 }
 
-func (h *Handler) ListWaNumbers(_ context.Context, _ *hermesv1.ListWaNumbersRequest) (*hermesv1.ListWaNumbersResponse, error) {
-	// WA numbers require shared-DB queries across wa_numbers + wa_number_workspaces.
-	// The WA service's ListSessions is pod-specific and not suitable.
-	// TODO: implement via shared-DB store methods.
-	return nil, status.Error(codes.Unimplemented, "ListWaNumbers not yet routed")
+func (h *Handler) ListWaNumbers(ctx context.Context, req *hermesv1.ListWaNumbersRequest) (*hermesv1.ListWaNumbersResponse, error) {
+	tenantID := req.GetTenantId()
+	if tenantID == "" {
+		tenantID = middleware.TenantIDFromCtx(ctx)
+	}
+
+	// Map proto enum to DB status string.
+	var statusFilter string
+	switch req.GetStatus() {
+	case hermesv1.WaNumberStatus_WA_NUMBER_STATUS_ACTIVE:
+		statusFilter = "active"
+	case hermesv1.WaNumberStatus_WA_NUMBER_STATUS_BANNED:
+		statusFilter = "banned"
+	case hermesv1.WaNumberStatus_WA_NUMBER_STATUS_DISCONNECTED:
+		statusFilter = "disconnected"
+	case hermesv1.WaNumberStatus_WA_NUMBER_STATUS_COOLDOWN:
+		statusFilter = "cooldown"
+	}
+
+	page, pageSize := clampPagination(req.GetPagination())
+	rows, total, err := h.store.ListWaNumbers(ctx, tenantID, req.GetWorkspaceId(), statusFilter, page, pageSize)
+	if err != nil {
+		h.log.Error().Err(err).Msg("failed to list wa_numbers")
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+
+	var numbers []*hermesv1.WaNumber
+	for _, r := range rows {
+		// Get workspace IDs for each number.
+		wsIDs, _ := h.store.GetWaNumberWorkspaceIDs(ctx, r.ID)
+		n := waNumberRowToProto(r)
+		n.WorkspaceIds = wsIDs
+		numbers = append(numbers, n)
+	}
+
+	return &hermesv1.ListWaNumbersResponse{
+		WaNumbers:  numbers,
+		Pagination: pageResponse(total, page, pageSize),
+	}, nil
 }
 
 func (h *Handler) GetWaNumber(ctx context.Context, req *hermesv1.GetWaNumberRequest) (*hermesv1.GetWaNumberResponse, error) {
-	if h.waClient == nil {
-		return nil, status.Error(codes.Unavailable, "wa service not available")
-	}
 	if req.GetId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "id is required")
 	}
 
-	resp, err := h.waClient.GetSessionStatus(ctx, &hermesv1.GetSessionStatusRequest{
-		WaNumberId: req.GetId(),
-	})
+	row, err := h.store.GetWaNumberByID(ctx, req.GetId())
 	if err != nil {
-		return nil, err
-	}
-
-	var waNumber *hermesv1.WaNumber
-	if resp.GetSession() != nil {
-		s := resp.GetSession()
-		waNumber = &hermesv1.WaNumber{
-			Id:          s.GetWaNumberId(),
-			Jid:         s.GetJid(),
-			Phone:       s.GetPhone(),
-			ProxyId:     s.GetProxyId(),
-			PodId:       s.GetPodId(),
-			ConnectedAt: s.GetConnectedAt(),
+		if errors.Is(err, ErrNotFound) {
+			return nil, status.Error(codes.NotFound, "wa number not found")
 		}
+		return nil, status.Error(codes.Internal, "internal error")
 	}
 
-	return &hermesv1.GetWaNumberResponse{WaNumber: waNumber}, nil
+	n := waNumberRowToProto(row)
+	wsIDs, _ := h.store.GetWaNumberWorkspaceIDs(ctx, row.ID)
+	n.WorkspaceIds = wsIDs
+
+	return &hermesv1.GetWaNumberResponse{WaNumber: n}, nil
 }
 
 func (h *Handler) UpdateWaNumber(_ context.Context, _ *hermesv1.UpdateWaNumberRequest) (*hermesv1.UpdateWaNumberResponse, error) {

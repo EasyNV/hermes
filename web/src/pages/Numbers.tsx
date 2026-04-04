@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAuthStore } from '@/stores/auth'
 import { listWaNumbers, registerWaNumber, getQRCode, disconnectWaNumber, reconnectWaNumber, deleteWaNumber } from '@/api/numbers'
+import { listWorkspaces } from '@/api/workspaces'
 import type { WaNumber, WaNumberStatus } from '@/api/types'
 import { WA_STATUS } from '@/lib/constants'
 import { formatPhone, formatNumber } from '@/lib/utils'
@@ -57,7 +58,22 @@ export default function Numbers() {
   // --- Register form state ---
   const [regPhone, setRegPhone] = useState('')
   const [regDisplayName, setRegDisplayName] = useState('')
-  const [regWorkspaceIds, setRegWorkspaceIds] = useState('')
+  const [regWorkspaceIds, setRegWorkspaceIds] = useState<string[]>([])
+
+  // --- Workspace list for multi-select ---
+  const { data: workspacesData } = useQuery({
+    queryKey: ['workspaces', tenantId],
+    queryFn: () => listWorkspaces({ tenantId, pageSize: 100 }),
+    enabled: !!tenantId,
+  })
+  const workspaces = workspacesData?.workspaces ?? []
+
+  // Auto-select if only one workspace exists.
+  useEffect(() => {
+    if (workspaces.length === 1 && regWorkspaceIds.length === 0) {
+      setRegWorkspaceIds([workspaces[0].id])
+    }
+  }, [workspaces]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const statusParam = statusFilter === 'ALL' ? undefined : (statusFilter as WaNumberStatus)
 
@@ -124,20 +140,22 @@ export default function Numbers() {
   const resetRegisterForm = useCallback(() => {
     setRegPhone('')
     setRegDisplayName('')
-    setRegWorkspaceIds('')
+    setRegWorkspaceIds([])
   }, [])
 
   function handleRegister() {
-    const workspaceIds = regWorkspaceIds
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
     registerMutation.mutate({
       tenantId,
       phone: regPhone,
       displayName: regDisplayName,
-      workspaceIds,
+      workspaceIds: regWorkspaceIds,
     })
+  }
+
+  function toggleWorkspace(wsId: string) {
+    setRegWorkspaceIds((prev) =>
+      prev.includes(wsId) ? prev.filter((id) => id !== wsId) : [...prev, wsId]
+    )
   }
 
   function handleStatusFilterChange(value: string) {
@@ -275,13 +293,25 @@ export default function Numbers() {
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="reg-workspaces">Workspace IDs (comma-separated)</Label>
-              <Input
-                id="reg-workspaces"
-                placeholder="ws-1, ws-2"
-                value={regWorkspaceIds}
-                onChange={(e) => setRegWorkspaceIds(e.target.value)}
-              />
+              <Label>Workspaces</Label>
+              {workspaces.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No workspaces found. Create a workspace first.</p>
+              ) : (
+                <div className="space-y-2 rounded-md border p-3 max-h-40 overflow-y-auto">
+                  {workspaces.map((ws) => (
+                    <label key={ws.id} className="flex items-center gap-2 cursor-pointer text-sm">
+                      <input
+                        type="checkbox"
+                        checked={regWorkspaceIds.includes(ws.id)}
+                        onChange={() => toggleWorkspace(ws.id)}
+                        className="rounded border-gray-300"
+                      />
+                      <span>{ws.name}</span>
+                      <span className="text-xs text-muted-foreground">({ws.id.slice(0, 8)}...)</span>
+                    </label>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
           <DialogFooter>

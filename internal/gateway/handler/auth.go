@@ -144,6 +144,42 @@ func tenantToProto(t *TenantRow) *hermesv1.Tenant {
 	}
 }
 
+func waNumberRowToProto(r *WaNumberRow) *hermesv1.WaNumber {
+	n := &hermesv1.WaNumber{
+		Id:             r.ID,
+		TenantId:       r.TenantID,
+		Jid:            r.JID,
+		Phone:          r.Phone,
+		DisplayName:    r.DisplayName,
+		HealthScore:    r.HealthScore,
+		DailySentCount: r.DailySentCount,
+		TotalSent:      int64(r.TotalSent),
+		BanCount:       r.BanCount,
+		PodId:          r.PodID,
+		CreatedAt:      timestamppb.New(r.CreatedAt),
+	}
+	switch r.Status {
+	case "active":
+		n.Status = hermesv1.WaNumberStatus_WA_NUMBER_STATUS_ACTIVE
+	case "banned":
+		n.Status = hermesv1.WaNumberStatus_WA_NUMBER_STATUS_BANNED
+	case "disconnected":
+		n.Status = hermesv1.WaNumberStatus_WA_NUMBER_STATUS_DISCONNECTED
+	case "cooldown":
+		n.Status = hermesv1.WaNumberStatus_WA_NUMBER_STATUS_COOLDOWN
+	}
+	if r.ProxyID != nil {
+		n.ProxyId = *r.ProxyID
+	}
+	if r.LastBanAt != nil {
+		n.LastBanAt = timestamppb.New(*r.LastBanAt)
+	}
+	if r.ConnectedAt != nil {
+		n.ConnectedAt = timestamppb.New(*r.ConnectedAt)
+	}
+	return n
+}
+
 // ---------------------------------------------------------------------------
 // Auth RPCs
 // ---------------------------------------------------------------------------

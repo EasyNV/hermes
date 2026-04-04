@@ -42,6 +42,11 @@ type mockStore struct {
 	deleteRefreshTokenFn    func(ctx context.Context, tokenID string) error
 	deleteUserRefreshTokensFn func(ctx context.Context, userID string) error
 	getDashboardStatsFn     func(ctx context.Context, tenantID, workspaceID string) (*DashboardStatsRow, error)
+	createWaNumberFn           func(ctx context.Context, tenantID, phone, displayName, proxyID string) (string, error)
+	assignWaNumberWorkspacesFn func(ctx context.Context, waNumberID string, workspaceIDs []string) error
+	listWaNumbersFn            func(ctx context.Context, tenantID, workspaceID, statusFilter string, page, pageSize int32) ([]*WaNumberRow, int64, error)
+	getWaNumberByIDFn          func(ctx context.Context, id string) (*WaNumberRow, error)
+	getWaNumberWorkspaceIDsFn  func(ctx context.Context, waNumberID string) ([]string, error)
 }
 
 func (m *mockStore) GetUserByEmail(ctx context.Context, email string) (*UserRow, error) {
@@ -196,6 +201,41 @@ func (m *mockStore) GetDashboardStats(ctx context.Context, tenantID, workspaceID
 		return m.getDashboardStatsFn(ctx, tenantID, workspaceID)
 	}
 	return nil, fmt.Errorf("not mocked")
+}
+
+func (m *mockStore) CreateWaNumber(ctx context.Context, tenantID, phone, displayName, proxyID string) (string, error) {
+	if m.createWaNumberFn != nil {
+		return m.createWaNumberFn(ctx, tenantID, phone, displayName, proxyID)
+	}
+	return "mock-wa-number-id", nil
+}
+
+func (m *mockStore) AssignWaNumberWorkspaces(ctx context.Context, waNumberID string, workspaceIDs []string) error {
+	if m.assignWaNumberWorkspacesFn != nil {
+		return m.assignWaNumberWorkspacesFn(ctx, waNumberID, workspaceIDs)
+	}
+	return nil
+}
+
+func (m *mockStore) ListWaNumbers(ctx context.Context, tenantID, workspaceID, statusFilter string, page, pageSize int32) ([]*WaNumberRow, int64, error) {
+	if m.listWaNumbersFn != nil {
+		return m.listWaNumbersFn(ctx, tenantID, workspaceID, statusFilter, page, pageSize)
+	}
+	return nil, 0, nil
+}
+
+func (m *mockStore) GetWaNumberByID(ctx context.Context, id string) (*WaNumberRow, error) {
+	if m.getWaNumberByIDFn != nil {
+		return m.getWaNumberByIDFn(ctx, id)
+	}
+	return nil, ErrNotFound
+}
+
+func (m *mockStore) GetWaNumberWorkspaceIDs(ctx context.Context, waNumberID string) ([]string, error) {
+	if m.getWaNumberWorkspaceIDsFn != nil {
+		return m.getWaNumberWorkspaceIDsFn(ctx, waNumberID)
+	}
+	return nil, nil
 }
 
 // ---------------------------------------------------------------------------
