@@ -13,10 +13,10 @@ export default defineConfig({
     },
   },
   server: {
-    port: 3000,
+    port: 5173,
     proxy: {
-      '/api': 'http://localhost:8080',
-      '/ws': { target: 'ws://localhost:8080', ws: true },
+      '/api': process.env.VITE_API_URL || 'http://localhost:8081',
+      '/ws': { target: process.env.VITE_WS_URL || 'ws://localhost:8081', ws: true },
     },
   },
 })

@@ -55,6 +55,22 @@ func RoleFromCtx(ctx context.Context) string {
 	return v
 }
 
+// ParseJWT validates and parses a JWT token string, returning the claims.
+// Exported for reuse by the REST adapter.
+func ParseJWT(tokenStr string, jwtSecret []byte) (*Claims, error) {
+	claims := &Claims{}
+	token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (any, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
+		return jwtSecret, nil
+	})
+	if err != nil || !token.Valid {
+		return nil, err
+	}
+	return claims, nil
+}
+
 // AuthInterceptor returns a gRPC unary server interceptor that validates JWT
 // tokens from the "authorization" metadata header and injects claims into the
 // request context. Login and RefreshToken RPCs are skipped.

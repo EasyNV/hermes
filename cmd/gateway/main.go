@@ -14,6 +14,7 @@ import (
 	gwconfig "github.com/hermes-waba/hermes/internal/gateway/config"
 	"github.com/hermes-waba/hermes/internal/gateway/handler"
 	"github.com/hermes-waba/hermes/internal/gateway/middleware"
+	gwrest "github.com/hermes-waba/hermes/internal/gateway/rest"
 	gwws "github.com/hermes-waba/hermes/internal/gateway/websocket"
 	"github.com/hermes-waba/hermes/pkg/db"
 	"github.com/hermes-waba/hermes/pkg/logger"
@@ -98,12 +99,16 @@ func main() {
 		log.Warn().Err(err).Msg("failed to start NATS event subscriber (WebSocket events will not work)")
 	}
 
-	// HTTP server for WebSocket endpoint
+	// REST adapter — JSON-over-HTTP for the frontend
+	restAdapter := gwrest.New(h, []byte(cfg.JWTSecret), log)
+
+	// HTTP server for REST API + WebSocket endpoint
 	mux := http.NewServeMux()
+	restAdapter.Register(mux)
 	mux.Handle("/ws", hub)
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Port+1),
-		Handler: mux,
+		Handler: restAdapter.CORS(mux),
 	}
 	go func() {
 		log.Info().Int("port", cfg.Port+1).Msg("WebSocket server started")

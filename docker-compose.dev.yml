@@ -340,8 +340,7 @@ services:
     ports:
       - "5173:5173"
     environment:
-      # Vite uses this for proxy targets (overrides vite.config.ts server.proxy)
-      VITE_API_URL: http://gateway:8080
+      VITE_API_URL: http://gateway:8081
       VITE_WS_URL: ws://gateway:8081
     depends_on:
       gateway:
