@@ -1407,13 +1407,28 @@ func (h *Handler) ListCampaignNumbers(ctx context.Context, req *hermesv1.ListCam
 	}
 
 	// Translate CampaignNumber -> gateway CampaignNumberDetail.
-	// The backend returns bare CampaignNumber; we wrap with detail fields.
+	// Enrich with phone/name from wa_numbers via shared DB.
 	numbers := make([]*hermesv1.CampaignNumberDetail, 0, len(resp.GetNumbers()))
 	for _, n := range resp.GetNumbers() {
-		numbers = append(numbers, &hermesv1.CampaignNumberDetail{
+		detail := &hermesv1.CampaignNumberDetail{
 			CampaignNumber: n,
 			CurrentStatus:  n.GetStatus(),
-		})
+		}
+		if row, err := h.store.GetWaNumberByID(ctx, n.GetWaNumberId()); err == nil {
+			detail.Phone = row.Phone
+			detail.DisplayName = row.DisplayName
+			switch row.Status {
+			case "active":
+				detail.CurrentStatus = hermesv1.WaNumberStatus_WA_NUMBER_STATUS_ACTIVE
+			case "banned":
+				detail.CurrentStatus = hermesv1.WaNumberStatus_WA_NUMBER_STATUS_BANNED
+			case "disconnected":
+				detail.CurrentStatus = hermesv1.WaNumberStatus_WA_NUMBER_STATUS_DISCONNECTED
+			case "cooldown":
+				detail.CurrentStatus = hermesv1.WaNumberStatus_WA_NUMBER_STATUS_COOLDOWN
+			}
+		}
+		numbers = append(numbers, detail)
 	}
 
 	return &hermesv1.ListCampaignNumbersResponse{

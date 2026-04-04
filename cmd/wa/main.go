@@ -188,10 +188,20 @@ func startCampaignConsumer(js natsgo.JetStreamContext, mgr session.Manager, snd 
 
 		client, ok := mgr.GetClient(task.WaNumberId)
 		if !ok {
-			// Not our session — ACK so it doesn't redelivery forever.
-			msg.Ack()
+			log.Warn().
+				Str("campaign_id", task.CampaignId).
+				Str("wa_number_id", task.WaNumberId).
+				Str("contact_id", task.ContactId).
+				Msg("campaign send: WA client not connected, NAKing for retry")
+			msg.Nak()
 			return
 		}
+
+		log.Info().
+			Str("campaign_id", task.CampaignId).
+			Str("recipient", task.RecipientJid).
+			Int("body_len", len(task.ResolvedBody)).
+			Msg("campaign send: sending message")
 
 		ctx := context.Background()
 
