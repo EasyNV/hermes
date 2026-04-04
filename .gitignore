@@ -3,5 +3,5 @@ bin/
 .env
 web/node_modules/
 web/dist/
-gateway
+/gateway
 bin/
