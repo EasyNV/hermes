@@ -76,3 +76,5 @@
 - Advanced campaign scheduling (time-zone aware)
 - Rate limiting middleware
 - Audit logging
+- Campaign-only inbox filter (Settings toggle: All / Campaign Only / Direct Only, per-workspace)
+- Contact name randomization (Settings toggle for privacy/demo: hash-based pseudonyms, phone masking e.g. `+62 813 **** 8484`)
