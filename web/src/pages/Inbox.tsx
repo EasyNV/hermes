@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import {
   MessageSquare, Send, MoreVertical, Search, UserPlus, ArrowRightLeft,
-  XCircle, Inbox as InboxIcon, Loader2,
+  XCircle, Inbox as InboxIcon, Loader2, Trash2,
 } from 'lucide-react'
 
 import { useAuthStore } from '@/stores/auth'
@@ -13,7 +13,7 @@ import {
   listConversations, getConversation, listMessages, sendMessage,
   claimConversation, transferConversation, closeConversation,
 } from '@/api/inbox'
-import { listCannedResponses } from '@/api/inbox'
+import { listCannedResponses, clearAllConversations } from '@/api/inbox'
 import type {
   Conversation, Message, CannedResponse, ConversationStatus,
 } from '@/api/types'
@@ -296,6 +296,15 @@ export default function Inbox() {
     },
   })
 
+  const clearAllMutation = useMutation({
+    mutationFn: () => clearAllConversations(),
+    onSuccess: () => {
+      setActiveConversation(null)
+      queryClient.invalidateQueries({ queryKey: ['conversations'] })
+      queryClient.invalidateQueries({ queryKey: ['messages'] })
+    },
+  })
+
   // ── Sync query data into store ──
 
   useEffect(() => {
@@ -385,7 +394,22 @@ export default function Inbox() {
       {/* ── Left Panel: Conversation List ── */}
       <div className="flex w-[350px] shrink-0 flex-col border-r">
         <div className="p-4 pb-2">
-          <h1 className="text-lg font-semibold">Inbox</h1>
+          <div className="flex items-center justify-between">
+            <h1 className="text-lg font-semibold">Inbox</h1>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-destructive hover:text-destructive"
+              onClick={() => {
+                if (window.confirm('Clear ALL conversations in this workspace? This cannot be undone.')) {
+                  clearAllMutation.mutate()
+                }
+              }}
+              disabled={clearAllMutation.isPending}
+            >
+              {clearAllMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+            </Button>
+          </div>
           <div className="mt-2 relative">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input

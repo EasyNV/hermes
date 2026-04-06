@@ -50,6 +50,10 @@ type mockStore struct {
 	deleteWaNumberFn             func(ctx context.Context, id string) error
 	updateWaNumberFn             func(ctx context.Context, id, displayName, proxyID string) (*WaNumberRow, error)
 	replaceWaNumberWorkspacesFn  func(ctx context.Context, waNumberID string, workspaceIDs []string) error
+	clearAllConversationsFn      func(ctx context.Context, workspaceID string) (int64, error)
+	addToAllowlistFn             func(ctx context.Context, workspaceID, phone, source string) error
+	removeFromAllowlistFn        func(ctx context.Context, workspaceID, phone string) error
+	listAllowlistFn              func(ctx context.Context, workspaceID string, page, pageSize int32) ([]AllowlistRow, int64, error)
 }
 
 func (m *mockStore) GetUserByEmail(ctx context.Context, email string) (*UserRow, error) {
@@ -260,6 +264,34 @@ func (m *mockStore) ReplaceWaNumberWorkspaces(ctx context.Context, waNumberID st
 		return m.replaceWaNumberWorkspacesFn(ctx, waNumberID, workspaceIDs)
 	}
 	return nil
+}
+
+func (m *mockStore) ClearAllConversations(ctx context.Context, workspaceID string) (int64, error) {
+	if m.clearAllConversationsFn != nil {
+		return m.clearAllConversationsFn(ctx, workspaceID)
+	}
+	return 0, nil
+}
+
+func (m *mockStore) AddToAllowlist(ctx context.Context, workspaceID, phone, source string) error {
+	if m.addToAllowlistFn != nil {
+		return m.addToAllowlistFn(ctx, workspaceID, phone, source)
+	}
+	return nil
+}
+
+func (m *mockStore) RemoveFromAllowlist(ctx context.Context, workspaceID, phone string) error {
+	if m.removeFromAllowlistFn != nil {
+		return m.removeFromAllowlistFn(ctx, workspaceID, phone)
+	}
+	return nil
+}
+
+func (m *mockStore) ListAllowlist(ctx context.Context, workspaceID string, page, pageSize int32) ([]AllowlistRow, int64, error) {
+	if m.listAllowlistFn != nil {
+		return m.listAllowlistFn(ctx, workspaceID, page, pageSize)
+	}
+	return nil, 0, nil
 }
 
 // ---------------------------------------------------------------------------

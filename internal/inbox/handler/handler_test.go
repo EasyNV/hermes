@@ -43,6 +43,12 @@ type mockStore struct {
 	getContactCampaignHistoryFn func(ctx context.Context, contactID string, page, pageSize int32) ([]*CampaignHistoryRow, int64, error)
 	getAgentPerformanceFn      func(ctx context.Context, workspaceID, userID string, fromDate, toDate *time.Time) ([]*AgentPerfRow, error)
 	autoCreateContactFn        func(ctx context.Context, tenantID, phone, name string) (*ContactRow, error)
+	clearAllConversationsFn    func(ctx context.Context, workspaceID string) (int64, error)
+	isPhoneAllowlistedFn       func(ctx context.Context, workspaceID, phone string) (bool, error)
+	addToAllowlistFn           func(ctx context.Context, workspaceID, phone, source, sourceID string) error
+	bulkAddToAllowlistFn       func(ctx context.Context, workspaceID string, phones []string, source, sourceID string) (int64, error)
+	removeFromAllowlistFn      func(ctx context.Context, workspaceID, phone string) error
+	listAllowlistFn            func(ctx context.Context, workspaceID string, page, pageSize int32) ([]AllowlistEntry, int64, error)
 }
 
 func (m *mockStore) ListConversations(ctx context.Context, workspaceID, st, assignedTo, waNumberID, search string, sortOrder int32, page, pageSize int32) ([]*ConversationRow, int64, error) {
@@ -201,6 +207,48 @@ func (m *mockStore) AutoCreateContact(ctx context.Context, tenantID, phone, name
 		return m.autoCreateContactFn(ctx, tenantID, phone, name)
 	}
 	return &ContactRow{ID: "auto-" + phone, Phone: phone, Name: name}, nil
+}
+
+func (m *mockStore) ClearAllConversations(ctx context.Context, workspaceID string) (int64, error) {
+	if m.clearAllConversationsFn != nil {
+		return m.clearAllConversationsFn(ctx, workspaceID)
+	}
+	return 0, nil
+}
+
+func (m *mockStore) IsPhoneAllowlisted(ctx context.Context, workspaceID, phone string) (bool, error) {
+	if m.isPhoneAllowlistedFn != nil {
+		return m.isPhoneAllowlistedFn(ctx, workspaceID, phone)
+	}
+	return true, nil // default: allow all in tests
+}
+
+func (m *mockStore) AddToAllowlist(ctx context.Context, workspaceID, phone, source, sourceID string) error {
+	if m.addToAllowlistFn != nil {
+		return m.addToAllowlistFn(ctx, workspaceID, phone, source, sourceID)
+	}
+	return nil
+}
+
+func (m *mockStore) BulkAddToAllowlist(ctx context.Context, workspaceID string, phones []string, source, sourceID string) (int64, error) {
+	if m.bulkAddToAllowlistFn != nil {
+		return m.bulkAddToAllowlistFn(ctx, workspaceID, phones, source, sourceID)
+	}
+	return int64(len(phones)), nil
+}
+
+func (m *mockStore) RemoveFromAllowlist(ctx context.Context, workspaceID, phone string) error {
+	if m.removeFromAllowlistFn != nil {
+		return m.removeFromAllowlistFn(ctx, workspaceID, phone)
+	}
+	return nil
+}
+
+func (m *mockStore) ListAllowlist(ctx context.Context, workspaceID string, page, pageSize int32) ([]AllowlistEntry, int64, error) {
+	if m.listAllowlistFn != nil {
+		return m.listAllowlistFn(ctx, workspaceID, page, pageSize)
+	}
+	return nil, 0, nil
 }
 
 // ---------------------------------------------------------------------------

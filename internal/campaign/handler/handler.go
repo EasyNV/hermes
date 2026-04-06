@@ -553,6 +553,13 @@ func (h *Handler) StartCampaign(ctx context.Context, req *hermesv1.CampaignStart
 		return nil, status.Errorf(codes.Internal, "updating campaign status: %v", err)
 	}
 
+	// Populate contact allowlist for this workspace (so inbox accepts replies).
+	if added, alErr := h.store.PopulateAllowlistFromCampaign(ctx, req.Id, campaign.WorkspaceID); alErr != nil {
+		h.log.Error().Err(alErr).Str("campaign_id", req.Id).Msg("failed to populate allowlist")
+	} else {
+		h.log.Info().Int64("added", added).Str("campaign_id", req.Id).Msg("allowlist populated from campaign contacts")
+	}
+
 	// Start dispatch engine.
 	tenantID, err := h.store.GetWorkspaceTenantID(ctx, campaign.WorkspaceID)
 	if err != nil {

@@ -135,6 +135,7 @@ type Store interface {
 
 	// Cross-service lookups (read-only from contacts/workspaces tables)
 	GetWorkspaceTenantID(ctx context.Context, workspaceID string) (string, error)
+	PopulateAllowlistFromCampaign(ctx context.Context, campaignID, workspaceID string) (int64, error)
 	FindContactInActiveCampaigns(ctx context.Context, senderPhone string) ([]CampaignContactMatch, error)
 	GetCampaignsUsingNumber(ctx context.Context, waNumberID string, statuses []string) ([]*CampaignRow, error)
 	CountCampaignNumbers(ctx context.Context, campaignID string) (int32, error)
@@ -723,4 +724,21 @@ func (s *PgStore) CountCampaignContacts(ctx context.Context, campaignID string) 
 	var count int32
 	err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM campaign_contacts WHERE campaign_id=$1", campaignID).Scan(&count)
 	return count, err
+}
+
+func (s *PgStore) PopulateAllowlistFromCampaign(ctx context.Context, campaignID, workspaceID string) (int64, error) {
+	// Insert all campaign contact phones into the allowlist (with + stripped).
+	tag, err := s.pool.Exec(ctx,
+		`INSERT INTO contact_allowlist (workspace_id, phone, source, source_id)
+		 SELECT $1, LTRIM(c.phone, '+'), 'campaign', $2
+		 FROM campaign_contacts cc
+		 JOIN contacts c ON c.id = cc.contact_id
+		 WHERE cc.campaign_id = $2
+		 ON CONFLICT (workspace_id, phone) DO NOTHING`,
+		workspaceID, campaignID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("populating allowlist: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }

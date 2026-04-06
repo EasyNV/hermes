@@ -64,6 +64,13 @@ type WaNumberRow struct {
 	CreatedAt      time.Time
 }
 
+type AllowlistRow struct {
+	Phone    string
+	Source   string
+	SourceID string
+	AddedAt  time.Time
+}
+
 type DashboardStatsRow struct {
 	ActiveNumbers           int32
 	TotalNumbers            int32
@@ -123,6 +130,10 @@ type Store interface {
 	DeleteWaNumber(ctx context.Context, id string) error
 	UpdateWaNumber(ctx context.Context, id, displayName, proxyID string) (*WaNumberRow, error)
 	ReplaceWaNumberWorkspaces(ctx context.Context, waNumberID string, workspaceIDs []string) error
+	ClearAllConversations(ctx context.Context, workspaceID string) (int64, error)
+	AddToAllowlist(ctx context.Context, workspaceID, phone, source string) error
+	RemoveFromAllowlist(ctx context.Context, workspaceID, phone string) error
+	ListAllowlist(ctx context.Context, workspaceID string, page, pageSize int32) ([]AllowlistRow, int64, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -690,6 +701,52 @@ func (s *PgStore) UpdateWaNumber(ctx context.Context, id, displayName, proxyID s
 		strings.Join(setClauses, ", "), idx, waNumberCols)
 	args = append(args, id)
 	return scanWaNumber(s.pool.QueryRow(ctx, query, args...))
+}
+
+func (s *PgStore) ClearAllConversations(ctx context.Context, workspaceID string) (int64, error) {
+	tag, err := s.pool.Exec(ctx, "DELETE FROM conversations WHERE workspace_id=$1", workspaceID)
+	if err != nil {
+		return 0, fmt.Errorf("clearing conversations: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+func (s *PgStore) AddToAllowlist(ctx context.Context, workspaceID, phone, source string) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO contact_allowlist (workspace_id, phone, source) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+		workspaceID, strings.TrimPrefix(phone, "+"), source,
+	)
+	return err
+}
+
+func (s *PgStore) RemoveFromAllowlist(ctx context.Context, workspaceID, phone string) error {
+	_, err := s.pool.Exec(ctx, "DELETE FROM contact_allowlist WHERE workspace_id=$1 AND phone=$2", workspaceID, strings.TrimPrefix(phone, "+"))
+	return err
+}
+
+func (s *PgStore) ListAllowlist(ctx context.Context, workspaceID string, page, pageSize int32) ([]AllowlistRow, int64, error) {
+	var total int64
+	if err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM contact_allowlist WHERE workspace_id=$1", workspaceID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	offset := (page - 1) * pageSize
+	rows, err := s.pool.Query(ctx,
+		"SELECT phone, source, source_id, added_at FROM contact_allowlist WHERE workspace_id=$1 ORDER BY added_at DESC LIMIT $2 OFFSET $3",
+		workspaceID, pageSize, offset,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var list []AllowlistRow
+	for rows.Next() {
+		e := AllowlistRow{}
+		if err := rows.Scan(&e.Phone, &e.Source, &e.SourceID, &e.AddedAt); err != nil {
+			return nil, 0, err
+		}
+		list = append(list, e)
+	}
+	return list, total, rows.Err()
 }
 
 func (s *PgStore) ReplaceWaNumberWorkspaces(ctx context.Context, waNumberID string, workspaceIDs []string) error {

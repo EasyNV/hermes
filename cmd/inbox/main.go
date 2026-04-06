@@ -176,6 +176,21 @@ func startInboundConsumer(js natsgo.JetStreamContext, store handler.Store, log z
 		}
 		_ = tenantID
 
+		// 2b. Check contact allowlist — only create conversations for allowed contacts.
+		allowed, alErr := store.IsPhoneAllowlisted(ctx, workspaceID, senderPhone)
+		if alErr != nil {
+			log.Warn().Err(alErr).Str("phone", senderPhone).Msg("allowlist check failed, allowing message")
+			allowed = true // fail open — don't lose messages on DB errors
+		}
+		if !allowed {
+			log.Debug().
+				Str("phone", senderPhone).
+				Str("workspace_id", workspaceID).
+				Msg("inbound message from non-allowlisted contact, dropping")
+			msg.Ack()
+			return
+		}
+
 		// 3. Find or create conversation.
 		conv, _, err := store.FindOrCreateConversation(ctx, workspaceID, contact.ID, event.WaNumberId, nil)
 		if err != nil {

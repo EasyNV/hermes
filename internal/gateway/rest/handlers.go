@@ -977,6 +977,95 @@ func (a *Adapter) deleteNotificationConfig(w http.ResponseWriter, r *http.Reques
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Admin Operations
+// ═══════════════════════════════════════════════════════════════
+
+func (a *Adapter) clearAllConversations(w http.ResponseWriter, r *http.Request) {
+	// RBAC: workspace_admin+ only
+	role, _ := r.Context().Value(middleware.CtxRole).(string)
+	if role != "superadmin" && role != "tenant_admin" && role != "workspace_admin" {
+		a.writeError(w, 403, "PERMISSION_DENIED", "workspace_admin or higher required")
+		return
+	}
+
+	workspaceID, _ := r.Context().Value(middleware.CtxWorkspaceID).(string)
+	if workspaceID == "" {
+		a.writeError(w, 400, "BAD_REQUEST", "no workspace in context")
+		return
+	}
+
+	count, err := a.store.ClearAllConversations(r.Context(), workspaceID)
+	if err != nil {
+		a.log.Error().Err(err).Str("workspace_id", workspaceID).Msg("failed to clear conversations")
+		a.writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int64{"deleted": count})
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Contact Allowlist
+// ═══════════════════════════════════════════════════════════════
+
+func (a *Adapter) listAllowlist(w http.ResponseWriter, r *http.Request) {
+	workspaceID, _ := r.Context().Value(middleware.CtxWorkspaceID).(string)
+	page, pageSize := int32(1), int32(100)
+	if v := r.URL.Query().Get("page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil { page = int32(n) }
+	}
+	if v := r.URL.Query().Get("pageSize"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil { pageSize = int32(n) }
+	}
+	list, total, err := a.store.ListAllowlist(r.Context(), workspaceID, page, pageSize)
+	if err != nil {
+		a.writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"entries": list,
+		"pagination": map[string]any{"total": total, "page": page, "pageSize": pageSize},
+	})
+}
+
+func (a *Adapter) addToAllowlist(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Phone string `json:"phone"`
+	}
+	if err := readJSON(r, &body); err != nil || body.Phone == "" {
+		a.writeError(w, 400, "BAD_REQUEST", "phone is required")
+		return
+	}
+	workspaceID, _ := r.Context().Value(middleware.CtxWorkspaceID).(string)
+	if err := a.store.AddToAllowlist(r.Context(), workspaceID, body.Phone, "manual"); err != nil {
+		a.writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	json.NewEncoder(w).Encode(map[string]string{"status": "added", "phone": body.Phone})
+}
+
+func (a *Adapter) removeFromAllowlist(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Phone string `json:"phone"`
+	}
+	if err := readJSON(r, &body); err != nil || body.Phone == "" {
+		a.writeError(w, 400, "BAD_REQUEST", "phone is required")
+		return
+	}
+	workspaceID, _ := r.Context().Value(middleware.CtxWorkspaceID).(string)
+	if err := a.store.RemoveFromAllowlist(r.Context(), workspaceID, body.Phone); err != nil {
+		a.writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "removed", "phone": body.Phone})
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Phone Pairing (proxies to WA service HTTP endpoint)
 // ═══════════════════════════════════════════════════════════════
 

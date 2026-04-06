@@ -137,6 +137,14 @@ type Store interface {
 	FindContactByPhone(ctx context.Context, phone string) (*ContactRow, string, error) // returns contact + tenantID
 	GetWorkspaceIDForWaNumber(ctx context.Context, waNumberID string) (string, string, error) // returns workspaceID, tenantID
 	AutoCreateContact(ctx context.Context, tenantID, phone, name string) (*ContactRow, error) // auto-create from inbound message
+	ClearAllConversations(ctx context.Context, workspaceID string) (int64, error) // delete all conversations + messages in workspace
+
+	// Contact allowlist
+	IsPhoneAllowlisted(ctx context.Context, workspaceID, phone string) (bool, error)
+	AddToAllowlist(ctx context.Context, workspaceID, phone, source, sourceID string) error
+	BulkAddToAllowlist(ctx context.Context, workspaceID string, phones []string, source, sourceID string) (int64, error)
+	RemoveFromAllowlist(ctx context.Context, workspaceID, phone string) error
+	ListAllowlist(ctx context.Context, workspaceID string, page, pageSize int32) ([]AllowlistEntry, int64, error)
 
 	// Canned responses
 	CreateCannedResponse(ctx context.Context, workspaceID, shortcut, body string, createdBy *string) (*CannedResponseRow, error)
@@ -879,6 +887,91 @@ func (s *PgStore) GetAgentPerformance(ctx context.Context, workspaceID, userID s
 		result = append(result, a)
 	}
 	return result, rows.Err()
+}
+
+type AllowlistEntry struct {
+	WorkspaceID string
+	Phone       string
+	Source      string
+	SourceID    string
+	AddedAt     time.Time
+}
+
+func (s *PgStore) IsPhoneAllowlisted(ctx context.Context, workspaceID, phone string) (bool, error) {
+	var exists bool
+	// Check both with and without '+' prefix.
+	err := s.pool.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM contact_allowlist WHERE workspace_id=$1 AND (phone=$2 OR phone=$3))",
+		workspaceID, phone, "+"+phone,
+	).Scan(&exists)
+	return exists, err
+}
+
+func (s *PgStore) AddToAllowlist(ctx context.Context, workspaceID, phone, source, sourceID string) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO contact_allowlist (workspace_id, phone, source, source_id)
+		 VALUES ($1, $2, $3, $4) ON CONFLICT (workspace_id, phone) DO NOTHING`,
+		workspaceID, phone, source, sourceID,
+	)
+	return err
+}
+
+func (s *PgStore) BulkAddToAllowlist(ctx context.Context, workspaceID string, phones []string, source, sourceID string) (int64, error) {
+	var count int64
+	for _, phone := range phones {
+		tag, err := s.pool.Exec(ctx,
+			`INSERT INTO contact_allowlist (workspace_id, phone, source, source_id)
+			 VALUES ($1, $2, $3, $4) ON CONFLICT (workspace_id, phone) DO NOTHING`,
+			workspaceID, phone, source, sourceID,
+		)
+		if err != nil {
+			return count, err
+		}
+		count += tag.RowsAffected()
+	}
+	return count, nil
+}
+
+func (s *PgStore) RemoveFromAllowlist(ctx context.Context, workspaceID, phone string) error {
+	_, err := s.pool.Exec(ctx,
+		"DELETE FROM contact_allowlist WHERE workspace_id=$1 AND phone=$2",
+		workspaceID, phone,
+	)
+	return err
+}
+
+func (s *PgStore) ListAllowlist(ctx context.Context, workspaceID string, page, pageSize int32) ([]AllowlistEntry, int64, error) {
+	var total int64
+	if err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM contact_allowlist WHERE workspace_id=$1", workspaceID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	offset := (page - 1) * pageSize
+	rows, err := s.pool.Query(ctx,
+		"SELECT workspace_id, phone, source, source_id, added_at FROM contact_allowlist WHERE workspace_id=$1 ORDER BY added_at DESC LIMIT $2 OFFSET $3",
+		workspaceID, pageSize, offset,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var list []AllowlistEntry
+	for rows.Next() {
+		e := AllowlistEntry{}
+		if err := rows.Scan(&e.WorkspaceID, &e.Phone, &e.Source, &e.SourceID, &e.AddedAt); err != nil {
+			return nil, 0, err
+		}
+		list = append(list, e)
+	}
+	return list, total, rows.Err()
+}
+
+func (s *PgStore) ClearAllConversations(ctx context.Context, workspaceID string) (int64, error) {
+	// Messages cascade-delete via FK on conversations.
+	tag, err := s.pool.Exec(ctx, "DELETE FROM conversations WHERE workspace_id=$1", workspaceID)
+	if err != nil {
+		return 0, fmt.Errorf("clearing conversations: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (s *PgStore) AutoCreateContact(ctx context.Context, tenantID, phone, name string) (*ContactRow, error) {

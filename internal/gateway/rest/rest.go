@@ -17,12 +17,22 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	hermesv1 "github.com/hermes-waba/hermes/gen/go/hermes/v1"
+	"github.com/hermes-waba/hermes/internal/gateway/handler"
 	"github.com/hermes-waba/hermes/internal/gateway/middleware"
 )
+
+// GatewayStore is the subset of the gateway store needed by the REST adapter.
+type GatewayStore interface {
+	ClearAllConversations(ctx context.Context, workspaceID string) (int64, error)
+	AddToAllowlist(ctx context.Context, workspaceID, phone, source string) error
+	RemoveFromAllowlist(ctx context.Context, workspaceID, phone string) error
+	ListAllowlist(ctx context.Context, workspaceID string, page, pageSize int32) ([]handler.AllowlistRow, int64, error)
+}
 
 // Adapter wraps a HermesGateway gRPC handler and exposes it as REST/JSON.
 type Adapter struct {
 	gw          hermesv1.HermesGatewayServer
+	store       GatewayStore
 	jwtSecret   []byte
 	log         zerolog.Logger
 	marshaler   protojson.MarshalOptions
@@ -30,9 +40,10 @@ type Adapter struct {
 }
 
 // New creates a REST adapter for the given gRPC handler.
-func New(gw hermesv1.HermesGatewayServer, jwtSecret []byte, log zerolog.Logger, waHTTPAddr string) *Adapter {
+func New(gw hermesv1.HermesGatewayServer, store GatewayStore, jwtSecret []byte, log zerolog.Logger, waHTTPAddr string) *Adapter {
 	return &Adapter{
 		gw:         gw,
+		store:      store,
 		jwtSecret:  jwtSecret,
 		log:        log.With().Str("component", "rest").Logger(),
 		waHTTPAddr: waHTTPAddr,
@@ -146,6 +157,14 @@ func (a *Adapter) Register(mux *http.ServeMux) {
 
 	// Phone pairing
 	mux.HandleFunc("POST /api/v1/wa-numbers/{id}/pair-phone", a.auth(a.pairPhone))
+
+	// Admin operations
+	mux.HandleFunc("DELETE /api/v1/conversations/clear", a.auth(a.clearAllConversations))
+
+	// Contact allowlist
+	mux.HandleFunc("GET /api/v1/allowlist", a.auth(a.listAllowlist))
+	mux.HandleFunc("POST /api/v1/allowlist", a.auth(a.addToAllowlist))
+	mux.HandleFunc("DELETE /api/v1/allowlist", a.auth(a.removeFromAllowlist))
 
 	// Notifications
 	mux.HandleFunc("POST /api/v1/notifications", a.auth(a.configureNotification))

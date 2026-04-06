@@ -77,6 +77,7 @@ type mockStore struct {
 	getCampaignsUsingNumberFn    func(ctx context.Context, waNumberID string, statuses []string) ([]*CampaignRow, error)
 	countCampaignNumbersFn       func(ctx context.Context, campaignID string) (int32, error)
 	countCampaignContactsFn      func(ctx context.Context, campaignID string) (int32, error)
+	populateAllowlistFn          func(ctx context.Context, campaignID, workspaceID string) (int64, error)
 }
 
 func (m *mockStore) CreateTemplate(ctx context.Context, workspaceID, name, body, mediaURL, mediaType, createdBy string, variables []byte) (*TemplateRow, error) {
@@ -306,6 +307,13 @@ func (m *mockStore) CountCampaignNumbers(ctx context.Context, campaignID string)
 func (m *mockStore) CountCampaignContacts(ctx context.Context, campaignID string) (int32, error) {
 	if m.countCampaignContactsFn != nil {
 		return m.countCampaignContactsFn(ctx, campaignID)
+	}
+	return 0, nil
+}
+
+func (m *mockStore) PopulateAllowlistFromCampaign(ctx context.Context, campaignID, workspaceID string) (int64, error) {
+	if m.populateAllowlistFn != nil {
+		return m.populateAllowlistFn(ctx, campaignID, workspaceID)
 	}
 	return 0, nil
 }

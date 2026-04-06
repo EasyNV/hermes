@@ -84,3 +84,7 @@ export function updateCannedResponse(id: string, params: { shortcut?: string; bo
 export function deleteCannedResponse(id: string) {
   return api.del<void>(`/canned-responses/${id}`)
 }
+
+export function clearAllConversations() {
+  return api.del<{ deleted: number }>('/conversations/clear')
+}
