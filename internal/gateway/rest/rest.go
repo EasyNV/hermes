@@ -26,6 +26,7 @@ type GatewayStore interface {
 	ClearAllConversations(ctx context.Context, workspaceID string) (int64, error)
 	AddToAllowlist(ctx context.Context, workspaceID, phone, source string) error
 	RemoveFromAllowlist(ctx context.Context, workspaceID, phone string) error
+	ClearAllowlist(ctx context.Context, workspaceID string) (int64, error)
 	ListAllowlist(ctx context.Context, workspaceID string, page, pageSize int32) ([]handler.AllowlistRow, int64, error)
 }
 
@@ -165,6 +166,7 @@ func (a *Adapter) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/allowlist", a.auth(a.listAllowlist))
 	mux.HandleFunc("POST /api/v1/allowlist", a.auth(a.addToAllowlist))
 	mux.HandleFunc("DELETE /api/v1/allowlist", a.auth(a.removeFromAllowlist))
+	mux.HandleFunc("DELETE /api/v1/allowlist/clear", a.auth(a.clearAllowlist))
 
 	// Notifications
 	mux.HandleFunc("POST /api/v1/notifications", a.auth(a.configureNotification))

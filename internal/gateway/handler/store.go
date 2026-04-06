@@ -133,6 +133,7 @@ type Store interface {
 	ClearAllConversations(ctx context.Context, workspaceID string) (int64, error)
 	AddToAllowlist(ctx context.Context, workspaceID, phone, source string) error
 	RemoveFromAllowlist(ctx context.Context, workspaceID, phone string) error
+	ClearAllowlist(ctx context.Context, workspaceID string) (int64, error)
 	ListAllowlist(ctx context.Context, workspaceID string, page, pageSize int32) ([]AllowlistRow, int64, error)
 }
 
@@ -717,6 +718,14 @@ func (s *PgStore) AddToAllowlist(ctx context.Context, workspaceID, phone, source
 		workspaceID, strings.TrimPrefix(phone, "+"), source,
 	)
 	return err
+}
+
+func (s *PgStore) ClearAllowlist(ctx context.Context, workspaceID string) (int64, error) {
+	tag, err := s.pool.Exec(ctx, "DELETE FROM contact_allowlist WHERE workspace_id=$1", workspaceID)
+	if err != nil {
+		return 0, fmt.Errorf("clearing allowlist: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (s *PgStore) RemoveFromAllowlist(ctx context.Context, workspaceID, phone string) error {

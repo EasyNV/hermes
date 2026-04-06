@@ -88,3 +88,7 @@ export function deleteCannedResponse(id: string) {
 export function clearAllConversations() {
   return api.del<{ deleted: number }>('/conversations/clear')
 }
+
+export function clearAllowlist() {
+  return api.del<{ deleted: number }>('/allowlist/clear')
+}

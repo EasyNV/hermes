@@ -53,6 +53,7 @@ type mockStore struct {
 	clearAllConversationsFn      func(ctx context.Context, workspaceID string) (int64, error)
 	addToAllowlistFn             func(ctx context.Context, workspaceID, phone, source string) error
 	removeFromAllowlistFn        func(ctx context.Context, workspaceID, phone string) error
+	clearAllowlistFn             func(ctx context.Context, workspaceID string) (int64, error)
 	listAllowlistFn              func(ctx context.Context, workspaceID string, page, pageSize int32) ([]AllowlistRow, int64, error)
 }
 
@@ -278,6 +279,13 @@ func (m *mockStore) AddToAllowlist(ctx context.Context, workspaceID, phone, sour
 		return m.addToAllowlistFn(ctx, workspaceID, phone, source)
 	}
 	return nil
+}
+
+func (m *mockStore) ClearAllowlist(ctx context.Context, workspaceID string) (int64, error) {
+	if m.clearAllowlistFn != nil {
+		return m.clearAllowlistFn(ctx, workspaceID)
+	}
+	return 0, nil
 }
 
 func (m *mockStore) RemoveFromAllowlist(ctx context.Context, workspaceID, phone string) error {

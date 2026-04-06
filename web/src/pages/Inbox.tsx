@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import {
   MessageSquare, Send, MoreVertical, Search, UserPlus, ArrowRightLeft,
-  XCircle, Inbox as InboxIcon, Loader2, Trash2,
+  XCircle, Inbox as InboxIcon, Loader2, Trash2, ShieldOff,
 } from 'lucide-react'
 
 import { useAuthStore } from '@/stores/auth'
@@ -13,7 +13,7 @@ import {
   listConversations, getConversation, listMessages, sendMessage,
   claimConversation, transferConversation, closeConversation,
 } from '@/api/inbox'
-import { listCannedResponses, clearAllConversations } from '@/api/inbox'
+import { listCannedResponses, clearAllConversations, clearAllowlist } from '@/api/inbox'
 import type {
   Conversation, Message, CannedResponse, ConversationStatus,
 } from '@/api/types'
@@ -305,6 +305,10 @@ export default function Inbox() {
     },
   })
 
+  const clearAllowlistMutation = useMutation({
+    mutationFn: () => clearAllowlist(),
+  })
+
   // ── Sync query data into store ──
 
   useEffect(() => {
@@ -408,6 +412,20 @@ export default function Inbox() {
               disabled={clearAllMutation.isPending}
             >
               {clearAllMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              title="Clear allowlist"
+              className="text-orange-500 hover:text-orange-600"
+              onClick={() => {
+                if (window.confirm('Clear all allowlisted contacts? New inbound messages will be dropped until contacts are re-added.')) {
+                  clearAllowlistMutation.mutate()
+                }
+              }}
+              disabled={clearAllowlistMutation.isPending}
+            >
+              {clearAllowlistMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldOff className="h-4 w-4" />}
             </Button>
           </div>
           <div className="mt-2 relative">

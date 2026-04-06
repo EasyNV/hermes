@@ -1048,6 +1048,26 @@ func (a *Adapter) addToAllowlist(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "added", "phone": body.Phone})
 }
 
+func (a *Adapter) clearAllowlist(w http.ResponseWriter, r *http.Request) {
+	role, _ := r.Context().Value(middleware.CtxRole).(string)
+	if role != "superadmin" && role != "tenant_admin" && role != "workspace_admin" {
+		a.writeError(w, 403, "PERMISSION_DENIED", "workspace_admin or higher required")
+		return
+	}
+	workspaceID, _ := r.Context().Value(middleware.CtxWorkspaceID).(string)
+	if workspaceID == "" {
+		a.writeError(w, 400, "BAD_REQUEST", "no workspace in context")
+		return
+	}
+	count, err := a.store.ClearAllowlist(r.Context(), workspaceID)
+	if err != nil {
+		a.writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int64{"deleted": count})
+}
+
 func (a *Adapter) removeFromAllowlist(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Phone string `json:"phone"`
