@@ -728,14 +728,15 @@ func (s *PgStore) CountCampaignContacts(ctx context.Context, campaignID string) 
 
 func (s *PgStore) PopulateAllowlistFromCampaign(ctx context.Context, campaignID, workspaceID string) (int64, error) {
 	// Insert all campaign contact phones into the allowlist (with + stripped).
+	// $1=workspace_id, $2=campaign_id (text for source_id), $3=campaign_id (UUID for WHERE)
 	tag, err := s.pool.Exec(ctx,
 		`INSERT INTO contact_allowlist (workspace_id, phone, source, source_id)
-		 SELECT $1, LTRIM(c.phone, '+'), 'campaign', $2
+		 SELECT $1, LTRIM(c.phone, '+'), 'campaign', $2::text
 		 FROM campaign_contacts cc
 		 JOIN contacts c ON c.id = cc.contact_id
-		 WHERE cc.campaign_id = $2
+		 WHERE cc.campaign_id = $3
 		 ON CONFLICT (workspace_id, phone) DO NOTHING`,
-		workspaceID, campaignID,
+		workspaceID, campaignID, campaignID,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("populating allowlist: %w", err)
