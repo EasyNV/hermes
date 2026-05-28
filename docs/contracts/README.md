@@ -27,6 +27,7 @@ No other documents should be needed. If something is ambiguous, the contract is 
 | [`proto/common.proto`](proto/common.proto) | — | Shared types: enums, resource messages, pagination, errors |
 | [`proto/gateway.proto`](proto/gateway.proto) | `HermesGateway` | Frontend-facing API. The ONLY service the web app talks to. |
 | [`proto/wa.proto`](proto/wa.proto) | `HermesWa` | WhatsApp session management and message sending |
+| [`proto/mbs.proto`](proto/mbs.proto) | `HermesMbs` | Meta Business Suite sessions (Facebook + WhatsApp Business via mautrix-meta bridge). See [`../research/mbs-bridge-integration.md`](../research/mbs-bridge-integration.md) + [phase 2 supplement](../research/mbs-bridge-integration-phase2.md). |
 | [`proto/campaign.proto`](proto/campaign.proto) | `HermesCampaign` | Campaign lifecycle, send orchestration, template CRUD |
 | [`proto/inbox.proto`](proto/inbox.proto) | `HermesInbox` | Conversation management, messages, canned responses |
 | [`proto/contacts.proto`](proto/contacts.proto) | `HermesContacts` | Contact CRUD, CSV import, ban checking |

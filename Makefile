@@ -13,14 +13,14 @@ tools:
 
 # Run all database migrations
 migrate:
-	@for svc in gateway wa campaign inbox contacts proxy notify; do \
+	@for svc in gateway wa mbs campaign inbox contacts proxy notify; do \
 		echo "Migrating $$svc..."; \
 		migrate -path migrations/$$svc -database "$${DATABASE_URL}?x-migrations-table=schema_migrations_$$svc" up || true; \
 	done
 
 # Run migrations down (rollback)
 migrate-down:
-	@for svc in gateway wa campaign inbox contacts proxy notify; do \
+	@for svc in gateway wa mbs campaign inbox contacts proxy notify; do \
 		echo "Rolling back $$svc..."; \
 		migrate -path migrations/$$svc -database "$${DATABASE_URL}?x-migrations-table=schema_migrations_$$svc" down 1 || true; \
 	done

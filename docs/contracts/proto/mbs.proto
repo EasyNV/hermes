@@ -1,0 +1,356 @@
+syntax = "proto3";
+
+package hermes.v1;
+
+option go_package = "github.com/hermes-waba/hermes/gen/go/hermes/v1;hermesv1";
+
+import "google/protobuf/timestamp.proto";
+import "proto/common.proto";
+
+// ======================================================================
+// HermesMbs — Meta Business Suite (Facebook + WhatsApp Business) session
+// management and message sending.
+//
+// Sister service to hermes-wa. While hermes-wa drives whatsmeow-backed
+// WhatsApp sessions paired via QR, hermes-mbs drives MBS sessions
+// minted via the mautrix-meta iOS Messenger Lite login bridge.
+//
+// Runs as a StatefulSet (hermes-mbs-0, hermes-mbs-1, ...). Each pod
+// owns a shard of MBS sessions; the controller assigns by uid hash.
+// Per-uid Postgres advisory lock guarantees at most one pod owns a
+// given session.
+//
+// Called by: hermes-gateway (sync gRPC for session ops + manual sends),
+//           hermes-campaign (async via NATS for campaign sends).
+// Publishes: mbs.message.inbound, mbs.message.outbound,
+//           mbs.session.{created,connected,disconnected,burned}
+// Consumes: mbs.send.campaign, mbs.send.manual
+//
+// Underlying client library: re/mbs/mbs-native/ (Go module 'mbs-native')
+// Bridge subprocess:         re/mbs/mbs-bridge-login/
+// ======================================================================
+service HermesMbs {
+
+  // ─── Login ────────────────────────────────────────────────────
+
+  // Bridge login — drives mautrix-meta to mint a Meta access_token,
+  // then materialize a BizApp-shaped session and validate via CONNECT #1.
+  //
+  // Bidirectional stream because the bridge subprocess may surface 2FA
+  // prompts. Each prompt becomes a BridgeLoginPrompt; the client
+  // responds with a BridgeLoginInput. If the session has a stored
+  // totp_secret_enc, hermes-mbs auto-fills the 'totp_code' field
+  // without surfacing the prompt to the client.
+  //
+  // Called by: gateway (on behalf of tenant_admin/superadmin)
+  rpc BridgeLogin(stream BridgeLoginRequest) returns (stream BridgeLoginUpdate);
+
+  // ─── Session lifecycle ────────────────────────────────────────
+
+  // List MBS sessions for a tenant (with filtering).
+  rpc ListSessions(ListMbsSessionsRequest) returns (ListMbsSessionsResponse);
+
+  // Get the current status of a session.
+  rpc GetSessionStatus(GetMbsSessionStatusRequest) returns (GetMbsSessionStatusResponse);
+
+  // List business assets discovered for a session (page_id, waba_id,
+  // wec_mailbox_id, ...). Useful when an account admins multiple
+  // WABA-connected pages.
+  rpc ListSessionAssets(ListSessionAssetsRequest) returns (ListSessionAssetsResponse);
+
+  // Mark session burned. Releases the advisory lock and refuses
+  // future sends until re-bridged.
+  rpc BurnSession(BurnMbsSessionRequest) returns (BurnMbsSessionResponse);
+
+  // ─── Phone resolution ─────────────────────────────────────────
+
+  // Resolve a phone number to a thread_id (customer_id). Cheap: uses
+  // mbs_phone_threads cache when present, falls back to live
+  // BizInboxWhatsAppCustomerMutation.
+  //
+  // Called by: gateway (on behalf of agent), campaign (via gRPC)
+  rpc ResolvePhone(ResolvePhoneRequest) returns (ResolvePhoneResponse);
+
+  // ─── Send ─────────────────────────────────────────────────────
+
+  // Send a single message. Used for manual agent sends from inbox.
+  // For campaign sends, use NATS subject hermes.mbs.send.campaign.{tenant_id}.
+  //
+  // Called by: gateway (on behalf of workspace_admin/cs_agent)
+  rpc SendMessage(MbsSendMessageRequest) returns (MbsSendMessageResponse);
+
+  // ─── Inbound ──────────────────────────────────────────────────
+
+  // Stream inbound messages for a session (server-streaming, long-lived).
+  // Typically called by hermes-inbox to ingest deltas into the agent UI.
+  rpc Listen(MbsListenRequest) returns (stream MbsInboundMessage);
+}
+
+
+// ============================================================
+// Bridge login (streaming)
+// ============================================================
+
+message BridgeLoginRequest {
+  oneof payload {
+    BridgeLoginStart start = 1;
+    BridgeLoginInput input = 2;
+    BridgeLoginCancel cancel = 3;
+  }
+}
+
+message BridgeLoginStart {
+  string tenant_id = 1;
+  string email = 2;
+  string password = 3;             // gateway never logs this
+  // Optional pre-stored TOTP secret (base32). When set, hermes-mbs
+  // injects derived codes into bridge prompts automatically.
+  string totp_secret = 4;
+  // Force a fresh device_id. Use when re-bridging an account whose
+  // device_id may have been burned by Meta's risk engine.
+  bool force_new_device_id = 5;
+  // If true, persist totp_secret encrypted into mbs_sessions for
+  // future unattended re-bridge.
+  bool persist_totp_secret = 6;
+}
+
+message BridgeLoginInput {
+  string field_id = 1;            // e.g. "totp_code", "captcha_response"
+  string value = 2;
+}
+
+message BridgeLoginCancel {}
+
+message BridgeLoginUpdate {
+  oneof event {
+    BridgeLoginPrompt prompt = 1;
+    BridgeLoginProgress progress = 2;
+    BridgeLoginSuccess success = 3;
+    BridgeLoginFailure failure = 4;
+  }
+}
+
+message BridgeLoginPrompt {
+  string step_id = 1;             // e.g. "two_step_verification"
+  string instructions = 2;
+  repeated BridgeLoginField fields = 3;
+}
+
+message BridgeLoginField {
+  string id = 1;
+  string name = 2;
+  string type = 3;                // "text" | "code" | "password"
+}
+
+message BridgeLoginProgress {
+  string stage = 1;               // see BridgeLoginStage
+  string detail = 2;
+}
+
+enum BridgeLoginStage {
+  BRIDGE_STAGE_UNSPECIFIED = 0;
+  BRIDGE_STAGE_CALLING_CAA = 1;
+  BRIDGE_STAGE_AWAITING_2FA = 2;
+  BRIDGE_STAGE_PREFLIGHT = 3;
+  BRIDGE_STAGE_DISCOVERING_ASSETS = 4;
+  BRIDGE_STAGE_PERSISTING = 5;
+}
+
+message BridgeLoginSuccess {
+  int64 uid = 1;
+  string display_name = 2;
+  int32 page_count = 3;           // total pages user admins
+
+  // Primary asset (from BizAppBusinessScopingConfigQuery →
+  // PickWABAAsset). Empty if no WABA-connected page exists.
+  string primary_page_id = 4;
+  string primary_page_name = 5;
+  string primary_waba_id = 6;
+  string primary_wec_mailbox_id = 7;
+  string primary_wec_phone_number = 8;
+
+  // All discovered assets (informational; same data is queryable
+  // via ListSessionAssets).
+  repeated MbsAsset assets = 9;
+}
+
+message BridgeLoginFailure {
+  string code = 1;                // see BridgeLoginErrorCode
+  string message = 2;
+  bool retryable = 3;
+}
+
+enum BridgeLoginErrorCode {
+  BRIDGE_ERR_UNSPECIFIED = 0;
+  BRIDGE_ERR_INVALID_CREDS = 1;
+  BRIDGE_ERR_2FA_REQUIRED = 2;        // surfaced via Prompt, terminal only if cancelled
+  BRIDGE_ERR_2FA_WRONG_CODE = 3;
+  BRIDGE_ERR_CHECKPOINT = 4;          // Meta requires manual web-based verification
+  BRIDGE_ERR_PREFLIGHT_RC19 = 5;      // CONNACK rc=19 — try --new-device-id
+  BRIDGE_ERR_PREFLIGHT_RC4 = 6;       // CONNACK rc=4 — token rejected
+  BRIDGE_ERR_NETWORK = 7;
+  BRIDGE_ERR_BRIDGE_SUBPROCESS = 8;   // bridge binary crashed / timed out
+  BRIDGE_ERR_INTERNAL = 9;
+}
+
+
+// ============================================================
+// Session info
+// ============================================================
+
+enum MbsSessionState {
+  MBS_SESSION_STATE_UNSPECIFIED = 0;
+  MBS_SESSION_STATE_ACTIVE = 1;
+  MBS_SESSION_STATE_SUSPENDED = 2;     // operator-paused
+  MBS_SESSION_STATE_BURNED = 3;        // Meta revoked or risk-engine flagged
+  MBS_SESSION_STATE_BRIDGING = 4;      // bridge login in progress
+}
+
+message MbsSessionInfo {
+  int64 uid = 1;
+  string tenant_id = 2;
+  string display_name = 3;
+  MbsSessionState state = 4;
+
+  // Last broker handshake outcome
+  int32 last_connack_rc = 5;
+  google.protobuf.Timestamp last_connack_at = 6;
+
+  // Identity (rotates rarely — mostly diagnostic)
+  string device_id = 7;
+  string app_version = 8;            // e.g. "551.0.0.55.106"
+
+  // Primary asset
+  MbsAsset primary_asset = 9;
+
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp updated_at = 11;
+}
+
+message MbsAsset {
+  string page_id = 1;
+  string page_name = 2;
+  string waba_id = 3;
+  string wec_mailbox_id = 4;
+  string wec_phone_number = 5;
+  string business_presence_node_id = 6;
+  string ig_account_id = 7;          // optional, set if page has IG
+  bool has_waba = 8;
+}
+
+message ListMbsSessionsRequest {
+  string tenant_id = 1;
+  MbsSessionState state_filter = 2;  // UNSPECIFIED = all
+  PageRequest page = 3;
+}
+
+message ListMbsSessionsResponse {
+  repeated MbsSessionInfo sessions = 1;
+  PageResponse page = 2;
+}
+
+message GetMbsSessionStatusRequest {
+  int64 uid = 1;
+}
+
+message GetMbsSessionStatusResponse {
+  MbsSessionInfo session = 1;
+}
+
+message ListSessionAssetsRequest {
+  int64 uid = 1;
+}
+
+message ListSessionAssetsResponse {
+  repeated MbsAsset assets = 1;
+}
+
+message BurnMbsSessionRequest {
+  int64 uid = 1;
+  string reason = 2;
+}
+
+message BurnMbsSessionResponse {
+  MbsSessionInfo session = 1;
+}
+
+
+// ============================================================
+// Phone resolution (Path C)
+// ============================================================
+
+message ResolvePhoneRequest {
+  int64 uid = 1;
+  string phone = 2;                   // any common format; normalized server-side
+  // Optional: which page to resolve against. Defaults to session's
+  // primary page. Useful for accounts admining multiple WABA pages.
+  string page_id_override = 3;
+  // If false (default), use mbs_phone_threads cache when present.
+  // If true, force a live BizInboxWhatsAppCustomerMutation call.
+  bool bypass_cache = 4;
+}
+
+message ResolvePhoneResponse {
+  // Numeric thread id as decimal string (FB ids can exceed int64
+  // range — keep as string for forward-compat).
+  string thread_id = 1;
+  string normalized_phone = 2;       // E.164 minus leading +
+  string page_id = 3;
+  string wec_mailbox_id = 4;
+  bool was_cached = 5;
+}
+
+
+// ============================================================
+// Send
+// ============================================================
+
+message MbsSendMessageRequest {
+  int64 uid = 1;
+  // Recipient: either a numeric thread_id (string for forward-compat),
+  // or a phone number that hermes-mbs resolves automatically via
+  // ResolvePhone semantics.
+  oneof recipient {
+    string thread_id = 2;
+    string phone = 3;
+  }
+  string text = 4;
+  // Client-side dedupe — if hermes-mbs has already seen this ID,
+  // returns the prior result instead of double-sending.
+  bytes client_dedupe_id = 5;
+  // Optional: which page to send from (multi-page accounts).
+  string page_id_override = 6;
+}
+
+message MbsSendMessageResponse {
+  string thread_id = 1;       // resolved thread_id (helpful when input was phone)
+  string mid = 2;             // server-assigned MID, e.g. mid.$cAAAA...
+  string otid = 3;            // client-generated OTID (for delta correlation)
+  int64 latency_ms = 4;
+  google.protobuf.Timestamp sent_at = 5;
+}
+
+
+// ============================================================
+// Listen (server-streaming)
+// ============================================================
+
+message MbsListenRequest {
+  int64 uid = 1;
+  // If set, only deliver events newer than this timestamp.
+  // Useful for resume-from-last-checkpoint patterns.
+  google.protobuf.Timestamp since = 2;
+}
+
+message MbsInboundMessage {
+  string thread_id = 1;
+  string mid = 2;
+  int64 sender_uid = 3;
+  string sender_phone = 4;       // for WEC threads
+  string text = 5;
+  google.protobuf.Timestamp received_at = 6;
+
+  // Raw delta payload for advanced consumers (FlatBuffer-decoded JSON).
+  // Set only when ListenRequest sets include_payload=true (TBD).
+  string raw_delta = 7;
+}
