@@ -169,6 +169,12 @@ func ensureStreams(js natsgo.JetStreamContext) error {
 		{"HERMES_INBOX", []string{"hermes.wa.send.manual.>"}, 24 * time.Hour},
 		{"HERMES_CONTACTS", []string{"hermes.contacts.>"}, 24 * time.Hour},
 		{"HERMES_NOTIFY", []string{"hermes.notify.>"}, time.Hour},
+		// HERMES_MBS (chunk E2.3): events stream — pub side messages +
+		// lifecycle. Subjects MUST match cmd/mbs/nats_streams.go::
+		// ensureStreams so that idempotent ensure across services
+		// doesn't see a config mismatch. Whoever boots first creates
+		// the stream; the other side no-ops.
+		{"HERMES_MBS", []string{"hermes.mbs.message.>", "hermes.mbs.session.>"}, 7 * 24 * time.Hour},
 	}
 
 	for _, s := range streams {

@@ -15,10 +15,21 @@ import (
 // EventSubscriber — bridges NATS events to WebSocket clients via the Hub
 // ---------------------------------------------------------------------------
 
+// Broadcaster is the subset of *Hub the EventSubscriber needs to fan
+// out messages. Defined as an interface so tests can inject a recorder
+// without spinning up a real WebSocket hub. *Hub satisfies it by
+// virtue of having all three methods; production callers (cmd/gateway/
+// main.go) pass *Hub and Go's structural typing handles the rest.
+type Broadcaster interface {
+	Broadcast(tenantID, workspaceID string, data []byte)
+	BroadcastToUser(userID string, data []byte)
+	BroadcastToConversation(conversationID string, data []byte)
+}
+
 // EventSubscriber subscribes to NATS JetStream subjects and fans out events
 // to WebSocket clients through the Hub.
 type EventSubscriber struct {
-	hub  *Hub
+	hub  Broadcaster
 	js   natsgo.JetStreamContext
 	log  zerolog.Logger
 	subs []*natsgo.Subscription
@@ -26,6 +37,10 @@ type EventSubscriber struct {
 
 // NewEventSubscriber creates a new subscriber that translates NATS events
 // into JSON WebSocket messages and pushes them through the hub.
+//
+// `hub` is typed as *Hub at the constructor signature (production
+// behavior) but stored as the Broadcaster interface so test code can
+// inject a recorder via the unexported field.
 func NewEventSubscriber(hub *Hub, js natsgo.JetStreamContext, log zerolog.Logger) *EventSubscriber {
 	return &EventSubscriber{
 		hub: hub,
@@ -105,6 +120,35 @@ func (s *EventSubscriber) Start() error {
 			handler:  s.handlePresence,
 			maxDeliv: 1,
 			ackWait:  5 * time.Second,
+		},
+		// ─── MBS subscriptions (chunk E2.3) ──────────────────────────
+		// Publish subjects from internal/mbs/handler/events.go:
+		//   hermes.mbs.message.inbound.<tenant>   (4 tokens)
+		//   hermes.mbs.message.outbound.<tenant>  (4 tokens)
+		//   hermes.mbs.session.<state>.<tenant>   (4 tokens)
+		// The session subject needs TWO wildcards to match state+tenant.
+		{
+			subject:  "hermes.mbs.message.inbound.*",
+			durable:  "gateway-mbs-inbound",
+			handler:  s.handleMbsInboundMessage,
+			maxDeliv: 3,
+			ackWait:  10 * time.Second,
+		},
+		{
+			subject:  "hermes.mbs.message.outbound.*",
+			durable:  "gateway-mbs-outbound",
+			handler:  s.handleMbsOutboundStatus,
+			// Status updates are idempotent and replayable by the client
+			// asking for fresh state; don't waste deliveries on retries.
+			maxDeliv: 1,
+			ackWait:  5 * time.Second,
+		},
+		{
+			subject:  "hermes.mbs.session.*.*",
+			durable:  "gateway-mbs-session",
+			handler:  s.handleMbsSessionLifecycle,
+			maxDeliv: 3,
+			ackWait:  10 * time.Second,
 		},
 	}
 
