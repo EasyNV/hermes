@@ -30,10 +30,28 @@ type GatewayStore interface {
 	ListAllowlist(ctx context.Context, workspaceID string, page, pageSize int32) ([]handler.AllowlistRow, int64, error)
 }
 
+// MbsRouter is the subset of the gateway handler that the MBS REST
+// handlers (handlers_mbs.go) dispatch through. These methods are
+// defined on *handler.Handler in chunk 1 but NOT part of
+// HermesGatewayServer (the proto doesn't expose them — gateway.proto
+// only declares Hermes core entities). The interface is local so the
+// REST adapter doesn't have a hard dependency on the concrete handler
+// type, and tests can substitute a fake.
+type MbsRouter interface {
+	ListMbsSessions(ctx context.Context, req *hermesv1.ListMbsSessionsRequest) (*hermesv1.ListMbsSessionsResponse, error)
+	GetMbsSessionStatus(ctx context.Context, req *hermesv1.GetMbsSessionStatusRequest) (*hermesv1.GetMbsSessionStatusResponse, error)
+	ListSessionAssets(ctx context.Context, req *hermesv1.ListSessionAssetsRequest) (*hermesv1.ListSessionAssetsResponse, error)
+	BurnMbsSession(ctx context.Context, req *hermesv1.BurnMbsSessionRequest) (*hermesv1.BurnMbsSessionResponse, error)
+	ResolveMbsPhone(ctx context.Context, req *hermesv1.ResolvePhoneRequest) (*hermesv1.ResolvePhoneResponse, error)
+	SendMbsMessage(ctx context.Context, req *hermesv1.MbsSendMessageRequest) (*hermesv1.MbsSendMessageResponse, error)
+}
+
 // Adapter wraps a HermesGateway gRPC handler and exposes it as REST/JSON.
 type Adapter struct {
 	gw          hermesv1.HermesGatewayServer
+	mbs         MbsRouter
 	store       GatewayStore
+	mbsClient   hermesv1.HermesMbsClient // direct client for bidi BridgeLogin WS bridge
 	jwtSecret   []byte
 	log         zerolog.Logger
 	marshaler   protojson.MarshalOptions
@@ -41,10 +59,24 @@ type Adapter struct {
 }
 
 // New creates a REST adapter for the given gRPC handler.
-func New(gw hermesv1.HermesGatewayServer, store GatewayStore, jwtSecret []byte, log zerolog.Logger, waHTTPAddr string) *Adapter {
+//
+// mbs is the MBS router (typically the same *handler.Handler that
+// satisfies HermesGatewayServer — see internal/gateway/handler/mbs.go).
+//
+// mbsClient is the same HermesMbsClient the gateway gRPC handler holds.
+// It's passed directly so the BridgeLogin WS bridge can open a
+// bidirectional gRPC stream without round-tripping through the gateway
+// gRPC server (a bidi stream can't reasonably be unary-proxied).
+//
+// mbsClient may be nil — the WS bridge surfaces that as HTTP 503 before
+// upgrading. REST routes don't touch mbsClient directly; they call
+// through `mbs` and Handler's unary proxy methods (chunk 1).
+func New(gw hermesv1.HermesGatewayServer, mbs MbsRouter, store GatewayStore, mbsClient hermesv1.HermesMbsClient, jwtSecret []byte, log zerolog.Logger, waHTTPAddr string) *Adapter {
 	return &Adapter{
 		gw:         gw,
+		mbs:        mbs,
 		store:      store,
+		mbsClient:  mbsClient,
 		jwtSecret:  jwtSecret,
 		log:        log.With().Str("component", "rest").Logger(),
 		waHTTPAddr: waHTTPAddr,
@@ -155,6 +187,20 @@ func (a *Adapter) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/canned-responses", a.auth(a.listCannedResponses))
 	mux.HandleFunc("PUT /api/v1/canned-responses/{id}", a.auth(a.updateCannedResponse))
 	mux.HandleFunc("DELETE /api/v1/canned-responses/{id}", a.auth(a.deleteCannedResponse))
+
+	// MBS sessions (chunk E2.2)
+	mux.HandleFunc("GET /api/v1/mbs-sessions", a.auth(a.listMbsSessions))
+	mux.HandleFunc("GET /api/v1/mbs-sessions/{uid}", a.auth(a.getMbsSession))
+	mux.HandleFunc("GET /api/v1/mbs-sessions/{uid}/assets", a.auth(a.listMbsSessionAssets))
+	mux.HandleFunc("POST /api/v1/mbs-sessions/{uid}/burn", a.auth(a.burnMbsSession))
+	mux.HandleFunc("POST /api/v1/mbs-sessions/{uid}/resolve-phone", a.auth(a.resolveMbsPhone))
+	mux.HandleFunc("POST /api/v1/mbs-sessions/{uid}/messages", a.auth(a.sendMbsMessage))
+
+	// MBS bridge-login WebSocket (chunk E2.2).
+	// Mounted OUTSIDE a.auth — the upgrade can't propagate ctx values
+	// from HTTP middleware; the bridge validates JWT inline (matches
+	// the existing /ws hub pattern).
+	mux.HandleFunc("/ws/mbs/bridge-login", a.bridgeLoginWS)
 
 	// Phone pairing
 	mux.HandleFunc("POST /api/v1/wa-numbers/{id}/pair-phone", a.auth(a.pairPhone))

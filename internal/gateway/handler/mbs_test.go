@@ -7,6 +7,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	hermesv1 "github.com/hermes-waba/hermes/gen/go/hermes/v1"
@@ -15,9 +16,10 @@ import (
 
 // ─────────────────────────────────────────────────────────────────────
 // stubMbsClient — minimal HermesMbsClient implementation for tests.
-// Records the request each method received and returns the configured
-// response/error. Streams (BridgeLogin, Listen) are unimplemented;
-// chunk 1 tests never exercise them.
+// Records the request each method received plus the outgoing gRPC
+// metadata (so we verify chunk-2's tenant-metadata propagation fix).
+// Streams (BridgeLogin, Listen) are unimplemented; chunk 1/2 tests
+// never exercise them.
 // ─────────────────────────────────────────────────────────────────────
 
 type stubMbsClient struct {
@@ -28,6 +30,10 @@ type stubMbsClient struct {
 	lastBurnReq    *hermesv1.BurnMbsSessionRequest
 	lastResolveReq *hermesv1.ResolvePhoneRequest
 	lastSendReq    *hermesv1.MbsSendMessageRequest
+
+	// last outgoing gRPC metadata observed on the most recent call.
+	// Tests assert `lastMD.Get("tenant-id")` matches the JWT tenant.
+	lastMD metadata.MD
 
 	// configurable responses
 	listResp    *hermesv1.ListMbsSessionsResponse
@@ -41,7 +47,19 @@ type stubMbsClient struct {
 	err error
 }
 
+// captureMD reads outgoing metadata off ctx. Called at the top of each
+// stub RPC. Safe when no metadata is set — returns the zero MD which
+// MD.Get returns nil for.
+func (s *stubMbsClient) captureMD(ctx context.Context) {
+	if md, ok := metadata.FromOutgoingContext(ctx); ok {
+		s.lastMD = md
+	} else {
+		s.lastMD = metadata.MD{}
+	}
+}
+
 func (s *stubMbsClient) ListSessions(ctx context.Context, in *hermesv1.ListMbsSessionsRequest, opts ...grpc.CallOption) (*hermesv1.ListMbsSessionsResponse, error) {
+	s.captureMD(ctx)
 	s.lastListReq = in
 	if s.err != nil {
 		return nil, s.err
@@ -53,6 +71,7 @@ func (s *stubMbsClient) ListSessions(ctx context.Context, in *hermesv1.ListMbsSe
 }
 
 func (s *stubMbsClient) GetSessionStatus(ctx context.Context, in *hermesv1.GetMbsSessionStatusRequest, opts ...grpc.CallOption) (*hermesv1.GetMbsSessionStatusResponse, error) {
+	s.captureMD(ctx)
 	s.lastStatusReq = in
 	if s.err != nil {
 		return nil, s.err
@@ -64,6 +83,7 @@ func (s *stubMbsClient) GetSessionStatus(ctx context.Context, in *hermesv1.GetMb
 }
 
 func (s *stubMbsClient) ListSessionAssets(ctx context.Context, in *hermesv1.ListSessionAssetsRequest, opts ...grpc.CallOption) (*hermesv1.ListSessionAssetsResponse, error) {
+	s.captureMD(ctx)
 	s.lastAssetsReq = in
 	if s.err != nil {
 		return nil, s.err
@@ -75,6 +95,7 @@ func (s *stubMbsClient) ListSessionAssets(ctx context.Context, in *hermesv1.List
 }
 
 func (s *stubMbsClient) BurnSession(ctx context.Context, in *hermesv1.BurnMbsSessionRequest, opts ...grpc.CallOption) (*hermesv1.BurnMbsSessionResponse, error) {
+	s.captureMD(ctx)
 	s.lastBurnReq = in
 	if s.err != nil {
 		return nil, s.err
@@ -86,6 +107,7 @@ func (s *stubMbsClient) BurnSession(ctx context.Context, in *hermesv1.BurnMbsSes
 }
 
 func (s *stubMbsClient) ResolvePhone(ctx context.Context, in *hermesv1.ResolvePhoneRequest, opts ...grpc.CallOption) (*hermesv1.ResolvePhoneResponse, error) {
+	s.captureMD(ctx)
 	s.lastResolveReq = in
 	if s.err != nil {
 		return nil, s.err
@@ -97,6 +119,7 @@ func (s *stubMbsClient) ResolvePhone(ctx context.Context, in *hermesv1.ResolvePh
 }
 
 func (s *stubMbsClient) SendMessage(ctx context.Context, in *hermesv1.MbsSendMessageRequest, opts ...grpc.CallOption) (*hermesv1.MbsSendMessageResponse, error) {
+	s.captureMD(ctx)
 	s.lastSendReq = in
 	if s.err != nil {
 		return nil, s.err
@@ -325,5 +348,84 @@ func TestHandler_MbsMethods_PropagateBackendError(t *testing.T) {
 	_, err := h.GetMbsSessionStatus(ctx, &hermesv1.GetMbsSessionStatusRequest{Uid: 999})
 	if status.Code(err) != codes.NotFound {
 		t.Errorf("want NotFound propagated, got %v", err)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Chunk-2 closes C1-G1: every MBS proxy method MUST inject outgoing
+// gRPC metadata so mbs's server-side interceptor sees the right
+// tenant for uid-keyed RPCs. The keys MUST be `tenant-id` and
+// `user-id` (lowercase, hyphen) so they match what mbs reads.
+// ─────────────────────────────────────────────────────────────────────
+
+func TestHandler_MbsMethods_PropagateTenantMetadata(t *testing.T) {
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, middleware.CtxTenantID, "tenant-A")
+	ctx = context.WithValue(ctx, middleware.CtxRole, hermesv1.Role_ROLE_TENANT_ADMIN.String())
+	ctx = context.WithValue(ctx, middleware.CtxUserID, "user-007")
+
+	calls := []struct {
+		name string
+		fn   func(*Handler) error
+	}{
+		{"ListMbsSessions", func(h *Handler) error {
+			_, err := h.ListMbsSessions(ctx, &hermesv1.ListMbsSessionsRequest{})
+			return err
+		}},
+		{"GetMbsSessionStatus", func(h *Handler) error {
+			_, err := h.GetMbsSessionStatus(ctx, &hermesv1.GetMbsSessionStatusRequest{Uid: 1})
+			return err
+		}},
+		{"ListSessionAssets", func(h *Handler) error {
+			_, err := h.ListSessionAssets(ctx, &hermesv1.ListSessionAssetsRequest{Uid: 1})
+			return err
+		}},
+		{"BurnMbsSession", func(h *Handler) error {
+			_, err := h.BurnMbsSession(ctx, &hermesv1.BurnMbsSessionRequest{Uid: 1})
+			return err
+		}},
+		{"ResolveMbsPhone", func(h *Handler) error {
+			_, err := h.ResolveMbsPhone(ctx, &hermesv1.ResolvePhoneRequest{Uid: 1, Phone: "62812"})
+			return err
+		}},
+		{"SendMbsMessage", func(h *Handler) error {
+			_, err := h.SendMbsMessage(ctx, &hermesv1.MbsSendMessageRequest{Uid: 1, Text: "hi"})
+			return err
+		}},
+	}
+
+	for _, c := range calls {
+		t.Run(c.name, func(t *testing.T) {
+			stub := &stubMbsClient{}
+			h := newTestHandlerWithMbs(nil, stub)
+			if err := c.fn(h); err != nil {
+				t.Fatalf("%s: unexpected: %v", c.name, err)
+			}
+			if got := stub.lastMD.Get("tenant-id"); len(got) != 1 || got[0] != "tenant-A" {
+				t.Errorf("%s: tenant-id metadata: got %v, want [tenant-A]", c.name, got)
+			}
+			if got := stub.lastMD.Get("user-id"); len(got) != 1 || got[0] != "user-007" {
+				t.Errorf("%s: user-id metadata: got %v, want [user-007]", c.name, got)
+			}
+		})
+	}
+}
+
+// Superadmin acting on a non-own tenant must inject THAT tenant into
+// outgoing metadata, not the superadmin's own JWT tenant. Otherwise
+// the cross-tenant operation never reaches the right mbs session row.
+func TestHandler_MbsMethods_SuperadminMetadataUsesRequestTenant(t *testing.T) {
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, middleware.CtxTenantID, "tenant-A")
+	ctx = context.WithValue(ctx, middleware.CtxRole, hermesv1.Role_ROLE_SUPERADMIN.String())
+
+	stub := &stubMbsClient{}
+	h := newTestHandlerWithMbs(nil, stub)
+	req := &hermesv1.ListMbsSessionsRequest{TenantId: "tenant-X"}
+	if _, err := h.ListMbsSessions(ctx, req); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if got := stub.lastMD.Get("tenant-id"); len(got) != 1 || got[0] != "tenant-X" {
+		t.Errorf("superadmin: tenant-id metadata: got %v, want [tenant-X]", got)
 	}
 }

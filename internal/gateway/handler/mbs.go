@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	hermesv1 "github.com/hermes-waba/hermes/gen/go/hermes/v1"
@@ -80,6 +81,30 @@ func isSuperadmin(ctx context.Context) bool {
 	return middleware.RoleFromCtx(ctx) == hermesv1.Role_ROLE_SUPERADMIN.String()
 }
 
+// withTenantMetadata derives a child context carrying tenant-id and
+// user-id outgoing gRPC metadata so mbs's server-side tenant
+// interceptor (internal/mbs/handler/tenant.go) sees the right tenant.
+//
+// Without this, in-process gRPC dispatch between the gateway gRPC
+// server and the gateway-held HermesMbsClient drops inbound metadata
+// — mbs's interceptor treats every uid-keyed RPC (GetSessionStatus,
+// ListSessionAssets, BurnSession, ResolvePhone, SendMessage) as
+// anonymous and either fails closed or — worse — leaks across tenant
+// boundaries. Closing chunk-1 carrying gap C1-G1.
+//
+// The metadata keys MUST match what mbs's interceptor reads. The
+// chunk-4 mbs tenant interceptor reads `tenant-id` and `user-id`
+// (hyphen, lowercase) — gRPC normalizes metadata keys to lowercase
+// already, but spelling the convention here makes the lock-step
+// visible.
+func withTenantMetadata(ctx context.Context, tenantID string) context.Context {
+	md := metadata.New(map[string]string{
+		"tenant-id": tenantID,
+		"user-id":   middleware.UserIDFromCtx(ctx),
+	})
+	return metadata.NewOutgoingContext(ctx, md)
+}
+
 // ─── unary proxy methods ─────────────────────────────────────────────
 
 func (h *Handler) ListMbsSessions(ctx context.Context, req *hermesv1.ListMbsSessionsRequest) (*hermesv1.ListMbsSessionsResponse, error) {
@@ -91,58 +116,60 @@ func (h *Handler) ListMbsSessions(ctx context.Context, req *hermesv1.ListMbsSess
 		return nil, err
 	}
 	req.TenantId = tenant
-	return h.mbsClient.ListSessions(ctx, req)
+	return h.mbsClient.ListSessions(withTenantMetadata(ctx, tenant), req)
 }
 
 func (h *Handler) GetMbsSessionStatus(ctx context.Context, req *hermesv1.GetMbsSessionStatusRequest) (*hermesv1.GetMbsSessionStatusResponse, error) {
 	if h.mbsClient == nil {
 		return nil, status.Error(codes.Unavailable, "mbs service not available")
 	}
-	// GetSessionStatus is uid-keyed; tenant scoping happens server-side
-	// in mbs handler via GetSessionByTenant. We still verify the caller
-	// has a tenant claim — anonymous callers fail here, not at mbs.
-	if _, err := h.forceTenantFromJWT(ctx, ""); err != nil {
+	tenant, err := h.forceTenantFromJWT(ctx, "")
+	if err != nil {
 		return nil, err
 	}
-	return h.mbsClient.GetSessionStatus(ctx, req)
+	return h.mbsClient.GetSessionStatus(withTenantMetadata(ctx, tenant), req)
 }
 
 func (h *Handler) ListSessionAssets(ctx context.Context, req *hermesv1.ListSessionAssetsRequest) (*hermesv1.ListSessionAssetsResponse, error) {
 	if h.mbsClient == nil {
 		return nil, status.Error(codes.Unavailable, "mbs service not available")
 	}
-	if _, err := h.forceTenantFromJWT(ctx, ""); err != nil {
+	tenant, err := h.forceTenantFromJWT(ctx, "")
+	if err != nil {
 		return nil, err
 	}
-	return h.mbsClient.ListSessionAssets(ctx, req)
+	return h.mbsClient.ListSessionAssets(withTenantMetadata(ctx, tenant), req)
 }
 
 func (h *Handler) BurnMbsSession(ctx context.Context, req *hermesv1.BurnMbsSessionRequest) (*hermesv1.BurnMbsSessionResponse, error) {
 	if h.mbsClient == nil {
 		return nil, status.Error(codes.Unavailable, "mbs service not available")
 	}
-	if _, err := h.forceTenantFromJWT(ctx, ""); err != nil {
+	tenant, err := h.forceTenantFromJWT(ctx, "")
+	if err != nil {
 		return nil, err
 	}
-	return h.mbsClient.BurnSession(ctx, req)
+	return h.mbsClient.BurnSession(withTenantMetadata(ctx, tenant), req)
 }
 
 func (h *Handler) ResolveMbsPhone(ctx context.Context, req *hermesv1.ResolvePhoneRequest) (*hermesv1.ResolvePhoneResponse, error) {
 	if h.mbsClient == nil {
 		return nil, status.Error(codes.Unavailable, "mbs service not available")
 	}
-	if _, err := h.forceTenantFromJWT(ctx, ""); err != nil {
+	tenant, err := h.forceTenantFromJWT(ctx, "")
+	if err != nil {
 		return nil, err
 	}
-	return h.mbsClient.ResolvePhone(ctx, req)
+	return h.mbsClient.ResolvePhone(withTenantMetadata(ctx, tenant), req)
 }
 
 func (h *Handler) SendMbsMessage(ctx context.Context, req *hermesv1.MbsSendMessageRequest) (*hermesv1.MbsSendMessageResponse, error) {
 	if h.mbsClient == nil {
 		return nil, status.Error(codes.Unavailable, "mbs service not available")
 	}
-	if _, err := h.forceTenantFromJWT(ctx, ""); err != nil {
+	tenant, err := h.forceTenantFromJWT(ctx, "")
+	if err != nil {
 		return nil, err
 	}
-	return h.mbsClient.SendMessage(ctx, req)
+	return h.mbsClient.SendMessage(withTenantMetadata(ctx, tenant), req)
 }
