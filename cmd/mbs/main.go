@@ -59,6 +59,7 @@ import (
 	"github.com/hermes-waba/hermes/internal/mbs/bridge"
 	mbsconfig "github.com/hermes-waba/hermes/internal/mbs/config"
 	"github.com/hermes-waba/hermes/internal/mbs/handler"
+	"github.com/hermes-waba/hermes/internal/mbs/importer"
 	"github.com/hermes-waba/hermes/internal/mbs/observability"
 	"github.com/hermes-waba/hermes/internal/mbs/refresh"
 	"github.com/hermes-waba/hermes/internal/mbs/session"
@@ -111,6 +112,51 @@ func main() {
 		log.Fatal().Err(err).Msg("ensure NATS streams failed")
 	}
 	log.Info().Msg("NATS streams ensured")
+
+	// ── 3a. Legacy importer (one-shot, env-triggered).
+	// Runs BEFORE the event publisher is constructed so a fresh
+	// deploy can: (1) boot, (2) ingest the JSON archive, (3) start
+	// serving in one process restart. Operator MUST unset the env
+	// after the first deploy — chunk 8 README documents this.
+	//
+	// Publisher is intentionally nil for the bootstrap path: lifecycle
+	// events would race the gRPC server coming online (subscribers
+	// haven't connected yet). Downstream services discover the new
+	// rows via their next ListMbsSessions call, or naturally when
+	// GetOrConnect lands and emits its own "activated" event.
+	if cfg.ImportLegacyOnStartup {
+		if cfg.ImportLegacyDir == "" || cfg.ImportLegacyTenantID == "" {
+			log.Fatal().Msg("MBS_IMPORT_LEGACY_ON_STARTUP=true requires " +
+				"MBS_IMPORT_LEGACY_DIR and MBS_IMPORT_LEGACY_TENANT_ID")
+		}
+		log.Warn().
+			Str("legacy_dir", cfg.ImportLegacyDir).
+			Str("tenant_id", cfg.ImportLegacyTenantID).
+			Msg("MBS_IMPORT_LEGACY_ON_STARTUP=true — remember to unset after this deploy")
+		stats, err := importer.Run(rootCtx, importer.Options{
+			SessionsDir: cfg.ImportLegacyDir,
+			TenantID:    cfg.ImportLegacyTenantID,
+			Store:       st,
+			DEK:         dek,
+			Publisher:   nil, // see comment above
+			Logger:      log,
+		})
+		if err != nil {
+			log.Fatal().Err(err).Msg("legacy import failed (boot aborted)")
+		}
+		log.Info().
+			Int("total", stats.Total).
+			Int("imported", stats.Imported).
+			Int("forced", stats.Forced).
+			Int("skipped", stats.Skipped).
+			Int("failed", stats.Failed).
+			Msg("legacy import complete")
+		if stats.Failed > 0 {
+			log.Warn().
+				Int("failed", stats.Failed).
+				Msg("legacy import had failures — review logs before clearing the env flag")
+		}
+	}
 
 	// ── 4. Event publisher (NATS-backed)
 	pub := handler.NewNatsEventPublisher(js, log)

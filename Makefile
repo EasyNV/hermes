@@ -48,6 +48,8 @@ build:
 		echo "Building $$svc..."; \
 		CGO_ENABLED=0 go build -o bin/hermes-$$svc ./cmd/$$svc; \
 	done
+	@echo "Building mbs-import (one-shot operator tool)..."
+	@CGO_ENABLED=0 go build -o bin/mbs-import ./cmd/mbs-import
 
 # Clean generated files
 clean:
