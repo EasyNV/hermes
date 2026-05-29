@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -56,6 +57,9 @@ func main() {
 	}
 	if err := startOutboundConsumer(js, store, log); err != nil {
 		log.Fatal().Err(err).Msg("failed to start outbound consumer")
+	}
+	if err := startMbsInboundConsumer(js, store, log); err != nil {
+		log.Fatal().Err(err).Msg("failed to start MBS inbound consumer")
 	}
 
 	// gRPC server
@@ -112,6 +116,18 @@ func ensureStreams(js natsgo.JetStreamContext) error {
 		MaxAge:   1 * time.Hour,
 	}); err != nil {
 		return fmt.Errorf("ensuring HERMES_NOTIFY stream: %w", err)
+	}
+
+	// HERMES_MBS — MBS inbound/outbound/session events. Gateway also
+	// ensures this stream on its boot (E2 chunk 3); double-creation
+	// is a no-op as long as the subject set matches.
+	if _, err := js.AddStream(&natsgo.StreamConfig{
+		Name:     "HERMES_MBS",
+		Subjects: []string{"hermes.mbs.message.>", "hermes.mbs.session.>"},
+		Storage:  natsgo.FileStorage,
+		MaxAge:   7 * 24 * time.Hour,
+	}); err != nil {
+		return fmt.Errorf("ensuring HERMES_MBS stream: %w", err)
 	}
 
 	return nil
@@ -317,6 +333,174 @@ func startOutboundConsumer(js natsgo.JetStreamContext, store handler.Store, log 
 
 	log.Info().Str("subject", "hermes.wa.message.outbound.*").Msg("outbound status consumer started")
 	return nil
+}
+
+// startMbsInboundConsumer subscribes to MBS inbound messages and creates/updates
+// conversations with channel='mbs'. Mirrors startInboundConsumer line-for-line
+// for diff reviewability. Differences vs WA:
+//
+//   - decodes MbsInboundMessageEvent
+//   - tenant from event.Meta.TenantId; workspace from GetWorkspaceIDForMbsUid(uid)
+//   - no allowlist (see plan §C3-K5)
+//   - synthetic phone "mbs:thread:<id>" when senderPhone is empty (Messenger user)
+//   - uses FindOrCreateMbsConversation / CreateMbsMessage; mbs_mid keyed
+func startMbsInboundConsumer(js natsgo.JetStreamContext, store handler.Store, log zerolog.Logger) error {
+	_, err := js.Subscribe("hermes.mbs.message.inbound.*", func(msg *natsgo.Msg) {
+		var event hermesv1.MbsInboundMessageEvent
+		if err := proto.Unmarshal(msg.Data, &event); err != nil {
+			log.Error().Err(err).Msg("failed to unmarshal MBS inbound message event")
+			msg.Ack() // poison pill
+			return
+		}
+
+		ack := processMbsInbound(context.Background(), store, js, log, &event)
+		if ack {
+			msg.Ack()
+		} else {
+			msg.Nak()
+		}
+	},
+		natsgo.Durable("inbox-mbs-inbound"),
+		natsgo.ManualAck(),
+		natsgo.AckWait(30*time.Second),
+		natsgo.MaxDeliver(5),
+	)
+	if err != nil {
+		return fmt.Errorf("subscribing to MBS inbound events: %w", err)
+	}
+
+	log.Info().Str("subject", "hermes.mbs.message.inbound.*").Msg("MBS inbound message consumer started")
+	return nil
+}
+
+// processMbsInbound performs the actual DB write side of the MBS inbound
+// consumer. Returns true → caller should ACK (success, or terminal drop),
+// false → caller should NAK (transient, retry).
+//
+// Split from the subscription closure so unit tests can drive it
+// without a real NATS subscription.
+func processMbsInbound(
+	ctx context.Context,
+	store handler.Store,
+	js natsgo.JetStreamContext,
+	log zerolog.Logger,
+	event *hermesv1.MbsInboundMessageEvent,
+) bool {
+	tenantID := event.Meta.GetTenantId()
+	if tenantID == "" {
+		log.Warn().
+			Int64("uid", event.Uid).
+			Str("mid", event.Mid).
+			Msg("MBS inbound: missing tenant_id, dropping")
+		return true
+	}
+
+	// 1. Resolve workspace from MBS uid (joins mbs_sessions ↔ workspaces).
+	workspaceID, resolvedTenantID, err := store.GetWorkspaceIDForMbsUid(ctx, event.Uid)
+	if err != nil {
+		log.Warn().Err(err).
+			Int64("uid", event.Uid).
+			Str("tenant_id", tenantID).
+			Msg("MBS inbound: workspace lookup miss (session burned or missing), dropping")
+		return true
+	}
+	if resolvedTenantID != "" {
+		tenantID = resolvedTenantID
+	}
+
+	// 2. Resolve or auto-create contact.
+	senderPhone := strings.TrimPrefix(event.SenderPhone, "+")
+	var (
+		lookupKey string
+		autoName  string
+	)
+	if senderPhone == "" {
+		// Synthetic stable slug per MBS thread.
+		lookupKey = "mbs:thread:" + event.ThreadId
+		tail := event.ThreadId
+		if len(tail) > 8 {
+			tail = tail[len(tail)-8:]
+		}
+		autoName = "MBS thread " + tail
+	} else {
+		lookupKey = senderPhone
+		autoName = ""
+	}
+
+	contact, _, lookupErr := store.FindContactByPhone(ctx, lookupKey)
+	if lookupErr != nil && senderPhone != "" {
+		// WA-parity: try with + prefix.
+		contact, _, lookupErr = store.FindContactByPhone(ctx, "+"+senderPhone)
+	}
+	if lookupErr != nil {
+		created, createErr := store.AutoCreateContact(ctx, tenantID, lookupKey, autoName)
+		if createErr != nil {
+			log.Error().Err(createErr).
+				Str("lookup_key", lookupKey).
+				Int64("uid", event.Uid).
+				Msg("MBS inbound: failed to auto-create contact")
+			return false
+		}
+		contact = created
+		log.Info().
+			Str("lookup_key", lookupKey).
+			Str("name", autoName).
+			Str("contact_id", contact.ID).
+			Msg("MBS inbound: auto-created contact")
+	}
+
+	// 3. Find or create MBS conversation.
+	uidStr := strconv.FormatInt(event.Uid, 10)
+	conv, _, err := store.FindOrCreateMbsConversation(
+		ctx, workspaceID, contact.ID, uidStr, event.ThreadId, event.PageId,
+	)
+	if err != nil {
+		log.Error().Err(err).
+			Int64("uid", event.Uid).
+			Str("thread_id", event.ThreadId).
+			Msg("MBS inbound: failed to find/create conversation")
+		return false
+	}
+
+	// 4. Reopen if closed.
+	if conv.Status == "closed" {
+		newStatus := conversation.StatusAfterInbound(conv.Status)
+		if newStatus != conv.Status {
+			if err := store.ReopenConversation(ctx, conv.ID); err != nil {
+				log.Error().Err(err).Str("conv_id", conv.ID).Msg("MBS inbound: failed to reopen conversation")
+			}
+			conv.Status = newStatus
+		}
+	}
+
+	// 5. Store the message.
+	if _, err = store.CreateMbsMessage(ctx, conv.ID, "inbound", event.Text, event.Mid); err != nil {
+		log.Error().Err(err).
+			Str("conv_id", conv.ID).
+			Str("mid", event.Mid).
+			Msg("MBS inbound: failed to store message")
+		return false
+	}
+
+	// 6. Update last_message_at + preview.
+	preview := event.Text
+	if len(preview) > 100 {
+		preview = preview[:100]
+	}
+	_ = store.UpdateLastMessage(ctx, conv.ID, preview)
+
+	// 7. Notify on unassigned.
+	if conv.Status == "unassigned" && js != nil {
+		publishNotification(js, log, tenantID, workspaceID, contact, event.Text)
+	}
+
+	log.Debug().
+		Str("conv_id", conv.ID).
+		Str("thread_id", event.ThreadId).
+		Str("mid", event.Mid).
+		Int64("uid", event.Uid).
+		Msg("processed MBS inbound message")
+	return true
 }
 
 // publishNotification sends a NotifyDispatchEvent for a new unassigned message.

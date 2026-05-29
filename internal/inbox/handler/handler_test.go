@@ -35,6 +35,7 @@ type mockStore struct {
 	setFirstResponseTimeFn     func(ctx context.Context, conversationID string, secs int32) error
 	findContactByPhoneFn       func(ctx context.Context, phone string) (*ContactRow, string, error)
 	getWorkspaceIDForWaNumberFn func(ctx context.Context, waNumberID string) (string, string, error)
+	getWorkspaceIDForMbsUidFn  func(ctx context.Context, uid int64) (string, string, error)
 	createCannedResponseFn     func(ctx context.Context, workspaceID, shortcut, body string, createdBy *string) (*CannedResponseRow, error)
 	getCannedResponseFn        func(ctx context.Context, id string) (*CannedResponseRow, error)
 	listCannedResponsesFn      func(ctx context.Context, workspaceID, search string, page, pageSize int32) ([]*CannedResponseRow, int64, error)
@@ -161,6 +162,12 @@ func (m *mockStore) FindContactByPhone(ctx context.Context, phone string) (*Cont
 func (m *mockStore) GetWorkspaceIDForWaNumber(ctx context.Context, waNumberID string) (string, string, error) {
 	if m.getWorkspaceIDForWaNumberFn != nil {
 		return m.getWorkspaceIDForWaNumberFn(ctx, waNumberID)
+	}
+	return "", "", ErrNotFound
+}
+func (m *mockStore) GetWorkspaceIDForMbsUid(ctx context.Context, uid int64) (string, string, error) {
+	if m.getWorkspaceIDForMbsUidFn != nil {
+		return m.getWorkspaceIDForMbsUidFn(ctx, uid)
 	}
 	return "", "", ErrNotFound
 }

@@ -154,6 +154,7 @@ type Store interface {
 	// Contact lookup (cross-service read)
 	FindContactByPhone(ctx context.Context, phone string) (*ContactRow, string, error) // returns contact + tenantID
 	GetWorkspaceIDForWaNumber(ctx context.Context, waNumberID string) (string, string, error) // returns workspaceID, tenantID
+	GetWorkspaceIDForMbsUid(ctx context.Context, uid int64) (string, string, error) // returns workspaceID, tenantID for an MBS session
 	AutoCreateContact(ctx context.Context, tenantID, phone, name string) (*ContactRow, error) // auto-create from inbound message
 	ClearAllConversations(ctx context.Context, workspaceID string) (int64, error) // delete all conversations + messages in workspace
 
@@ -737,14 +738,29 @@ func (s *PgStore) CreateMbsMessage(
 	if direction == "inbound" {
 		initial = "delivered"
 	}
+	// ON CONFLICT (mbs_mid) handles Meta retransmits / consumer redelivery.
+	// The partial unique index uq_messages_mbs_mid lives on (mbs_mid) WHERE mbs_mid != ''
+	// so we can target it with ON CONFLICT (mbs_mid) WHERE mbs_mid != ''.
+	// If a row already exists, INSERT returns no rows and we SELECT the existing one.
 	m := &MessageRow{}
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO messages
-		  (conversation_id, direction, content_type, body, mbs_mid, status)
-		VALUES ($1, $2, 'text', $3, $4, $5)
-		RETURNING id, conversation_id, direction, content_type, body, media_url,
-		          template_id, resolved_vars_json, wa_message_id, status, created_at,
-		          COALESCE(mbs_mid, '')`,
+		WITH ins AS (
+		  INSERT INTO messages
+		    (conversation_id, direction, content_type, body, mbs_mid, status)
+		  VALUES ($1, $2, 'text', $3, $4, $5)
+		  ON CONFLICT (mbs_mid) WHERE mbs_mid != ''
+		  DO NOTHING
+		  RETURNING id, conversation_id, direction, content_type, body, media_url,
+		            template_id, resolved_vars_json, wa_message_id, status, created_at,
+		            COALESCE(mbs_mid, '') AS mbs_mid
+		)
+		SELECT * FROM ins
+		UNION ALL
+		SELECT id, conversation_id, direction, content_type, body, media_url,
+		       template_id, resolved_vars_json, wa_message_id, status, created_at,
+		       COALESCE(mbs_mid, '')
+		FROM messages WHERE mbs_mid = $4 AND mbs_mid != ''
+		LIMIT 1`,
 		conversationID, direction, bodyPtr, mbsMID, initial,
 	).Scan(
 		&m.ID, &m.ConversationID, &m.Direction, &m.ContentType, &m.Body, &m.MediaURL,
@@ -837,6 +853,33 @@ func (s *PgStore) GetWorkspaceIDForWaNumber(ctx context.Context, waNumberID stri
 	}
 	if err != nil {
 		return "", "", fmt.Errorf("getting workspace for wa_number: %w", err)
+	}
+	return workspaceID, tenantID, nil
+}
+
+// GetWorkspaceIDForMbsUid resolves (workspaceID, tenantID) for an MBS
+// session uid by joining mbs_sessions ↔ workspaces. Both tables live
+// in the same hermes DB so this is in-process — no cross-service RPC.
+//
+// Multi-workspace tenants: returns the workspace with the smallest
+// created_at. Today, gateway seeds one workspace per tenant. If multi-
+// workspace tenants land later, we'd add an explicit mbs_session_workspaces
+// mapping table — carrying gap E3.3-G2.
+func (s *PgStore) GetWorkspaceIDForMbsUid(ctx context.Context, uid int64) (string, string, error) {
+	var workspaceID, tenantID string
+	err := s.pool.QueryRow(ctx, `
+		SELECT w.id, w.tenant_id
+		FROM mbs_sessions s
+		JOIN workspaces  w ON w.tenant_id = s.tenant_id
+		WHERE s.uid = $1
+		ORDER BY w.created_at ASC
+		LIMIT 1`, uid,
+	).Scan(&workspaceID, &tenantID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("getting workspace for mbs uid: %w", err)
 	}
 	return workspaceID, tenantID, nil
 }
