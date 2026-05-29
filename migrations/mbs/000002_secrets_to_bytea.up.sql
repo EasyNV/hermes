@@ -13,10 +13,14 @@ ALTER TABLE mbs_sessions ALTER COLUMN access_token TYPE BYTEA USING access_token
 ALTER TABLE mbs_sessions ALTER COLUMN secret      TYPE BYTEA USING secret::bytea;
 ALTER TABLE mbs_sessions ALTER COLUMN session_key TYPE BYTEA USING session_key::bytea;
 
--- cookies was JSONB plaintext; the encrypted form is opaque bytes.
--- ::text::bytea preserves the JSON serialization losslessly so a
--- subsequent encrypt-rewrite job can decode → encrypt → store.
+-- cookies was JSONB plaintext with DEFAULT '{}'::jsonb. Postgres will
+-- not auto-cast a JSONB default expression to BYTEA, so we must drop
+-- the default before the type change and reinstall a BYTEA-typed one
+-- afterwards. The empty-bytes default is correct semantically: an empty
+-- ciphertext slot means "no cookie jar yet".
+ALTER TABLE mbs_sessions ALTER COLUMN cookies DROP DEFAULT;
 ALTER TABLE mbs_sessions ALTER COLUMN cookies TYPE BYTEA USING cookies::text::bytea;
+ALTER TABLE mbs_sessions ALTER COLUMN cookies SET DEFAULT ''::bytea;
 
 COMMENT ON COLUMN mbs_sessions.access_token IS
     'AES-256-GCM encrypted OAuth user token. AAD: mbs.access_token.uid=<uid>. Cleartext never on disk.';

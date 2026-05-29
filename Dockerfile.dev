@@ -6,7 +6,17 @@ FROM golang:1.25-alpine AS builder
 RUN apk add --no-cache git
 
 WORKDIR /src
+
+# Copy module manifests + the replace-directive targets BEFORE go mod download.
+# The hermes-mbs build requires re/mbs/mautrix-meta-patched/ and re/mbs/mbs-native/
+# because go.mod declares:
+#   replace mbs-native             => ./re/mbs/mbs-native
+#   replace go.mau.fi/mautrix-meta => ./re/mbs/mautrix-meta-patched
+# Other services don't use these replaces but copying them costs nothing.
 COPY go.mod go.sum ./
+COPY re/mbs/mautrix-meta-patched/go.mod re/mbs/mautrix-meta-patched/go.sum re/mbs/mautrix-meta-patched/
+COPY re/mbs/mbs-native/go.mod re/mbs/mbs-native/go.sum re/mbs/mbs-native/
+
 RUN go mod download
 
 COPY . .

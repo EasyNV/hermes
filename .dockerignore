@@ -1,0 +1,99 @@
+# .dockerignore — exclude large/irrelevant paths from build context.
+#
+# CRITICAL: this file uses one-pattern-per-line. dockerignore does NOT
+# support trailing same-line comments — `re/mbs/mautrix-meta/ # foo` is
+# parsed as the literal path `re/mbs/mautrix-meta/ # foo`. Comments must
+# be on their own line.
+#
+# go.mod replace directives REQUIRE these paths in the context:
+#   replace mbs-native             => ./re/mbs/mbs-native
+#   replace go.mau.fi/mautrix-meta => ./re/mbs/mautrix-meta-patched
+
+# Block all of re/ heavy subdirectories. These are the GB-scale paths
+# that destroyed earlier build attempts.
+re/mbs/android-mbs/
+re/mbs/ghidra/
+re/mbs/ipa/
+re/mbs/captures/
+re/mbs/mautrix-meta/
+re/mbs/mbs-send/
+re/mbs/mbs-bridge-login/
+re/mbs/mbs-client/
+re/mbs/tweak/
+re/mbs/frida-scripts/
+re/mbs/frida-server-android/
+re/mbs/frida-interception-and-unpinning/
+re/mbs/scripts/
+re/mbs/tools/
+re/mbs/docs/
+re/mbs/__pycache__/
+re/mbs/*.zip
+re/mbs/*.har
+re/mbs/*.mitm
+re/mbs/*.pcap
+re/mbs/*.ipa
+re/mbs/*.apk
+re/mbs/*.dump
+re/mbs/*.py
+re/mbs/*.md
+re/mbs/*.bak.*
+re/mbs/c8750f0d.0
+
+# Within mbs-native (which IS needed for the build), exclude its own
+# heavy noise paths that aren't imported by the parent module.
+#
+# DO NOT use a blanket `**/testdata/` glob — production code embeds
+# from `auth/testdata/` (deletepregent_reg_info_template.json,
+# mobileconfig_warm_hashes.json) via //go:embed and the build dies
+# with "pattern testdata/...: no matching files found" if excluded.
+#
+# Strategy: keep auth/testdata/ in context; exclude top-level testdata
+# (only used by _test.go) and the heavy third_party + web fixtures.
+re/mbs/mbs-native/h2dump/
+re/mbs/mbs-native/probe-connack/
+re/mbs/mbs-native/testdata/
+re/mbs/mbs-native/web/testdata/
+re/mbs/mbs-native/third_party/utls/testdata/
+re/mbs/mbs-native/graphql/testdata/
+re/mbs/mbs-native/auth/testdata/gold_responses/
+
+# Unrelated research dirs at repo root
+celestial-research/
+
+# git metadata
+.git
+.gitignore
+.gitattributes
+
+# IDE / editor
+.idea
+.vscode
+.cursor
+*.swp
+*.swo
+.DS_Store
+
+# Hermes session / plan / runbook content (not needed in image)
+.hermes/
+docs/
+README.md
+AGENTS.md
+CLAUDE.md
+*.md
+
+# build outputs (NOT gen/ — it has protobuf bindings)
+bin/
+
+# frontend
+web/node_modules/
+web/dist/
+web/.vite/
+
+# secrets (never ship in image)
+deploy/secrets/
+
+# temp
+*.tmp
+*.log
+tmp/
+.tmp/

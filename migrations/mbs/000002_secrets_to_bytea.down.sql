@@ -7,4 +7,10 @@
 ALTER TABLE mbs_sessions ALTER COLUMN access_token TYPE TEXT USING encode(access_token, 'hex');
 ALTER TABLE mbs_sessions ALTER COLUMN secret      TYPE TEXT USING encode(secret,      'hex');
 ALTER TABLE mbs_sessions ALTER COLUMN session_key TYPE TEXT USING encode(session_key, 'hex');
-ALTER TABLE mbs_sessions ALTER COLUMN cookies     TYPE JSONB USING '{}'::jsonb;
+
+-- cookies: drop the BYTEA default, change type back to JSONB, reinstall
+-- the original JSONB default. The empty-bytes → '{}'::jsonb mapping is
+-- correct: both represent "no jar yet" in their respective worlds.
+ALTER TABLE mbs_sessions ALTER COLUMN cookies DROP DEFAULT;
+ALTER TABLE mbs_sessions ALTER COLUMN cookies TYPE JSONB USING '{}'::jsonb;
+ALTER TABLE mbs_sessions ALTER COLUMN cookies SET DEFAULT '{}'::jsonb;
