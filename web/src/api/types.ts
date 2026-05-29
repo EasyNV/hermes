@@ -41,6 +41,21 @@ export type NotificationType = (typeof NotificationType)[keyof typeof Notificati
 export const WebhookType = { UNSPECIFIED: 'WEBHOOK_TYPE_UNSPECIFIED', TELEGRAM: 'WEBHOOK_TYPE_TELEGRAM', DISCORD: 'WEBHOOK_TYPE_DISCORD', CUSTOM: 'WEBHOOK_TYPE_CUSTOM' } as const
 export type WebhookType = (typeof WebhookType)[keyof typeof WebhookType]
 
+// Source of truth: proto/hermes/v1/mbs.proto::MbsSessionState. Values must
+// stay in lockstep with internal/gateway/rest/handlers_mbs.go::parseStateFilter
+// (E2 chunk 2) and the lifecycle frame emitted by internal/gateway/websocket/
+// events_mbs.go (E2 chunk 3).
+export const MbsSessionState = {
+  UNSPECIFIED: 'MBS_SESSION_STATE_UNSPECIFIED',
+  WARMING: 'MBS_SESSION_STATE_WARMING',
+  ACTIVE: 'MBS_SESSION_STATE_ACTIVE',
+  RECONNECTING: 'MBS_SESSION_STATE_RECONNECTING',
+  REFRESHING: 'MBS_SESSION_STATE_REFRESHING',
+  SUSPENDED: 'MBS_SESSION_STATE_SUSPENDED',
+  BURNED: 'MBS_SESSION_STATE_BURNED',
+} as const
+export type MbsSessionState = (typeof MbsSessionState)[keyof typeof MbsSessionState]
+
 // ══════════════════════════════════════════════════════════════
 // Pagination
 // ══════════════════════════════════════════════════════════════
@@ -278,6 +293,48 @@ export interface RegisterWaNumberResponse { waNumber: WaNumber; qrCode: string }
 export interface GetQRCodeResponse { qrCode: string; isLinked: boolean }
 export interface ListWaNumbersResponse { waNumbers: WaNumber[]; pagination: PageResponse }
 
+// ══════════════════════════════════════════════════════════════
+// MBS — Meta Business Suite resources + REST shapes
+// (Stage E2 chunk 4. REST routes live under /api/v1/mbs-sessions.)
+// ══════════════════════════════════════════════════════════════
+
+export interface MbsSession {
+  uid: string
+  fbid: string
+  state: MbsSessionState
+  podId: string
+  lastConnackRc: number
+  createdAt: string
+  lastSeenAt: string
+  cookieExpiresAt: string
+  burnedAt: string         // empty unless state === BURNED
+  burnedReason: string
+}
+
+export interface MbsSessionAsset {
+  uid: string
+  kind: string             // server-controlled vocab ("page" | "wec_mailbox" today)
+  externalId: string
+  displayName: string
+  metadata: string         // JSON blob; opaque to client
+}
+
+export interface MbsListSessionsResponse { sessions: MbsSession[]; pagination: PageResponse }
+export interface MbsGetSessionStatusResponse { session: MbsSession }
+export interface MbsListSessionAssetsResponse { assets: MbsSessionAsset[] }
+export interface MbsBurnSessionResponse { session: MbsSession }
+export interface MbsResolvePhoneResponse {
+  threadId: string         // FBID-keyed thread id; empty if exists=false
+  pageId: string
+  exists: boolean
+}
+export interface MbsSendMessageResponse {
+  mid: string              // wire-confirmed message id
+  otid: string             // client-side outbound transaction id (echo)
+  threadId: string
+  sentAt: string
+}
+
 // Proxies
 export interface ProxyInput { host: string; port: number; username: string; password: string; type: ProxyType }
 export interface AddProxiesResponse { proxies: Proxy[]; skippedCount: number }
@@ -436,6 +493,43 @@ export interface WsNotificationAlertPayload {
   workspaceId: string
 }
 
+// ── MBS WS payloads ─────────────────────────────────────────────
+// Wire shape locked by internal/gateway/websocket/events_mbs.go
+// (Stage E2 chunk 3). Field names must match the gateway handler
+// VERBATIM — drift breaks runtime.
+
+export interface WsMbsNewMessagePayload {
+  uid: string                  // int64 → decimal string for JS safety
+  pageId: string
+  wecMailboxId: string
+  threadId: string
+  mid: string
+  senderPhone: string
+  text: string
+  receivedAt: string           // ISO 8601 UTC
+}
+
+export interface WsMbsOutboundStatusPayload {
+  uid: string
+  threadId: string
+  mid: string
+  otid: string                 // client-side outbound transaction id
+  latencyMs: number
+  ok: boolean
+  error: string                // empty on success
+  sentAt: string
+}
+
+export interface WsMbsSessionLifecyclePayload {
+  uid: string
+  previousState: MbsSessionState
+  newState: MbsSessionState
+  reason: string
+  lastConnackRc: number
+  podId: string
+  timestamp: string
+}
+
 export type WsEvent =
   | { type: 'new_message'; payload: WsNewMessagePayload }
   | { type: 'message_status_updated'; payload: WsMessageStatusPayload }
@@ -447,6 +541,9 @@ export type WsEvent =
   | { type: 'typing_indicator'; payload: WsTypingIndicatorPayload }
   | { type: 'import_complete'; payload: WsImportCompletePayload }
   | { type: 'notification_alert'; payload: WsNotificationAlertPayload }
+  | { type: 'mbs_new_message'; payload: WsMbsNewMessagePayload }
+  | { type: 'mbs_outbound_status'; payload: WsMbsOutboundStatusPayload }
+  | { type: 'mbs_session_lifecycle'; payload: WsMbsSessionLifecyclePayload }
   | { type: 'connected'; payload: { userId: string; workspaceId: string; tenantId: string } }
   | { type: 'pong'; payload: { serverTime: string } }
   | { type: 'auth_ok' }

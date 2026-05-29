@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { WsEvent } from '@/api/types'
 import { useInboxStore } from './inbox'
 import { useCampaignsStore } from './campaigns'
+import { useMbsStore } from './mbs'
 
 type WsStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
 
@@ -21,6 +22,7 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 function handleEvent(event: WsEvent) {
   const inbox = useInboxStore.getState()
   const campaigns = useCampaignsStore.getState()
+  const mbs = useMbsStore.getState()
 
   switch (event.type) {
     case 'new_message':
@@ -40,6 +42,21 @@ function handleEvent(event: WsEvent) {
       break
     case 'typing_indicator':
       inbox.setTyping(event.payload.conversationId, event.payload.isComposing)
+      break
+    case 'mbs_new_message':
+      // MBS inbound feeds the Pages preview tile and the cold-compose
+      // composer's "last contact" indicator. Chunk 6 will additionally
+      // forward into useInboxStore via the mbs:<uid>:<thread>
+      // conversation prefix path. Keeping channels distinct here in
+      // chunk 4 prevents accidental cross-routing while the inbox
+      // integration is still in design.
+      mbs.handleInbound(event.payload)
+      break
+    case 'mbs_outbound_status':
+      mbs.handleOutbound(event.payload)
+      break
+    case 'mbs_session_lifecycle':
+      mbs.handleSessionLifecycle(event.payload)
       break
     // connected, pong, auth_ok, error — handled implicitly or ignored
     default:
