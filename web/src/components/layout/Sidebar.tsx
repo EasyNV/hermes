@@ -1,6 +1,6 @@
 import { Link } from '@tanstack/react-router'
 import {
-  LayoutDashboard, Smartphone, Shield, Users, FileText,
+  LayoutDashboard, Smartphone, Building2, Shield, Users, FileText,
   Send, MessageSquare, Settings, Zap,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -10,6 +10,7 @@ import { Role } from '@/api/types'
 const navItems = [
   { to: '/' as const, label: 'Dashboard', icon: LayoutDashboard },
   { to: '/numbers' as const, label: 'Numbers', icon: Smartphone },
+  { to: '/mbs-sessions' as const, label: 'MBS Pages', icon: Building2 },
   { to: '/proxies' as const, label: 'Proxies', icon: Shield },
   { to: '/contacts' as const, label: 'Contacts', icon: Users },
   { to: '/templates' as const, label: 'Templates', icon: FileText },

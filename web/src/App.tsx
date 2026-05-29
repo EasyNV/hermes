@@ -10,6 +10,7 @@ import { TopBar } from '@/components/layout/TopBar'
 import LoginPage from '@/pages/Login'
 import DashboardPage from '@/pages/Dashboard'
 import NumbersPage from '@/pages/Numbers'
+import MbsSessionsPage from '@/pages/MbsSessions'
 import ProxiesPage from '@/pages/Proxies'
 import ContactsPage from '@/pages/Contacts'
 import TemplatesPage from '@/pages/Templates'
@@ -93,6 +94,7 @@ const authRoute = createRoute({
 
 const dashboardRoute = createRoute({ getParentRoute: () => authRoute, path: '/', component: DashboardPage })
 const numbersRoute = createRoute({ getParentRoute: () => authRoute, path: '/numbers', component: NumbersPage })
+const mbsSessionsRoute = createRoute({ getParentRoute: () => authRoute, path: '/mbs-sessions', component: MbsSessionsPage })
 const proxiesRoute = createRoute({ getParentRoute: () => authRoute, path: '/proxies', component: ProxiesPage })
 const contactsRoute = createRoute({ getParentRoute: () => authRoute, path: '/contacts', component: ContactsPage })
 const templatesRoute = createRoute({ getParentRoute: () => authRoute, path: '/templates', component: TemplatesPage })
@@ -107,6 +109,7 @@ const routeTree = rootRoute.addChildren([
   authRoute.addChildren([
     dashboardRoute,
     numbersRoute,
+    mbsSessionsRoute,
     proxiesRoute,
     contactsRoute,
     templatesRoute,

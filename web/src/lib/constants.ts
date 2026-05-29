@@ -1,4 +1,4 @@
-import type { WaNumberStatus, ProxyStatus, CampaignStatus, ConversationStatus, ContactSendStatus, MessageStatus, Role } from '@/api/types'
+import type { WaNumberStatus, ProxyStatus, CampaignStatus, ConversationStatus, ContactSendStatus, MessageStatus, Role, MbsSessionState } from '@/api/types'
 
 export type StatusVariant = 'success' | 'warning' | 'destructive' | 'secondary' | 'default' | 'info'
 
@@ -72,4 +72,14 @@ export function isAdmin(role: Role): boolean {
 
 export function isSuperAdmin(role: Role): boolean {
   return role === 'ROLE_SUPERADMIN'
+}
+
+export const MBS_STATUS: Record<MbsSessionState, StatusConfig> = {
+  MBS_SESSION_STATE_UNSPECIFIED:  { label: 'Unknown',      variant: 'secondary',   dot: 'bg-gray-400' },
+  MBS_SESSION_STATE_WARMING:      { label: 'Warming',      variant: 'info',        dot: 'bg-blue-500' },
+  MBS_SESSION_STATE_ACTIVE:       { label: 'Active',       variant: 'success',     dot: 'bg-green-500' },
+  MBS_SESSION_STATE_RECONNECTING: { label: 'Reconnecting', variant: 'warning',     dot: 'bg-yellow-500' },
+  MBS_SESSION_STATE_REFRESHING:   { label: 'Refreshing',   variant: 'info',        dot: 'bg-blue-500' },
+  MBS_SESSION_STATE_SUSPENDED:    { label: 'Suspended',    variant: 'warning',     dot: 'bg-yellow-500' },
+  MBS_SESSION_STATE_BURNED:       { label: 'Burned',       variant: 'destructive', dot: 'bg-red-500' },
 }
