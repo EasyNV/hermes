@@ -26,6 +26,7 @@ import { StatusBadge } from '@/components/shared/StatusBadge'
 import { Pagination } from '@/components/shared/Pagination'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { BridgeLoginDialog } from '@/components/mbs/BridgeLoginDialog'
+import { ColdComposeForm } from '@/components/mbs/ColdComposeForm'
 import {
   Table,
   TableHeader,
@@ -353,6 +354,18 @@ export default function MbsSessions() {
                           ) : (
                             <p className="text-xs text-muted-foreground">
                               No assets attached to this session.
+                            </p>
+                          )}
+
+                          {/* Cold-compose composer — only on ACTIVE sessions.
+                              Drawer collapse unmounts and resets composer state. */}
+                          {s.state === MbsSessionState.ACTIVE ? (
+                            <div className="mt-4 rounded-md border bg-card p-3">
+                              <ColdComposeForm uid={s.uid} />
+                            </div>
+                          ) : (
+                            <p className="mt-4 text-xs text-muted-foreground">
+                              Cold compose available only on active sessions.
                             </p>
                           )}
                         </TableCell>

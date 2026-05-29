@@ -41,6 +41,27 @@ interface MbsStoreState {
   handleOutbound: (p: WsMbsOutboundStatusPayload) => void
 }
 
+// outboundByOtid is bounded by a 5-minute TTL relative to sentAt.
+// Pruning is event-driven (runs inside handleOutbound on every write)
+// so we never need a background timer. The just-arrived entry is
+// preserved by including it in the input map before prune runs.
+const OUTBOUND_TTL_MS = 5 * 60 * 1000
+
+function pruneOutbound(
+  map: Record<string, WsMbsOutboundStatusPayload>,
+): Record<string, WsMbsOutboundStatusPayload> {
+  const cutoff = Date.now() - OUTBOUND_TTL_MS
+  const out: Record<string, WsMbsOutboundStatusPayload> = {}
+  for (const [k, v] of Object.entries(map)) {
+    const t = Date.parse(v.sentAt || '')
+    // Retain entries with malformed timestamps (defensive — they'll
+    // expire on the next clean write); retain entries newer than the
+    // cutoff.
+    if (!Number.isFinite(t) || t >= cutoff) out[k] = v
+  }
+  return out
+}
+
 export const useMbsStore = create<MbsStoreState>((set) => ({
   sessions: {},
   lastInboundByThread: {},
@@ -101,10 +122,10 @@ export const useMbsStore = create<MbsStoreState>((set) => ({
 
   handleOutbound: (p) =>
     set((s) => ({
-      outboundByOtid: {
+      outboundByOtid: pruneOutbound({
         ...s.outboundByOtid,
         [p.otid]: p,
-      },
+      }),
     })),
 }))
 
