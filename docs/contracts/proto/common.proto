@@ -235,6 +235,18 @@ enum WebhookType {
   WEBHOOK_TYPE_CUSTOM = 3;
 }
 
+// InboxChannel discriminates which messaging channel a Conversation /
+// Message belongs to. Added in Stage E3 (chunk 1) so MBS Messenger
+// threads can live in the same inbox table as WA conversations.
+//   INBOX_CHANNEL_WA  → wa_number_id is set, mbs_* are empty.
+//   INBOX_CHANNEL_MBS → mbs_session_uid + mbs_thread_id are set,
+//                       wa_number_id is empty.
+enum InboxChannel {
+  INBOX_CHANNEL_UNSPECIFIED = 0;
+  INBOX_CHANNEL_WA = 1;
+  INBOX_CHANNEL_MBS = 2;
+}
+
 // ──────────────────────────────────────────────────────────────────
 // Resource Messages (shared across services)
 // ──────────────────────────────────────────────────────────────────
@@ -442,6 +454,15 @@ message Conversation {
   // Seconds between first inbound message and first agent reply.
   // 0 if no reply yet. Used for agent performance metrics.
   int32 first_response_time_secs = 14;
+
+  // ─── E3 chunk 1: channel discriminator + MBS-specific keys ────
+  // INBOX_CHANNEL_WA  → wa_number_id is set, mbs_* are empty.
+  // INBOX_CHANNEL_MBS → mbs_session_uid + mbs_thread_id are set,
+  //                     wa_number_id is empty.
+  InboxChannel channel    = 15;
+  string mbs_session_uid  = 16;  // owning MBS session uid
+  string mbs_thread_id    = 17;  // FBID-keyed Messenger thread id
+  string mbs_page_id      = 18;  // informational (Page that received it)
 }
 
 // Message is a single chat message within a conversation.
@@ -462,6 +483,9 @@ message Message {
   string wa_message_id = 9;
   MessageStatus status = 10;
   google.protobuf.Timestamp created_at = 11;
+  // E3 chunk 1: Meta MID for MBS messages (mutually exclusive with
+  // wa_message_id in practice).
+  string mbs_mid = 12;
 }
 
 // CannedResponse is a quick-reply shortcut for inbox agents.

@@ -41,6 +41,18 @@ export type NotificationType = (typeof NotificationType)[keyof typeof Notificati
 export const WebhookType = { UNSPECIFIED: 'WEBHOOK_TYPE_UNSPECIFIED', TELEGRAM: 'WEBHOOK_TYPE_TELEGRAM', DISCORD: 'WEBHOOK_TYPE_DISCORD', CUSTOM: 'WEBHOOK_TYPE_CUSTOM' } as const
 export type WebhookType = (typeof WebhookType)[keyof typeof WebhookType]
 
+// InboxChannel discriminates which messaging channel a Conversation /
+// Message belongs to. Added in Stage E3 (chunk 1).
+//   INBOX_CHANNEL_WA  → waNumberId is set, mbs* are empty.
+//   INBOX_CHANNEL_MBS → mbsSessionUid + mbsThreadId are set,
+//                       waNumberId is empty.
+export const InboxChannel = {
+  UNSPECIFIED: 'INBOX_CHANNEL_UNSPECIFIED',
+  WA:          'INBOX_CHANNEL_WA',
+  MBS:         'INBOX_CHANNEL_MBS',
+} as const
+export type InboxChannel = (typeof InboxChannel)[keyof typeof InboxChannel]
+
 // Source of truth: proto/hermes/v1/mbs.proto::MbsSessionState. Values must
 // stay in lockstep with internal/gateway/rest/handlers_mbs.go::parseStateFilter
 // (E2 chunk 2) and the lifecycle frame emitted by internal/gateway/websocket/
@@ -216,6 +228,11 @@ export interface Conversation {
   lastMessagePreview: string
   unreadCount: number
   firstResponseTimeSecs: number
+  // E3 chunk 1: channel discriminator + MBS-specific keys
+  channel: InboxChannel
+  mbsSessionUid: string
+  mbsThreadId: string
+  mbsPageId: string
 }
 
 export interface Message {
@@ -230,6 +247,8 @@ export interface Message {
   waMessageId: string
   status: MessageStatus
   createdAt: string
+  // E3 chunk 1: Meta MID for MBS messages (empty for WA)
+  mbsMid: string
 }
 
 export interface CannedResponse {

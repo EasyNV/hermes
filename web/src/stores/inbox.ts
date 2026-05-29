@@ -73,6 +73,12 @@ export const useInboxStore = create<InboxState>((set, get) => ({
         lastMessagePreview: payload.message.body,
         unreadCount: 1,
         firstResponseTimeSecs: 0,
+        // E3 chunk 1: WS new_message currently only fires for WA;
+        // MBS conversations enter via list refetch (E3.5).
+        channel: 'INBOX_CHANNEL_WA',
+        mbsSessionUid: '',
+        mbsThreadId: '',
+        mbsPageId: '',
       }
       updatedConvs = [newConv, ...state.conversations]
     } else {
