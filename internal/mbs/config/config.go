@@ -46,6 +46,15 @@ type Config struct {
 	Bridge2FATimeout     time.Duration
 	BridgeMaxConcurrent  int // semaphore — OOM blast-radius cap
 
+	// MautrixDisableTLS, when true, disables TLS verification in
+	// mautrix-meta's HTTP transport. **Process-wide and unrecoverable
+	// until restart** (mautrix's API is a package-level global). Use
+	// ONLY for mitmproxy capture in a single-tenant dev pod — never
+	// run multi-tenant in this mode. The chunk-5 bridge hostile audit
+	// (F1) documents the blast radius. Boot logs a stark WARN when
+	// this is true.
+	MautrixDisableTLS bool
+
 	// ─── Legacy importer (dev only — prod uses cmd/mbs-import) ─────────
 	ImportLegacyOnStartup bool
 	ImportLegacyDir       string
@@ -97,6 +106,8 @@ func Load() Config {
 		BridgeOverallTimeout: getEnvDuration("MBS_BRIDGE_TIMEOUT", 180*time.Second),
 		Bridge2FATimeout:     getEnvDuration("MBS_BRIDGE_2FA_TIMEOUT", 120*time.Second),
 		BridgeMaxConcurrent:  pkgconfig.GetEnvInt("MBS_BRIDGE_MAX_CONCURRENT", 10),
+
+		MautrixDisableTLS: getEnvBool("HERMES_MBS_DISABLE_TLS", false),
 
 		ImportLegacyOnStartup: getEnvBool("MBS_IMPORT_LEGACY_ON_STARTUP", false),
 		ImportLegacyDir:       pkgconfig.GetEnv("MBS_IMPORT_LEGACY_DIR", ""),

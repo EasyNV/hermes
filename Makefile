@@ -32,7 +32,7 @@ infra:
 # Start all services in dev mode (requires infra running)
 dev: infra
 	@echo "Starting services..."
-	@for svc in proxy contacts notify wa campaign inbox gateway; do \
+	@for svc in proxy contacts notify wa mbs campaign inbox gateway; do \
 		echo "Starting $$svc..."; \
 		go run ./cmd/$$svc & \
 	done
@@ -44,7 +44,7 @@ test:
 
 # Build all services
 build:
-	@for svc in gateway wa campaign inbox contacts proxy notify; do \
+	@for svc in gateway wa mbs campaign inbox contacts proxy notify; do \
 		echo "Building $$svc..."; \
 		CGO_ENABLED=0 go build -o bin/hermes-$$svc ./cmd/$$svc; \
 	done
