@@ -60,6 +60,7 @@ import (
 	mbsconfig "github.com/hermes-waba/hermes/internal/mbs/config"
 	"github.com/hermes-waba/hermes/internal/mbs/handler"
 	"github.com/hermes-waba/hermes/internal/mbs/observability"
+	"github.com/hermes-waba/hermes/internal/mbs/refresh"
 	"github.com/hermes-waba/hermes/internal/mbs/session"
 	"github.com/hermes-waba/hermes/internal/mbs/store"
 	"github.com/hermes-waba/hermes/pkg/crypto"
@@ -204,6 +205,33 @@ func main() {
 	// ── 11. Reconnect sessions assigned to this pod (background)
 	go reconnectPodSessions(rootCtx, st, mgr, cfg.PodID, log)
 
+	// ── 11b. Refresh ticker (chunk 7) — keeps cookies fresh against
+	// Meta's 30d expiry. One goroutine; bounded concurrent fan-out
+	// per tick. Pod-startup jitter spreads fleet-bounce load.
+	refreshMetrics := refresh.NewMetrics(prometheus.DefaultRegisterer)
+	refreshTicker, err := refresh.New(refresh.Options{
+		Store:       st,
+		DEK:         dek,
+		Publisher:   pub,
+		PodID:       cfg.PodID,
+		Interval:    cfg.RefreshInterval,
+		Threshold:   cfg.RefreshThreshold,
+		Concurrency: cfg.RefreshConcurrency,
+		JitterCap:   5 * time.Minute, // explicit; zero would disable
+		Logger:      log,
+		Metrics:     refreshMetrics,
+	})
+	if err != nil {
+		log.Fatal().Err(err).Msg("refresh ticker construct failed")
+	}
+	refreshDone := make(chan struct{})
+	go func() {
+		defer close(refreshDone)
+		if err := refreshTicker.Run(rootCtx); err != nil {
+			log.Error().Err(err).Msg("refresh ticker exited with error")
+		}
+	}()
+
 	// ── 12. Flip ready, start gRPC listener
 	diagSrv.SetReady(true)
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Port))
@@ -268,6 +296,16 @@ func main() {
 		case <-drainCtx.Done():
 			log.Warn().Msg("NATS drain wait exceeded drainCtx; continuing shutdown")
 		}
+	}
+
+	// Wait for refresh ticker to exit. rootCtx already canceled by
+	// the shutdown signal; the ticker should observe and exit
+	// within 100ms. Bounded by drainCtx.
+	select {
+	case <-refreshDone:
+		log.Info().Msg("refresh ticker drained")
+	case <-drainCtx.Done():
+		log.Warn().Msg("refresh ticker drain wait exceeded drainCtx; continuing shutdown")
 	}
 
 	_ = mgr.Drain(drainCtx)
