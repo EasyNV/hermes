@@ -98,3 +98,16 @@ func requireTenant(ctx context.Context) (string, error) {
 func withTenantForTest(ctx context.Context, tenantID string) context.Context {
 	return context.WithValue(ctx, tenantCtxKey{}, tenantID)
 }
+
+// WithTenantForTest is the cross-package test helper variant of
+// withTenantForTest. Integration tests outside the handler package
+// (e.g. internal/mbs/bridge_test) need to inject a tenant context
+// without running the gRPC metadata interceptor. The name carries
+// "ForTest" to discourage non-test use; the godoc warns explicitly.
+//
+// NEVER call this from production code. Use TenantUnaryInterceptor
+// or TenantStreamInterceptor instead — those read x-tenant-id from
+// real gRPC metadata, which is the only trustworthy source.
+func WithTenantForTest(ctx context.Context, tenantID string) context.Context {
+	return withTenantForTest(ctx, tenantID)
+}
