@@ -17,6 +17,7 @@ type Config struct {
 	ContactsAddr string
 	ProxyAddr    string
 	NotifyAddr   string
+	MbsAddr      string
 }
 
 func Load() Config {
@@ -31,5 +32,6 @@ func Load() Config {
 		ContactsAddr: pkgconfig.GetEnv("CONTACTS_ADDR", "localhost:9102"),
 		ProxyAddr:    pkgconfig.GetEnv("PROXY_ADDR", "localhost:9101"),
 		NotifyAddr:   pkgconfig.GetEnv("NOTIFY_ADDR", "localhost:9103"),
+		MbsAddr:      pkgconfig.GetEnv("MBS_ADDR", "localhost:8082"),
 	}
 }

@@ -6,6 +6,7 @@ option go_package = "github.com/hermes-waba/hermes/gen/go/hermes/v1;hermesv1";
 
 import "google/protobuf/timestamp.proto";
 import "proto/common.proto";
+import "proto/mbs.proto";
 
 // ======================================================================
 // NATS JetStream Event Payloads
@@ -328,4 +329,103 @@ enum NotifyCategory {
   NOTIFY_CATEGORY_IMPORT_DONE = 5;
   // Proxy pool critically low.
   NOTIFY_CATEGORY_PROXY_POOL_LOW = 6;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// hermes.mbs.message.inbound.{tenant_id}
+// Publisher: hermes-mbs
+// Consumers: hermes-inbox (ingest), hermes-gateway (WS push), hermes-notify
+// ──────────────────────────────────────────────────────────────────
+
+// MbsInboundMessageEvent is published when a customer message arrives via
+// the Meta MQTToT broker. Mirrors WaInboundMessageEvent but for MBS sessions.
+message MbsInboundMessageEvent {
+  EventMeta meta = 1;
+  // Numeric BizApp uid (the page admin's FB user id).
+  int64 uid = 2;
+  // Page that received the message.
+  string page_id = 3;
+  // WhatsApp Business Engagement (WEC) mailbox id.
+  string wec_mailbox_id = 4;
+  // Conversation thread id (customer_id from BizInboxWhatsAppCustomerMutation).
+  string thread_id = 5;
+  // Server-assigned message id, e.g. "mid.$cAAAA...".
+  string mid = 6;
+  // Sender phone in E.164 minus leading + (e.g. "62812...").
+  string sender_phone = 7;
+  // Text body. Media is delivered separately (TBD).
+  string text = 8;
+  // Timestamp from Meta delta.
+  google.protobuf.Timestamp meta_timestamp = 9;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// hermes.mbs.message.outbound.{tenant_id}
+// Publisher: hermes-mbs
+// Consumers: hermes-inbox (status), hermes-campaign (delivery tracking)
+// ──────────────────────────────────────────────────────────────────
+
+// MbsOutboundEvent reports the result of a send attempt.
+message MbsOutboundEvent {
+  EventMeta meta = 1;
+  int64 uid = 2;
+  string thread_id = 3;
+  string mid = 4;
+  string otid = 5;                          // client-generated for delta correlation
+  int64 latency_ms = 6;
+  bool ok = 7;
+  string error = 8;                         // populated iff !ok
+  google.protobuf.Timestamp sent_at = 9;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// hermes.mbs.session.{state}.{tenant_id}
+// where {state} ∈ {created, connected, disconnected, burned, refreshed}
+// Publisher: hermes-mbs
+// Consumers: hermes-gateway (WS push), hermes-notify (burned only)
+// ──────────────────────────────────────────────────────────────────
+
+// MbsSessionLifecycleEvent fires on every session state transition.
+message MbsSessionLifecycleEvent {
+  EventMeta meta = 1;
+  int64 uid = 2;
+  MbsSessionState previous_state = 3;
+  MbsSessionState new_state = 4;
+  // Human-readable reason: "creds-refresh-overdue", "connack-rc-19", etc.
+  string reason = 5;
+  // Most recent CONNACK return code (0 = ok, 19 = bad device_id, etc.).
+  int32 last_connack_rc = 6;
+  // Which pod is/was the owner. Useful for K8s multi-pod debugging; in
+  // compose this is always the single static pod_id.
+  string pod_id = 7;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// hermes.mbs.send.campaign.{tenant_id}
+// Publisher: hermes-campaign
+// Consumer:  hermes-mbs
+// ──────────────────────────────────────────────────────────────────
+
+// MbsCampaignSendTask is a work item published by the campaign service for
+// hermes-mbs to process. Each task represents one message to one contact
+// on one MBS session. Sister to CampaignSendTask (WA).
+message MbsCampaignSendTask {
+  EventMeta meta = 1;
+  // Campaign this send belongs to.
+  string campaign_id = 2;
+  // Contact to send to.
+  string contact_id = 3;
+  // MBS session to send from.
+  int64 uid = 4;
+  // Pre-resolved thread id (campaign cache hit), or empty if hermes-mbs
+  // should resolve via BizInboxWhatsAppCustomerMutation.
+  string thread_id = 5;
+  // Recipient phone if thread_id empty. E.164 minus leading +.
+  string recipient_phone = 6;
+  // Resolved message body (spintax resolved, variables substituted).
+  string resolved_body = 7;
+  // Optional: which page to send from (multi-page accounts).
+  string page_id_override = 8;
+  // Idempotency key = campaign_id + contact_id (prevents double sends on retry).
+  string idempotency_key = 9;
 }

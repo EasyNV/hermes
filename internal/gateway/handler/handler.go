@@ -51,6 +51,7 @@ type Handler struct {
 	campaignClient hermesv1.HermesCampaignClient
 	inboxClient    hermesv1.HermesInboxClient
 	notifyClient   hermesv1.HermesNotifyClient
+	mbsClient      hermesv1.HermesMbsClient
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +71,7 @@ func New(
 	campaignClient hermesv1.HermesCampaignClient,
 	inboxClient hermesv1.HermesInboxClient,
 	notifyClient hermesv1.HermesNotifyClient,
+	mbsClient hermesv1.HermesMbsClient,
 ) *Handler {
 	return &Handler{
 		store:          store,
@@ -81,6 +83,7 @@ func New(
 		campaignClient: campaignClient,
 		inboxClient:    inboxClient,
 		notifyClient:   notifyClient,
+		mbsClient:      mbsClient,
 	}
 }
 

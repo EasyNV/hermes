@@ -323,11 +323,15 @@ func (m *mockInboxClient) ListConversations(ctx context.Context, req *hermesv1.I
 // ---------------------------------------------------------------------------
 
 func newTestHandler(s Store) *Handler {
-	return New(s, []byte("test-secret"), zerolog.Nop(), nil, nil, nil, nil, nil, nil)
+	return New(s, []byte("test-secret"), zerolog.Nop(), nil, nil, nil, nil, nil, nil, nil)
 }
 
 func newTestHandlerWithInbox(s Store, inbox hermesv1.HermesInboxClient) *Handler {
-	return New(s, []byte("test-secret"), zerolog.Nop(), nil, nil, nil, nil, inbox, nil)
+	return New(s, []byte("test-secret"), zerolog.Nop(), nil, nil, nil, nil, inbox, nil, nil)
+}
+
+func newTestHandlerWithMbs(s Store, mbs hermesv1.HermesMbsClient) *Handler {
+	return New(s, []byte("test-secret"), zerolog.Nop(), nil, nil, nil, nil, nil, nil, mbs)
 }
 
 // ---------------------------------------------------------------------------

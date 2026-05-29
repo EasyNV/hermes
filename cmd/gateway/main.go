@@ -77,11 +77,16 @@ func main() {
 	if c := dialService(cfg.NotifyAddr); c != nil {
 		notifyClient = hermesv1.NewHermesNotifyClient(c)
 	}
+	var mbsClient hermesv1.HermesMbsClient
+	if c := dialService(cfg.MbsAddr); c != nil {
+		mbsClient = hermesv1.NewHermesMbsClient(c)
+	}
 
 	// Handler
 	h := handler.New(
 		store, []byte(cfg.JWTSecret), log,
 		waClient, proxyClient, contactsClient, campaignClient, inboxClient, notifyClient,
+		mbsClient,
 	)
 
 	// gRPC server with auth + RBAC interceptors
