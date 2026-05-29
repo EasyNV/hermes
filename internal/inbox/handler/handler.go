@@ -168,6 +168,11 @@ func conversationRowToProto(r *ConversationRow) *hermesv1.Conversation {
 		ContactPhone:          r.ContactPhone,
 		LastMessagePreview:    r.LastMessagePreview,
 		UnreadCount:           r.UnreadCount,
+		// E3 chunk 2: channel + MBS keys.
+		Channel:       strToInboxChannel(r.Channel),
+		MbsSessionUid: r.MbsSessionUID,
+		MbsThreadId:   r.MbsThreadID,
+		MbsPageId:     r.MbsPageID,
 	}
 	if r.AssignedTo != nil {
 		c.AssignedTo = *r.AssignedTo
@@ -187,6 +192,8 @@ func messageRowToProto(m *MessageRow) *hermesv1.Message {
 		WaMessageId:    m.WaMessageID,
 		Status:         strToMessageStatus(m.Status),
 		CreatedAt:      timestamppb.New(m.CreatedAt),
+		// E3 chunk 2: Meta MID for MBS messages.
+		MbsMid: m.MbsMID,
 	}
 	if m.Body != nil {
 		msg.Body = *m.Body
@@ -201,6 +208,20 @@ func messageRowToProto(m *MessageRow) *hermesv1.Message {
 		msg.ResolvedVarsJson = *m.ResolvedVarsJSON
 	}
 	return msg
+}
+
+// strToInboxChannel maps the DB-side textual form ("wa" | "mbs") to
+// the proto enum. Unknown values map to UNSPECIFIED; the COALESCE on
+// the read side ensures we never see NULL.
+func strToInboxChannel(s string) hermesv1.InboxChannel {
+	switch s {
+	case "wa":
+		return hermesv1.InboxChannel_INBOX_CHANNEL_WA
+	case "mbs":
+		return hermesv1.InboxChannel_INBOX_CHANNEL_MBS
+	default:
+		return hermesv1.InboxChannel_INBOX_CHANNEL_UNSPECIFIED
+	}
 }
 
 func cannedRowToProto(r *CannedResponseRow) *hermesv1.CannedResponse {
@@ -264,6 +285,7 @@ func (h *Handler) ListConversations(ctx context.Context, req *hermesv1.InboxList
 		req.AssignedTo,
 		req.WaNumberId,
 		req.Search,
+		"", // E3 chunk 2: channel filter — exposed via proto in E3.5.
 		int32(req.SortOrder),
 		page, pageSize,
 	)

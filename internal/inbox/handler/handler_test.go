@@ -17,7 +17,7 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockStore struct {
-	listConversationsFn        func(ctx context.Context, workspaceID, status, assignedTo, waNumberID, search string, sortOrder int32, page, pageSize int32) ([]*ConversationRow, int64, error)
+	listConversationsFn        func(ctx context.Context, workspaceID, status, assignedTo, waNumberID, search, channel string, sortOrder int32, page, pageSize int32) ([]*ConversationRow, int64, error)
 	getConversationFn          func(ctx context.Context, id string) (*ConversationRow, error)
 	getConversationContactFn   func(ctx context.Context, contactID string) (*ContactRow, error)
 	getConversationWaNumberFn  func(ctx context.Context, waNumberID string) (*WaNumberRow, error)
@@ -49,11 +49,16 @@ type mockStore struct {
 	bulkAddToAllowlistFn       func(ctx context.Context, workspaceID string, phones []string, source, sourceID string) (int64, error)
 	removeFromAllowlistFn      func(ctx context.Context, workspaceID, phone string) error
 	listAllowlistFn            func(ctx context.Context, workspaceID string, page, pageSize int32) ([]AllowlistEntry, int64, error)
+	// E3 chunk 2: MBS channel parallels.
+	findOrCreateMbsConversationFn func(ctx context.Context, workspaceID, contactID, mbsSessionUID, mbsThreadID, mbsPageID string) (*ConversationRow, bool, error)
+	createMbsMessageFn            func(ctx context.Context, conversationID, direction, body, mbsMID string) (*MessageRow, error)
+	getMessageByMbsMIDFn          func(ctx context.Context, mbsMID string) (*MessageRow, error)
+	updateMbsMessageStatusFn      func(ctx context.Context, mbsMID, newStatus string) error
 }
 
-func (m *mockStore) ListConversations(ctx context.Context, workspaceID, st, assignedTo, waNumberID, search string, sortOrder int32, page, pageSize int32) ([]*ConversationRow, int64, error) {
+func (m *mockStore) ListConversations(ctx context.Context, workspaceID, st, assignedTo, waNumberID, search, channel string, sortOrder int32, page, pageSize int32) ([]*ConversationRow, int64, error) {
 	if m.listConversationsFn != nil {
-		return m.listConversationsFn(ctx, workspaceID, st, assignedTo, waNumberID, search, sortOrder, page, pageSize)
+		return m.listConversationsFn(ctx, workspaceID, st, assignedTo, waNumberID, search, channel, sortOrder, page, pageSize)
 	}
 	return nil, 0, fmt.Errorf("ListConversations not mocked")
 }
@@ -251,6 +256,64 @@ func (m *mockStore) ListAllowlist(ctx context.Context, workspaceID string, page,
 	return nil, 0, nil
 }
 
+// ── E3 chunk 2: MBS channel parallels ─────────────────────────────
+
+func (m *mockStore) FindOrCreateMbsConversation(ctx context.Context, workspaceID, contactID, mbsSessionUID, mbsThreadID, mbsPageID string) (*ConversationRow, bool, error) {
+	if m.findOrCreateMbsConversationFn != nil {
+		return m.findOrCreateMbsConversationFn(ctx, workspaceID, contactID, mbsSessionUID, mbsThreadID, mbsPageID)
+	}
+	return &ConversationRow{
+		ID:            "mbs-conv-1",
+		WorkspaceID:   workspaceID,
+		ContactID:     contactID,
+		Channel:       "mbs",
+		MbsSessionUID: mbsSessionUID,
+		MbsThreadID:   mbsThreadID,
+		MbsPageID:     mbsPageID,
+		Status:        "unassigned",
+		CreatedAt:     time.Now(),
+		LastMessageAt: time.Now(),
+	}, true, nil
+}
+
+func (m *mockStore) CreateMbsMessage(ctx context.Context, conversationID, direction, body, mbsMID string) (*MessageRow, error) {
+	if m.createMbsMessageFn != nil {
+		return m.createMbsMessageFn(ctx, conversationID, direction, body, mbsMID)
+	}
+	var bodyPtr *string
+	if body != "" {
+		bodyPtr = &body
+	}
+	initial := "pending"
+	if direction == "inbound" {
+		initial = "delivered"
+	}
+	return &MessageRow{
+		ID:             "mbs-msg-1",
+		ConversationID: conversationID,
+		Direction:      direction,
+		ContentType:    "text",
+		Body:           bodyPtr,
+		MbsMID:         mbsMID,
+		Status:         initial,
+		CreatedAt:      time.Now(),
+	}, nil
+}
+
+func (m *mockStore) GetMessageByMbsMID(ctx context.Context, mbsMID string) (*MessageRow, error) {
+	if m.getMessageByMbsMIDFn != nil {
+		return m.getMessageByMbsMIDFn(ctx, mbsMID)
+	}
+	return nil, ErrNotFound
+}
+
+func (m *mockStore) UpdateMbsMessageStatus(ctx context.Context, mbsMID, newStatus string) error {
+	if m.updateMbsMessageStatusFn != nil {
+		return m.updateMbsMessageStatusFn(ctx, mbsMID, newStatus)
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
@@ -304,7 +367,7 @@ func TestListConversations(t *testing.T) {
 			name: "success returns conversations",
 			req:  &hermesv1.InboxListConversationsRequest{WorkspaceId: "ws-1"},
 			store: &mockStore{
-				listConversationsFn: func(_ context.Context, _, _, _, _, _ string, _ int32, _, _ int32) ([]*ConversationRow, int64, error) {
+				listConversationsFn: func(_ context.Context, _, _, _, _, _, _ string, _ int32, _, _ int32) ([]*ConversationRow, int64, error) {
 					return []*ConversationRow{testConversation("unassigned")}, 1, nil
 				},
 			},
@@ -315,7 +378,7 @@ func TestListConversations(t *testing.T) {
 			name: "empty result",
 			req:  &hermesv1.InboxListConversationsRequest{WorkspaceId: "ws-1"},
 			store: &mockStore{
-				listConversationsFn: func(_ context.Context, _, _, _, _, _ string, _ int32, _, _ int32) ([]*ConversationRow, int64, error) {
+				listConversationsFn: func(_ context.Context, _, _, _, _, _, _ string, _ int32, _, _ int32) ([]*ConversationRow, int64, error) {
 					return nil, 0, nil
 				},
 			},
@@ -978,5 +1041,99 @@ func TestGetContactCampaignHistory(t *testing.T) {
 				t.Fatalf("expected %d campaigns, got %d", tc.wantLen, len(resp.Campaigns))
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// E3 chunk 2: row-to-proto channel/MBS field projection + helper unit tests
+// ---------------------------------------------------------------------------
+
+func TestStrToInboxChannel(t *testing.T) {
+	tests := []struct {
+		in   string
+		want hermesv1.InboxChannel
+	}{
+		{"wa", hermesv1.InboxChannel_INBOX_CHANNEL_WA},
+		{"mbs", hermesv1.InboxChannel_INBOX_CHANNEL_MBS},
+		{"", hermesv1.InboxChannel_INBOX_CHANNEL_UNSPECIFIED},
+		{"unknown", hermesv1.InboxChannel_INBOX_CHANNEL_UNSPECIFIED},
+	}
+	for _, tc := range tests {
+		got := strToInboxChannel(tc.in)
+		if got != tc.want {
+			t.Errorf("strToInboxChannel(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestConversationRowToProto_MbsChannel(t *testing.T) {
+	r := &ConversationRow{
+		ID:            "conv-1",
+		WorkspaceID:   "ws-1",
+		ContactID:     "ct-1",
+		WaNumberID:    "",
+		Status:        "unassigned",
+		LastMessageAt: time.Now(),
+		CreatedAt:     time.Now(),
+		Channel:       "mbs",
+		MbsSessionUID: "1674772559",
+		MbsThreadID:   "thr-abc12",
+		MbsPageID:     "page-xy12",
+	}
+	p := conversationRowToProto(r)
+	if p.Channel != hermesv1.InboxChannel_INBOX_CHANNEL_MBS {
+		t.Errorf("Channel: got %v want MBS", p.Channel)
+	}
+	if p.MbsSessionUid != "1674772559" {
+		t.Errorf("MbsSessionUid: got %q", p.MbsSessionUid)
+	}
+	if p.MbsThreadId != "thr-abc12" {
+		t.Errorf("MbsThreadId: got %q", p.MbsThreadId)
+	}
+	if p.MbsPageId != "page-xy12" {
+		t.Errorf("MbsPageId: got %q", p.MbsPageId)
+	}
+	if p.WaNumberId != "" {
+		t.Errorf("WaNumberId should be empty for MBS channel: got %q", p.WaNumberId)
+	}
+}
+
+func TestConversationRowToProto_WaChannel_LeavesMbsFieldsEmpty(t *testing.T) {
+	r := &ConversationRow{
+		ID:            "conv-2",
+		WorkspaceID:   "ws-1",
+		ContactID:     "ct-2",
+		WaNumberID:    "wa-1",
+		Status:        "assigned",
+		LastMessageAt: time.Now(),
+		CreatedAt:     time.Now(),
+		Channel:       "wa",
+	}
+	p := conversationRowToProto(r)
+	if p.Channel != hermesv1.InboxChannel_INBOX_CHANNEL_WA {
+		t.Errorf("Channel: got %v want WA", p.Channel)
+	}
+	if p.MbsSessionUid != "" || p.MbsThreadId != "" || p.MbsPageId != "" {
+		t.Errorf("MBS fields should be empty for WA: %+v / %+v / %+v",
+			p.MbsSessionUid, p.MbsThreadId, p.MbsPageId)
+	}
+	if p.WaNumberId != "wa-1" {
+		t.Errorf("WaNumberId: got %q", p.WaNumberId)
+	}
+}
+
+func TestMessageRowToProto_CarriesMbsMid(t *testing.T) {
+	m := &MessageRow{
+		ID:             "msg-1",
+		ConversationID: "conv-1",
+		Direction:      "inbound",
+		ContentType:    "text",
+		Status:         "delivered",
+		CreatedAt:      time.Now(),
+		MbsMID:         "mid.$cAAAA_test",
+	}
+	p := messageRowToProto(m)
+	if p.MbsMid != "mid.$cAAAA_test" {
+		t.Errorf("MbsMid: got %q want mid.$cAAAA_test", p.MbsMid)
 	}
 }

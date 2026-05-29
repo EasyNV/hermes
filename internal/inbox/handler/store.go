@@ -38,6 +38,13 @@ type ConversationRow struct {
 	ContactPhone       string
 	LastMessagePreview string
 	UnreadCount        int32
+	// E3 chunk 2: channel discriminator + MBS-specific keys.
+	// Channel is the textual form: "wa" or "mbs" (matches DB CHECK
+	// constraint). Empty defaults to "wa" via COALESCE on read.
+	Channel       string
+	MbsSessionUID string // populated when Channel == "mbs"
+	MbsThreadID   string
+	MbsPageID     string
 }
 
 type MessageRow struct {
@@ -52,6 +59,8 @@ type MessageRow struct {
 	WaMessageID      string
 	Status           string
 	CreatedAt        time.Time
+	// E3 chunk 2: Meta MID for MBS messages (empty for WA).
+	MbsMID string
 }
 
 type CannedResponseRow struct {
@@ -112,7 +121,8 @@ type AgentPerfRow struct {
 
 type Store interface {
 	// Conversations
-	ListConversations(ctx context.Context, workspaceID, status, assignedTo, waNumberID, search string, sortOrder int32, page, pageSize int32) ([]*ConversationRow, int64, error)
+	// E3 chunk 2: ListConversations gains `channel` filter ("" = both).
+	ListConversations(ctx context.Context, workspaceID, status, assignedTo, waNumberID, search, channel string, sortOrder int32, page, pageSize int32) ([]*ConversationRow, int64, error)
 	GetConversation(ctx context.Context, id string) (*ConversationRow, error)
 	GetConversationContact(ctx context.Context, contactID string) (*ContactRow, error)
 	GetConversationWaNumber(ctx context.Context, waNumberID string) (*WaNumberRow, error)
@@ -132,6 +142,14 @@ type Store interface {
 	ReopenConversation(ctx context.Context, id string) error
 	UpdateLastMessage(ctx context.Context, conversationID string, preview string) error
 	SetFirstResponseTime(ctx context.Context, conversationID string, secs int32) error
+
+	// E3 chunk 2: MBS channel parallels for the inbox-service MBS
+	// inbound consumer (E3.3), send routing (E3.4), and outbound
+	// status reconciliation (E3.4). All additive — WA paths untouched.
+	FindOrCreateMbsConversation(ctx context.Context, workspaceID, contactID, mbsSessionUID, mbsThreadID, mbsPageID string) (*ConversationRow, bool, error)
+	CreateMbsMessage(ctx context.Context, conversationID, direction, body, mbsMID string) (*MessageRow, error)
+	GetMessageByMbsMID(ctx context.Context, mbsMID string) (*MessageRow, error)
+	UpdateMbsMessageStatus(ctx context.Context, mbsMID, newStatus string) error
 
 	// Contact lookup (cross-service read)
 	FindContactByPhone(ctx context.Context, phone string) (*ContactRow, string, error) // returns contact + tenantID
@@ -176,7 +194,7 @@ func NewPgStore(pool *pgxpool.Pool) *PgStore {
 // Conversations
 // ---------------------------------------------------------------------------
 
-func (s *PgStore) ListConversations(ctx context.Context, workspaceID, statusFilter, assignedTo, waNumberID, search string, sortOrder int32, page, pageSize int32) ([]*ConversationRow, int64, error) {
+func (s *PgStore) ListConversations(ctx context.Context, workspaceID, statusFilter, assignedTo, waNumberID, search, channel string, sortOrder int32, page, pageSize int32) ([]*ConversationRow, int64, error) {
 	where := "WHERE c.workspace_id = $1"
 	args := []any{workspaceID}
 	idx := 2
@@ -199,6 +217,12 @@ func (s *PgStore) ListConversations(ctx context.Context, workspaceID, statusFilt
 	if search != "" {
 		where += fmt.Sprintf(" AND (ct.name ILIKE $%d OR ct.phone ILIKE $%d)", idx, idx)
 		args = append(args, "%"+search+"%")
+		idx++
+	}
+	// E3 chunk 2: optional channel filter ("wa" | "mbs"; "" = both).
+	if channel != "" {
+		where += fmt.Sprintf(" AND c.channel = $%d", idx)
+		args = append(args, channel)
 		idx++
 	}
 
@@ -227,11 +251,15 @@ func (s *PgStore) ListConversations(ctx context.Context, workspaceID, statusFilt
 
 	offset := (page - 1) * pageSize
 	query := fmt.Sprintf(`
-		SELECT c.id, c.workspace_id, c.contact_id, c.wa_number_id, c.assigned_to,
+		SELECT c.id, c.workspace_id, c.contact_id, COALESCE(c.wa_number_id, ''), c.assigned_to,
 		       c.status, c.last_message_at, c.campaign_id, c.first_response_time_secs, c.created_at,
 		       COALESCE(ct.name, ''), COALESCE(ct.phone, ''),
 		       COALESCE((SELECT LEFT(body, 100) FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1), ''),
-		       COALESCE((SELECT COUNT(*)::int FROM messages WHERE conversation_id = c.id AND direction = 'inbound' AND status = 'pending'), 0)
+		       COALESCE((SELECT COUNT(*)::int FROM messages WHERE conversation_id = c.id AND direction = 'inbound' AND status = 'pending'), 0),
+		       COALESCE(c.channel, 'wa'),
+		       COALESCE(c.mbs_session_uid, ''),
+		       COALESCE(c.mbs_thread_id, ''),
+		       COALESCE(c.mbs_page_id, '')
 		FROM conversations c
 		LEFT JOIN contacts ct ON ct.id = c.contact_id
 		%s
@@ -253,6 +281,7 @@ func (s *PgStore) ListConversations(ctx context.Context, workspaceID, statusFilt
 			&r.Status, &r.LastMessageAt, &r.CampaignID, &r.FirstResponseTimeSecs, &r.CreatedAt,
 			&r.ContactName, &r.ContactPhone,
 			&r.LastMessagePreview, &r.UnreadCount,
+			&r.Channel, &r.MbsSessionUID, &r.MbsThreadID, &r.MbsPageID,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scanning conversation: %w", err)
 		}
@@ -264,9 +293,13 @@ func (s *PgStore) ListConversations(ctx context.Context, workspaceID, statusFilt
 func (s *PgStore) GetConversation(ctx context.Context, id string) (*ConversationRow, error) {
 	r := &ConversationRow{}
 	err := s.pool.QueryRow(ctx, `
-		SELECT c.id, c.workspace_id, c.contact_id, c.wa_number_id, c.assigned_to,
+		SELECT c.id, c.workspace_id, c.contact_id, COALESCE(c.wa_number_id, ''), c.assigned_to,
 		       c.status, c.last_message_at, c.campaign_id, c.first_response_time_secs, c.created_at,
-		       COALESCE(ct.name, ''), COALESCE(ct.phone, ''), '', 0
+		       COALESCE(ct.name, ''), COALESCE(ct.phone, ''), '', 0,
+		       COALESCE(c.channel, 'wa'),
+		       COALESCE(c.mbs_session_uid, ''),
+		       COALESCE(c.mbs_thread_id, ''),
+		       COALESCE(c.mbs_page_id, '')
 		FROM conversations c
 		LEFT JOIN contacts ct ON ct.id = c.contact_id
 		WHERE c.id = $1`, id).Scan(
@@ -274,6 +307,7 @@ func (s *PgStore) GetConversation(ctx context.Context, id string) (*Conversation
 		&r.Status, &r.LastMessageAt, &r.CampaignID, &r.FirstResponseTimeSecs, &r.CreatedAt,
 		&r.ContactName, &r.ContactPhone,
 		&r.LastMessagePreview, &r.UnreadCount,
+		&r.Channel, &r.MbsSessionUID, &r.MbsThreadID, &r.MbsPageID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -411,14 +445,16 @@ func (s *PgStore) ListMessages(ctx context.Context, conversationID, beforeMessag
 	if beforeMessageID == "" {
 		query = fmt.Sprintf(`
 			SELECT id, conversation_id, direction, content_type, body, media_url,
-			       template_id, resolved_vars_json, wa_message_id, status, created_at
+			       template_id, resolved_vars_json, wa_message_id, status, created_at,
+			       COALESCE(mbs_mid, '')
 			FROM messages %s
 			ORDER BY created_at DESC
 			LIMIT $%d OFFSET $%d`, where, idx, idx+1)
 	} else {
 		query = fmt.Sprintf(`
 			SELECT id, conversation_id, direction, content_type, body, media_url,
-			       template_id, resolved_vars_json, wa_message_id, status, created_at
+			       template_id, resolved_vars_json, wa_message_id, status, created_at,
+			       COALESCE(mbs_mid, '')
 			FROM messages %s
 			ORDER BY created_at DESC
 			LIMIT $%d`, where, idx)
@@ -436,6 +472,7 @@ func (s *PgStore) ListMessages(ctx context.Context, conversationID, beforeMessag
 		if err := rows.Scan(
 			&m.ID, &m.ConversationID, &m.Direction, &m.ContentType, &m.Body, &m.MediaURL,
 			&m.TemplateID, &m.ResolvedVarsJSON, &m.WaMessageID, &m.Status, &m.CreatedAt,
+			&m.MbsMID,
 		); err != nil {
 			return nil, false, 0, fmt.Errorf("scanning message: %w", err)
 		}
@@ -456,11 +493,13 @@ func (s *PgStore) CreateMessage(ctx context.Context, conversationID, direction, 
 		INSERT INTO messages (conversation_id, direction, content_type, body, media_url, wa_message_id, status)
 		VALUES ($1, $2, $3, $4, $5, $6, 'pending')
 		RETURNING id, conversation_id, direction, content_type, body, media_url,
-		          template_id, resolved_vars_json, wa_message_id, status, created_at`,
+		          template_id, resolved_vars_json, wa_message_id, status, created_at,
+		          COALESCE(mbs_mid, '')`,
 		conversationID, direction, contentType, body, mediaURL, waMessageID,
 	).Scan(
 		&m.ID, &m.ConversationID, &m.Direction, &m.ContentType, &m.Body, &m.MediaURL,
 		&m.TemplateID, &m.ResolvedVarsJSON, &m.WaMessageID, &m.Status, &m.CreatedAt,
+		&m.MbsMID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating message: %w", err)
@@ -504,6 +543,7 @@ func (s *PgStore) SearchMessages(ctx context.Context, workspaceID, query, conver
 	searchQuery := fmt.Sprintf(`
 		SELECT m.id, m.conversation_id, m.direction, m.content_type, m.body, m.media_url,
 		       m.template_id, m.resolved_vars_json, m.wa_message_id, m.status, m.created_at,
+		       COALESCE(m.mbs_mid, ''),
 		       c.id, COALESCE(ct.name, ''), COALESCE(ct.phone, ''),
 		       ts_headline('simple', COALESCE(m.body, ''), plainto_tsquery('simple', $2),
 		           'StartSel=<mark>, StopSel=</mark>, MaxWords=35, MinWords=15')
@@ -527,6 +567,7 @@ func (s *PgStore) SearchMessages(ctx context.Context, workspaceID, query, conver
 		if err := rows.Scan(
 			&h.ID, &h.MessageRow.ConversationID, &h.Direction, &h.ContentType, &h.Body, &h.MediaURL,
 			&h.TemplateID, &h.ResolvedVarsJSON, &h.WaMessageID, &h.Status, &h.MessageRow.CreatedAt,
+			&h.MbsMID,
 			&h.ConversationID, &h.ContactName, &h.ContactPhone, &h.Highlight,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scanning search hit: %w", err)
@@ -554,11 +595,13 @@ func (s *PgStore) GetMessageByWaMessageID(ctx context.Context, waMessageID strin
 	m := &MessageRow{}
 	err := s.pool.QueryRow(ctx, `
 		SELECT id, conversation_id, direction, content_type, body, media_url,
-		       template_id, resolved_vars_json, wa_message_id, status, created_at
+		       template_id, resolved_vars_json, wa_message_id, status, created_at,
+		       COALESCE(mbs_mid, '')
 		FROM messages WHERE wa_message_id = $1 AND wa_message_id != ''`, waMessageID,
 	).Scan(
 		&m.ID, &m.ConversationID, &m.Direction, &m.ContentType, &m.Body, &m.MediaURL,
 		&m.TemplateID, &m.ResolvedVarsJSON, &m.WaMessageID, &m.Status, &m.CreatedAt,
+		&m.MbsMID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -575,30 +618,36 @@ func (s *PgStore) GetMessageByWaMessageID(ctx context.Context, waMessageID strin
 
 func (s *PgStore) FindOrCreateConversation(ctx context.Context, workspaceID, contactID, waNumberID string, campaignID *string) (*ConversationRow, bool, error) {
 	r := &ConversationRow{}
-	// Try insert; on conflict return the existing row.
+	// E3 chunk 2: ON CONFLICT target now references the partial unique
+	// index uq_conversations_wa (workspace_id, contact_id, wa_number_id)
+	// WHERE channel = 'wa'. Postgres requires the same WHERE clause on
+	// the conflict_target for partial-index inference. INSERT explicitly
+	// sets channel='wa' for clarity (default would do it too).
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO conversations (workspace_id, contact_id, wa_number_id, campaign_id, status, last_message_at)
-		VALUES ($1, $2, $3, $4, 'unassigned', now())
-		ON CONFLICT (workspace_id, contact_id, wa_number_id) DO UPDATE SET last_message_at = now()
-		RETURNING id, workspace_id, contact_id, wa_number_id, assigned_to,
+		INSERT INTO conversations (workspace_id, contact_id, wa_number_id, campaign_id, channel, status, last_message_at)
+		VALUES ($1, $2, $3, $4, 'wa', 'unassigned', now())
+		ON CONFLICT (workspace_id, contact_id, wa_number_id) WHERE channel = 'wa'
+		DO UPDATE SET last_message_at = now()
+		RETURNING id, workspace_id, contact_id, COALESCE(wa_number_id, ''), assigned_to,
 		          status, last_message_at, campaign_id, first_response_time_secs, created_at,
-		          (xmax = 0)`,
+		          COALESCE(channel, 'wa'),
+		          COALESCE(mbs_session_uid, ''),
+		          COALESCE(mbs_thread_id, ''),
+		          COALESCE(mbs_page_id, '')`,
 		workspaceID, contactID, waNumberID, campaignID,
 	).Scan(
 		&r.ID, &r.WorkspaceID, &r.ContactID, &r.WaNumberID, &r.AssignedTo,
 		&r.Status, &r.LastMessageAt, &r.CampaignID, &r.FirstResponseTimeSecs, &r.CreatedAt,
-		new(bool), // isNew — captured via xmax trick
+		&r.Channel, &r.MbsSessionUID, &r.MbsThreadID, &r.MbsPageID,
 	)
 	if err != nil {
 		return nil, false, fmt.Errorf("upserting conversation: %w", err)
 	}
 
-	// xmax = 0 means the row was freshly inserted.
-	// We re-query to detect this reliably via the RETURNING clause.
-	// Actually, let's use a simpler approach: check created_at proximity.
-	// The ON CONFLICT path doesn't update created_at, so a freshly inserted row
-	// has created_at very close to now(). For our NATS consumer, "isNew" matters
-	// for deciding whether to send a notification. We use a separate approach:
+	// The ON CONFLICT path doesn't update created_at, so a freshly
+	// inserted row has created_at very close to now(). For our NATS
+	// consumer, "isNew" matters for deciding whether to send a
+	// notification.
 	isNew := r.CreatedAt.After(time.Now().Add(-2 * time.Second))
 
 	return r, isNew, nil
@@ -621,6 +670,138 @@ func (s *PgStore) SetFirstResponseTime(ctx context.Context, conversationID strin
 		"UPDATE conversations SET first_response_time_secs = $2 WHERE id = $1 AND first_response_time_secs = 0",
 		conversationID, secs)
 	return err
+}
+
+// ---------------------------------------------------------------------------
+// E3 chunk 2: MBS channel parallels
+// ---------------------------------------------------------------------------
+
+// FindOrCreateMbsConversation upserts a Conversation row for an MBS
+// thread keyed by (workspace_id, mbs_session_uid, mbs_thread_id) via
+// the partial unique index uq_conversations_mbs.
+func (s *PgStore) FindOrCreateMbsConversation(
+	ctx context.Context,
+	workspaceID, contactID, mbsSessionUID, mbsThreadID, mbsPageID string,
+) (*ConversationRow, bool, error) {
+	if mbsSessionUID == "" || mbsThreadID == "" {
+		return nil, false, fmt.Errorf("FindOrCreateMbsConversation: mbsSessionUID and mbsThreadID required")
+	}
+	r := &ConversationRow{}
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO conversations
+		  (workspace_id, contact_id, channel,
+		   mbs_session_uid, mbs_thread_id, mbs_page_id,
+		   status, last_message_at)
+		VALUES ($1, $2, 'mbs', $3, $4, $5, 'unassigned', now())
+		ON CONFLICT (workspace_id, mbs_session_uid, mbs_thread_id) WHERE channel = 'mbs'
+		DO UPDATE SET last_message_at = now(),
+		              mbs_page_id = COALESCE(NULLIF(EXCLUDED.mbs_page_id, ''), conversations.mbs_page_id)
+		RETURNING id, workspace_id, contact_id,
+		          COALESCE(wa_number_id, ''), assigned_to,
+		          status, last_message_at, campaign_id,
+		          first_response_time_secs, created_at,
+		          COALESCE(channel, 'mbs'),
+		          COALESCE(mbs_session_uid, ''),
+		          COALESCE(mbs_thread_id, ''),
+		          COALESCE(mbs_page_id, '')`,
+		workspaceID, contactID, mbsSessionUID, mbsThreadID, mbsPageID,
+	).Scan(
+		&r.ID, &r.WorkspaceID, &r.ContactID, &r.WaNumberID, &r.AssignedTo,
+		&r.Status, &r.LastMessageAt, &r.CampaignID, &r.FirstResponseTimeSecs,
+		&r.CreatedAt,
+		&r.Channel, &r.MbsSessionUID, &r.MbsThreadID, &r.MbsPageID,
+	)
+	if err != nil {
+		return nil, false, fmt.Errorf("upserting mbs conversation: %w", err)
+	}
+	isNew := r.CreatedAt.After(time.Now().Add(-2 * time.Second))
+	return r, isNew, nil
+}
+
+// CreateMbsMessage inserts a TEXT message for the given conversation,
+// keyed on mbs_mid (Meta MID). Inbound messages start at 'delivered'
+// (Meta wouldn't have delivered them otherwise); outbound start at
+// 'pending' and reconcile via the chunk-4 outbound consumer.
+func (s *PgStore) CreateMbsMessage(
+	ctx context.Context,
+	conversationID, direction, body, mbsMID string,
+) (*MessageRow, error) {
+	if mbsMID == "" {
+		return nil, fmt.Errorf("CreateMbsMessage: mbsMID required")
+	}
+	var bodyPtr *string
+	if body != "" {
+		bodyPtr = &body
+	}
+	initial := "pending"
+	if direction == "inbound" {
+		initial = "delivered"
+	}
+	m := &MessageRow{}
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO messages
+		  (conversation_id, direction, content_type, body, mbs_mid, status)
+		VALUES ($1, $2, 'text', $3, $4, $5)
+		RETURNING id, conversation_id, direction, content_type, body, media_url,
+		          template_id, resolved_vars_json, wa_message_id, status, created_at,
+		          COALESCE(mbs_mid, '')`,
+		conversationID, direction, bodyPtr, mbsMID, initial,
+	).Scan(
+		&m.ID, &m.ConversationID, &m.Direction, &m.ContentType, &m.Body, &m.MediaURL,
+		&m.TemplateID, &m.ResolvedVarsJSON, &m.WaMessageID, &m.Status, &m.CreatedAt,
+		&m.MbsMID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating mbs message: %w", err)
+	}
+	return m, nil
+}
+
+// GetMessageByMbsMID looks up a message by its Meta MID. Skips rows
+// with empty mbs_mid via the WHERE guard so the partial index is hit.
+func (s *PgStore) GetMessageByMbsMID(ctx context.Context, mbsMID string) (*MessageRow, error) {
+	if mbsMID == "" {
+		return nil, ErrNotFound
+	}
+	m := &MessageRow{}
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, conversation_id, direction, content_type, body, media_url,
+		       template_id, resolved_vars_json, wa_message_id, status, created_at,
+		       COALESCE(mbs_mid, '')
+		FROM messages WHERE mbs_mid = $1 AND mbs_mid != ''`, mbsMID,
+	).Scan(
+		&m.ID, &m.ConversationID, &m.Direction, &m.ContentType, &m.Body, &m.MediaURL,
+		&m.TemplateID, &m.ResolvedVarsJSON, &m.WaMessageID, &m.Status, &m.CreatedAt,
+		&m.MbsMID,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting message by mbs_mid: %w", err)
+	}
+	return m, nil
+}
+
+// UpdateMbsMessageStatus transitions a message identified by Meta MID
+// to newStatus. Returns ErrNotFound if no row matches (caller decides
+// whether that's a real error or expected — e.g., outbound consumer
+// for a manual-send message that was never persisted).
+func (s *PgStore) UpdateMbsMessageStatus(ctx context.Context, mbsMID, newStatus string) error {
+	if mbsMID == "" {
+		return ErrNotFound
+	}
+	tag, err := s.pool.Exec(ctx,
+		"UPDATE messages SET status = $2 WHERE mbs_mid = $1 AND mbs_mid != ''",
+		mbsMID, newStatus,
+	)
+	if err != nil {
+		return fmt.Errorf("updating mbs message status: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
