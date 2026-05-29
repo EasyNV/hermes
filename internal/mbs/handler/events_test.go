@@ -74,7 +74,7 @@ func TestEvents_InboundSubject(t *testing.T) {
 
 func TestEvents_OutboundSubject(t *testing.T) {
 	p, js := newRecordingPublisher(t)
-	p.PublishOutbound(100, "tenant-B", "thread-1", "mid.$y", "otid-1", 42, true, "", time.Now())
+	p.PublishOutbound(100, "tenant-B", "thread-1", "mid.$y", "otid-1", 42, true, "", time.Now(), nil)
 
 	if js.last().subject != "hermes.mbs.message.outbound.tenant-B" {
 		t.Errorf("subject: got %q", js.last().subject)
@@ -123,7 +123,7 @@ func TestEvents_LifecycleStateMap(t *testing.T) {
 func TestEvents_EmptyTenantSkipped(t *testing.T) {
 	p, js := newRecordingPublisher(t)
 	p.PublishInboundMessage(100, "", "p", "m", "t", "mid", "62", "hi", time.Now())
-	p.PublishOutbound(100, "", "t", "mid", "otid", 1, true, "", time.Now())
+	p.PublishOutbound(100, "", "t", "mid", "otid", 1, true, "", time.Now(), nil)
 	p.PublishSessionLifecycle(100, "",
 		hermesv1.MbsSessionState_MBS_SESSION_STATE_UNSPECIFIED,
 		hermesv1.MbsSessionState_MBS_SESSION_STATE_ACTIVE,
@@ -151,7 +151,7 @@ func TestEvents_NopPublisherImplementsInterface(t *testing.T) {
 	var p EventPublisher = NopPublisher{}
 	// Just ensure call paths don't panic.
 	p.PublishInboundMessage(0, "t", "", "", "", "", "", "", time.Time{})
-	p.PublishOutbound(0, "t", "", "", "", 0, true, "", time.Time{})
+	p.PublishOutbound(0, "t", "", "", "", 0, true, "", time.Time{}, nil)
 	p.PublishSessionLifecycle(0, "t",
 		hermesv1.MbsSessionState_MBS_SESSION_STATE_UNSPECIFIED,
 		hermesv1.MbsSessionState_MBS_SESSION_STATE_ACTIVE, "", 0, "")

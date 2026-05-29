@@ -28,7 +28,7 @@ import (
 // never publish lifecycle events (transient/in-process).
 type EventPublisher interface {
 	PublishInboundMessage(uid int64, tenantID, pageID, mailboxID, threadID, mid, senderPhone, text string, metaTs time.Time)
-	PublishOutbound(uid int64, tenantID, threadID, mid, otid string, latencyMs int64, ok bool, errMsg string, sentAt time.Time)
+	PublishOutbound(uid int64, tenantID, threadID, mid, otid string, latencyMs int64, ok bool, errMsg string, sentAt time.Time, clientDedupeID []byte)
 	PublishSessionLifecycle(uid int64, tenantID string, prev, next hermesv1.MbsSessionState, reason string, connackRC int32, podID string)
 }
 
@@ -106,22 +106,23 @@ func (p *natsEventPublisher) PublishInboundMessage(uid int64, tenantID, pageID, 
 	p.publish(fmt.Sprintf("hermes.mbs.message.inbound.%s", tenantID), meta.EventId, event)
 }
 
-func (p *natsEventPublisher) PublishOutbound(uid int64, tenantID, threadID, mid, otid string, latencyMs int64, ok bool, errMsg string, sentAt time.Time) {
+func (p *natsEventPublisher) PublishOutbound(uid int64, tenantID, threadID, mid, otid string, latencyMs int64, ok bool, errMsg string, sentAt time.Time, clientDedupeID []byte) {
 	if tenantID == "" {
 		p.log.Warn().Int64("uid", uid).Str("mid", mid).Msg("mbs publisher: skip outbound — missing tenant_id")
 		return
 	}
 	meta := p.meta(tenantID)
 	event := &hermesv1.MbsOutboundEvent{
-		Meta:      meta,
-		Uid:       uid,
-		ThreadId:  threadID,
-		Mid:       mid,
-		Otid:      otid,
-		LatencyMs: latencyMs,
-		Ok:        ok,
-		Error:     errMsg,
-		SentAt:    timestamppb.New(sentAt),
+		Meta:           meta,
+		Uid:            uid,
+		ThreadId:       threadID,
+		Mid:            mid,
+		Otid:           otid,
+		LatencyMs:      latencyMs,
+		Ok:             ok,
+		Error:          errMsg,
+		SentAt:         timestamppb.New(sentAt),
+		ClientDedupeId: clientDedupeID,
 	}
 	p.publish(fmt.Sprintf("hermes.mbs.message.outbound.%s", tenantID), meta.EventId, event)
 }
@@ -179,7 +180,7 @@ type NopPublisher struct{}
 
 func (NopPublisher) PublishInboundMessage(int64, string, string, string, string, string, string, string, time.Time) {
 }
-func (NopPublisher) PublishOutbound(int64, string, string, string, string, int64, bool, string, time.Time) {
+func (NopPublisher) PublishOutbound(int64, string, string, string, string, int64, bool, string, time.Time, []byte) {
 }
 func (NopPublisher) PublishSessionLifecycle(int64, string, hermesv1.MbsSessionState, hermesv1.MbsSessionState, string, int32, string) {
 }

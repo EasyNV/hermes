@@ -61,6 +61,9 @@ func main() {
 	if err := startMbsInboundConsumer(js, store, log); err != nil {
 		log.Fatal().Err(err).Msg("failed to start MBS inbound consumer")
 	}
+	if err := startMbsOutboundConsumer(js, store, log); err != nil {
+		log.Fatal().Err(err).Msg("failed to start MBS outbound consumer")
+	}
 
 	// gRPC server
 	h := handler.New(store, js, log)
@@ -500,6 +503,148 @@ func processMbsInbound(
 		Str("mid", event.Mid).
 		Int64("uid", event.Uid).
 		Msg("processed MBS inbound message")
+	return true
+}
+
+// startMbsOutboundConsumer subscribes to hermes.mbs.message.outbound.*
+// and reconciles message status by client_dedupe_id (= local msg.ID
+// stamped during SendMessage's MBS branch).
+//
+// Flow:
+//   - On success (ok=true, mid set): SetMbsMID(otid=msg.ID, mid) then
+//     UpdateMbsMessageStatus(mid, "sent"). Forward-transition guarded.
+//   - On failure before mid (ok=false, mid==""): MarkOutboundFailedByID(msg.ID).
+//   - On failure with mid (ok=false, mid set): SetMbsMID first, then
+//     UpdateMbsMessageStatus(mid, "failed").
+func startMbsOutboundConsumer(js natsgo.JetStreamContext, store handler.Store, log zerolog.Logger) error {
+	_, err := js.Subscribe("hermes.mbs.message.outbound.*", func(msg *natsgo.Msg) {
+		var event hermesv1.MbsOutboundEvent
+		if err := proto.Unmarshal(msg.Data, &event); err != nil {
+			log.Error().Err(err).Msg("failed to unmarshal MBS outbound event")
+			msg.Ack() // poison pill
+			return
+		}
+
+		if processMbsOutbound(context.Background(), store, log, &event) {
+			msg.Ack()
+		} else {
+			msg.Nak()
+		}
+	},
+		natsgo.Durable("inbox-mbs-outbound"),
+		natsgo.ManualAck(),
+		natsgo.AckWait(30*time.Second),
+		natsgo.MaxDeliver(5),
+	)
+	if err != nil {
+		return fmt.Errorf("subscribing to MBS outbound events: %w", err)
+	}
+
+	log.Info().Str("subject", "hermes.mbs.message.outbound.*").Msg("MBS outbound status consumer started")
+	return nil
+}
+
+// processMbsOutbound handles the DB side of MBS outbound reconciliation.
+// Returns true → ACK; false → NAK.
+//
+// Correlation key is event.ClientDedupeId — set by SendMessage's MBS
+// branch to msg.ID, threaded through MbsCampaignSendTask.IdempotencyKey
+// → MbsSendMessageRequest.ClientDedupeId → MbsOutboundEvent.ClientDedupeId.
+func processMbsOutbound(
+	ctx context.Context,
+	store handler.Store,
+	log zerolog.Logger,
+	event *hermesv1.MbsOutboundEvent,
+) bool {
+	otid := string(event.GetClientDedupeId())
+
+	// Neither correlation key set → can't find the row. Could be a
+	// campaign-only send that bypassed the inbox; ACK and move on.
+	if otid == "" && event.Mid == "" {
+		log.Warn().
+			Int64("uid", event.Uid).
+			Str("thread_id", event.ThreadId).
+			Msg("MBS outbound: event has neither client_dedupe_id nor mid, dropping")
+		return true
+	}
+
+	// Branch A: success. mid is the canonical status key going forward.
+	if event.Ok {
+		if event.Mid == "" {
+			log.Warn().
+				Str("otid", otid).
+				Msg("MBS outbound: ok=true but mid empty, treating as no-op")
+			return true
+		}
+		// Stamp MID on the local row first (idempotent).
+		if otid != "" {
+			if err := store.SetMbsMID(ctx, otid, event.Mid); err != nil {
+				// ErrNotFound is non-fatal: either MID already stamped
+				// (re-delivery) or the row was for a non-inbox send.
+				log.Debug().Err(err).Str("otid", otid).Str("mid", event.Mid).
+					Msg("MBS outbound: SetMbsMID no-op (row not found or already stamped)")
+			}
+		}
+		// Transition status with forward-only guard.
+		existing, gerr := store.GetMessageByMbsMID(ctx, event.Mid)
+		if gerr != nil {
+			// Row not found → either we just stamped it (eventual-consistency
+			// race with our own SetMbsMID is impossible since it's same txn-less
+			// pool) OR the row truly doesn't exist. ACK; if real, redelivery
+			// would resolve via the otid path on re-entry.
+			log.Debug().Str("mid", event.Mid).Msg("MBS outbound: row not found by mid, dropping")
+			return true
+		}
+		if !conversation.IsForwardTransition(existing.Status, "sent") {
+			log.Debug().
+				Str("mid", event.Mid).
+				Str("current", existing.Status).
+				Msg("MBS outbound: skipping non-forward transition to sent")
+			return true
+		}
+		if err := store.UpdateMbsMessageStatus(ctx, event.Mid, "sent"); err != nil {
+			log.Error().Err(err).Str("mid", event.Mid).Msg("MBS outbound: failed to mark sent")
+			return false
+		}
+		log.Debug().Str("mid", event.Mid).Str("otid", otid).Msg("MBS outbound: marked sent")
+		return true
+	}
+
+	// Branch B: failure. Two sub-cases by whether Meta assigned a mid.
+	if event.Mid == "" {
+		// Failure before Meta assigned mid → patch by otid → failed.
+		if otid == "" {
+			log.Warn().Msg("MBS outbound: failure event with neither mid nor otid")
+			return true
+		}
+		if err := store.MarkOutboundFailedByID(ctx, otid); err != nil {
+			// ErrNotFound is non-fatal — row may already be in a terminal
+			// state (failed/sent) from an earlier delivery.
+			log.Debug().Err(err).Str("otid", otid).
+				Msg("MBS outbound: MarkOutboundFailedByID no-op (not in pending)")
+			return true
+		}
+		log.Debug().Str("otid", otid).Str("err", event.Error).Msg("MBS outbound: marked failed by otid")
+		return true
+	}
+	// Failure WITH mid (rare: Meta assigned then delivery failed). Patch
+	// the mid in then transition status.
+	if otid != "" {
+		_ = store.SetMbsMID(ctx, otid, event.Mid)
+	}
+	existing, gerr := store.GetMessageByMbsMID(ctx, event.Mid)
+	if gerr != nil {
+		log.Debug().Str("mid", event.Mid).Msg("MBS outbound (failure): row not found by mid")
+		return true
+	}
+	if !conversation.IsForwardTransition(existing.Status, "failed") {
+		return true
+	}
+	if err := store.UpdateMbsMessageStatus(ctx, event.Mid, "failed"); err != nil {
+		log.Error().Err(err).Str("mid", event.Mid).Msg("MBS outbound: failed to mark failed")
+		return false
+	}
+	log.Debug().Str("mid", event.Mid).Str("err", event.Error).Msg("MBS outbound: marked failed by mid")
 	return true
 }
 

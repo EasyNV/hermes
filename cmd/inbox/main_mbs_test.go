@@ -152,6 +152,8 @@ func (f *fakeStore) GetMessageByMbsMID(ctx context.Context, _ string) (*handler.
 	return nil, handler.ErrNotFound
 }
 func (f *fakeStore) UpdateMbsMessageStatus(ctx context.Context, _, _ string) error { return nil }
+func (f *fakeStore) SetMbsMID(ctx context.Context, _, _ string) error              { return nil }
+func (f *fakeStore) MarkOutboundFailedByID(ctx context.Context, _ string) error    { return nil }
 func (f *fakeStore) GetWorkspaceIDForWaNumber(ctx context.Context, _ string) (string, string, error) {
 	return "", "", handler.ErrNotFound
 }

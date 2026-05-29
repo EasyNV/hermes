@@ -46,7 +46,7 @@ type recordedLifecycle struct {
 func (p *recordingPublisher) PublishInboundMessage(int64, string, string, string, string, string, string, string, time.Time) {
 	p.inbound.Add(1)
 }
-func (p *recordingPublisher) PublishOutbound(uid int64, tenantID, threadID, mid, otid string, latencyMs int64, ok bool, errMsg string, sentAt time.Time) {
+func (p *recordingPublisher) PublishOutbound(uid int64, tenantID, threadID, mid, otid string, latencyMs int64, ok bool, errMsg string, sentAt time.Time, clientDedupeID []byte) {
 	p.outbound = append(p.outbound, recordedOutbound{uid: uid, tenantID: tenantID, threadID: threadID, mid: mid, ok: ok, errMsg: errMsg})
 }
 func (p *recordingPublisher) PublishSessionLifecycle(uid int64, tenantID string, prev, nxt hermesv1.MbsSessionState, reason string, _ int32, _ string) {

@@ -376,6 +376,13 @@ message MbsOutboundEvent {
   bool ok = 7;
   string error = 8;                         // populated iff !ok
   google.protobuf.Timestamp sent_at = 9;
+  // Client-side dedupe/correlation id. Echoed verbatim from the
+  // originating MbsCampaignSendTask.idempotency_key →
+  // MbsSendMessageRequest.client_dedupe_id. Inbox-service uses this
+  // to correlate the outbound event back to the local message row
+  // it created before publishing the send task. May be empty for
+  // mbs sends that originated without an idempotency key (legacy/direct).
+  bytes client_dedupe_id = 10;
 }
 
 // ──────────────────────────────────────────────────────────────────

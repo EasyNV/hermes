@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
@@ -503,6 +504,26 @@ func (h *Handler) SendMessage(ctx context.Context, req *hermesv1.InboxSendMessag
 		return nil, status.Error(codes.InvalidArgument, "sender_user_id is required")
 	}
 
+	// E3 chunk 4: branch on conversation channel. Load early so we can
+	// reject unknown channels BEFORE writing a message row that may end
+	// up orphaned.
+	conv, convErr := h.store.GetConversation(ctx, req.ConversationId)
+	if convErr != nil {
+		return nil, status.Errorf(codes.NotFound, "conversation %s: %v", req.ConversationId, convErr)
+	}
+	channel := conv.Channel
+	if channel == "" {
+		channel = "wa"
+	}
+	switch channel {
+	case "wa":
+		// fall through to existing WA path
+	case "mbs":
+		return h.sendMessageMbs(ctx, conv, req)
+	default:
+		return nil, status.Errorf(codes.Internal, "unknown conversation channel %q", channel)
+	}
+
 	ct := contentTypeToStr(req.ContentType)
 	if ct == "" {
 		ct = "text"
@@ -522,8 +543,8 @@ func (h *Handler) SendMessage(ctx context.Context, req *hermesv1.InboxSendMessag
 		return nil, status.Errorf(codes.Internal, "creating message: %v", err)
 	}
 
-	// Calculate first_response_time_secs.
-	conv, _ := h.store.GetConversation(ctx, req.ConversationId)
+	// Calculate first_response_time_secs. Conversation already loaded
+	// at top of function for channel dispatch.
 	if conv != nil && conv.FirstResponseTimeSecs == 0 {
 		secs := int32(time.Since(conv.CreatedAt).Seconds())
 		if secs < 1 {
@@ -579,6 +600,114 @@ func (h *Handler) SendMessage(ctx context.Context, req *hermesv1.InboxSendMessag
 				if _, perr := h.js.Publish(subject, data, natsgo.MsgId(eventID)); perr != nil {
 					h.log.Error().Err(perr).Str("subject", subject).Msg("failed to publish ManualSendTask")
 				}
+			}
+		}
+	}
+
+	return &hermesv1.InboxSendMessageResponse{
+		Message: messageRowToProto(msg),
+	}, nil
+}
+
+// sendMessageMbs is the MBS-channel branch of SendMessage. Called only
+// when conv.Channel == "mbs". Mirrors the WA path but:
+//   - rejects non-text content (E3.4-G1 carries the media gap)
+//   - resolves tenant via GetWorkspaceIDForMbsUid(uid) — same JOIN as inbound
+//   - writes the row via CreateMbsMessage (mid=="" — patched on outbound event)
+//   - publishes MbsCampaignSendTask (campaign_id="") with idempotency_key=msg.ID
+//     so the outbound event echoes msg.ID back as ClientDedupeId for correlation.
+func (h *Handler) sendMessageMbs(
+	ctx context.Context,
+	conv *ConversationRow,
+	req *hermesv1.InboxSendMessageRequest,
+) (*hermesv1.InboxSendMessageResponse, error) {
+	// E3.4-G1: text-only for MBS in MVP. Reject before any DB write.
+	if req.ContentType != hermesv1.ContentType_CONTENT_TYPE_UNSPECIFIED &&
+		req.ContentType != hermesv1.ContentType_CONTENT_TYPE_TEXT {
+		return nil, status.Errorf(codes.Unimplemented,
+			"MBS channel currently supports text only; got %s", req.ContentType)
+	}
+	if req.Body == "" {
+		return nil, status.Error(codes.InvalidArgument, "body is required for MBS text message")
+	}
+
+	// Defensive: MBS conv must carry both session_uid + thread_id.
+	if conv.MbsSessionUID == "" || conv.MbsThreadID == "" {
+		return nil, status.Errorf(codes.Internal,
+			"MBS conversation %s missing session_uid or thread_id", conv.ID)
+	}
+	uid, perr := strconv.ParseInt(conv.MbsSessionUID, 10, 64)
+	if perr != nil {
+		return nil, status.Errorf(codes.Internal,
+			"MBS conversation %s has non-numeric session_uid %q", conv.ID, conv.MbsSessionUID)
+	}
+
+	// Resolve tenant via the same JOIN as the inbound consumer. If the
+	// session is missing/burned we can't send — fail loud.
+	_, tenantID, terr := h.store.GetWorkspaceIDForMbsUid(ctx, uid)
+	if terr != nil {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"MBS session uid=%d not active in any workspace", uid)
+	}
+
+	// Write the local row first (status=pending, mid=""). The chunk-4
+	// outbound consumer will SetMbsMID + UpdateMbsMessageStatus when the
+	// real send response lands.
+	msg, err := h.store.CreateMbsMessage(ctx, conv.ID, "outbound", req.Body, "")
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "creating mbs message: %v", err)
+	}
+
+	// First-response time + last_message preview — same semantics as WA.
+	if conv.FirstResponseTimeSecs == 0 {
+		secs := int32(time.Since(conv.CreatedAt).Seconds())
+		if secs < 1 {
+			secs = 1
+		}
+		if err := h.store.SetFirstResponseTime(ctx, conv.ID, secs); err != nil {
+			h.log.Error().Err(err).Str("conversation_id", conv.ID).Msg("MBS: failed to set first response time")
+		}
+	}
+	preview := req.Body
+	if len(preview) > 100 {
+		preview = preview[:100]
+	}
+	_ = h.store.UpdateLastMessage(ctx, conv.ID, preview)
+
+	// Publish MbsCampaignSendTask to hermes.mbs.send.manual.<tenant>.
+	// The mbs receiver projects this to MbsSendMessageRequest, threading
+	// IdempotencyKey → ClientDedupeId → MbsOutboundEvent.client_dedupe_id
+	// back to us. msg.ID is the correlation key.
+	if h.js != nil {
+		eventID := uuid.New().String()
+		task := &hermesv1.MbsCampaignSendTask{
+			Meta: &hermesv1.EventMeta{
+				EventId:   eventID,
+				TenantId:  tenantID,
+				Timestamp: timestamppb.Now(),
+				Source:    "hermes-inbox",
+			},
+			CampaignId:     "",
+			ContactId:      conv.ContactID,
+			Uid:            uid,
+			ThreadId:       conv.MbsThreadID,
+			RecipientPhone: "",
+			ResolvedBody:   req.Body,
+			PageIdOverride: conv.MbsPageID,
+			IdempotencyKey: msg.ID,
+		}
+		data, merr := proto.Marshal(task)
+		if merr != nil {
+			h.log.Error().Err(merr).Msg("MBS: failed to marshal MbsCampaignSendTask")
+		} else {
+			subject := "hermes.mbs.send.manual." + tenantID
+			if _, perr := h.js.Publish(subject, data, natsgo.MsgId(eventID)); perr != nil {
+				// E3.4-G2: NATS publish failure leaves a pending row; logged
+				// loudly. F-stage cron re-publishes stuck messages.
+				h.log.Error().Err(perr).
+					Str("subject", subject).
+					Str("msg_id", msg.ID).
+					Msg("MBS: failed to publish MbsCampaignSendTask — message stuck in pending")
 			}
 		}
 	}

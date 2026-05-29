@@ -151,6 +151,14 @@ type Store interface {
 	GetMessageByMbsMID(ctx context.Context, mbsMID string) (*MessageRow, error)
 	UpdateMbsMessageStatus(ctx context.Context, mbsMID, newStatus string) error
 
+	// E3 chunk 4: outbound correlation. SetMbsMID stamps the Meta-assigned
+	// MID on a row identified by its local UUID (carried as
+	// MbsOutboundEvent.client_dedupe_id, set by SendMessage in E3.4).
+	// MarkOutboundFailedByID flips an outbound row from pending → failed
+	// when the send failed before Meta assigned an MID.
+	SetMbsMID(ctx context.Context, messageID, mbsMID string) error
+	MarkOutboundFailedByID(ctx context.Context, messageID string) error
+
 	// Contact lookup (cross-service read)
 	FindContactByPhone(ctx context.Context, phone string) (*ContactRow, string, error) // returns contact + tenantID
 	GetWorkspaceIDForWaNumber(ctx context.Context, waNumberID string) (string, string, error) // returns workspaceID, tenantID
@@ -727,8 +735,14 @@ func (s *PgStore) CreateMbsMessage(
 	ctx context.Context,
 	conversationID, direction, body, mbsMID string,
 ) (*MessageRow, error) {
-	if mbsMID == "" {
-		return nil, fmt.Errorf("CreateMbsMessage: mbsMID required")
+	// MID is required for inbound (Meta already assigned it) but optional
+	// for outbound — outbound rows are created locally before NATS round-trip;
+	// the chunk-4 outbound consumer patches mbs_mid in via SetMbsMID once
+	// the send response lands. The partial unique index
+	// uq_messages_mbs_mid (WHERE mbs_mid != '') skips empty-MID rows so
+	// they can never trigger the ON CONFLICT path.
+	if direction == "inbound" && mbsMID == "" {
+		return nil, fmt.Errorf("CreateMbsMessage: mbsMID required for inbound")
 	}
 	var bodyPtr *string
 	if body != "" {
@@ -813,6 +827,52 @@ func (s *PgStore) UpdateMbsMessageStatus(ctx context.Context, mbsMID, newStatus 
 	)
 	if err != nil {
 		return fmt.Errorf("updating mbs message status: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetMbsMID stamps the Meta-assigned MID on a row identified by its
+// local UUID. Idempotent: WHERE clause allows the row's mbs_mid to be
+// empty (first-sight) OR exactly equal (re-delivery of the same MID).
+// Returns ErrNotFound if no row matches that predicate — either the
+// id is wrong or someone tried to overwrite with a different MID.
+func (s *PgStore) SetMbsMID(ctx context.Context, messageID, mbsMID string) error {
+	if messageID == "" || mbsMID == "" {
+		return ErrNotFound
+	}
+	tag, err := s.pool.Exec(ctx,
+		"UPDATE messages SET mbs_mid = $2 WHERE id = $1 AND (mbs_mid = '' OR mbs_mid = $2)",
+		messageID, mbsMID,
+	)
+	if err != nil {
+		return fmt.Errorf("setting mbs mid: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// MarkOutboundFailedByID flips an outbound row from pending → failed.
+// Only matches outbound rows still in 'pending' so a previously-sent
+// row can't be regressed. ErrNotFound on no-match is treated as a
+// non-error by the caller (idempotent re-delivery / race with a later
+// success).
+func (s *PgStore) MarkOutboundFailedByID(ctx context.Context, messageID string) error {
+	if messageID == "" {
+		return ErrNotFound
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE messages SET status = 'failed'
+		WHERE id = $1
+		  AND direction = 'outbound'
+		  AND status = 'pending'`, messageID,
+	)
+	if err != nil {
+		return fmt.Errorf("marking outbound failed: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound

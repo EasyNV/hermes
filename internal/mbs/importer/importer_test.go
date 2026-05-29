@@ -596,7 +596,7 @@ func newRecordingPublisher() *recordingPub {
 func (p *recordingPub) PublishInboundMessage(int64, string, string, string, string, string, string, string, time.Time) {
 }
 
-func (p *recordingPub) PublishOutbound(int64, string, string, string, string, int64, bool, string, time.Time) {
+func (p *recordingPub) PublishOutbound(int64, string, string, string, string, int64, bool, string, time.Time, []byte) {
 }
 
 func (p *recordingPub) PublishSessionLifecycle(uid int64, tenant string, prev, next hermesv1.MbsSessionState, reason string, _ int32, _ string) {

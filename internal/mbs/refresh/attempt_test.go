@@ -127,7 +127,7 @@ type lifecycleCall struct {
 
 func (p *recordingPublisher) PublishInboundMessage(int64, string, string, string, string, string, string, string, time.Time) {
 }
-func (p *recordingPublisher) PublishOutbound(int64, string, string, string, string, int64, bool, string, time.Time) {
+func (p *recordingPublisher) PublishOutbound(int64, string, string, string, string, int64, bool, string, time.Time, []byte) {
 }
 func (p *recordingPublisher) PublishSessionLifecycle(uid int64, tenantID string, prev, next interface{}, reason string, _ int32, podID string) {
 	// We can't reference hermesv1 enum types here without import noise — coerce.

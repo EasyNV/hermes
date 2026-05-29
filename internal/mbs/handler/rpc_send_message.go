@@ -80,7 +80,7 @@ func (h *Handler) SendMessage(ctx context.Context, req *hermesv1.MbsSendMessageR
 	switch {
 	case sendErr != nil:
 		h.publisher.PublishOutbound(req.Uid, tenantID, threadIDStr, "", "",
-			latency.Milliseconds(), false, sendErr.Error(), now)
+			latency.Milliseconds(), false, sendErr.Error(), now, req.ClientDedupeId)
 		h.recordSend("err")
 		return nil, mapSendErr(sendErr)
 	case result == nil:
@@ -88,7 +88,7 @@ func (h *Handler) SendMessage(ctx context.Context, req *hermesv1.MbsSendMessageR
 		// production *manager.Send, but a misbehaving fake might.
 		// Treat as internal error.
 		h.publisher.PublishOutbound(req.Uid, tenantID, threadIDStr, "", "",
-			latency.Milliseconds(), false, "manager: nil result without error", now)
+			latency.Milliseconds(), false, "manager: nil result without error", now, req.ClientDedupeId)
 		h.recordSend("err")
 		return nil, status.Error(codes.Internal, "send returned nil result without error")
 	}
@@ -101,7 +101,7 @@ func (h *Handler) SendMessage(ctx context.Context, req *hermesv1.MbsSendMessageR
 		SentAt:    timestamppb.New(now),
 	}
 	h.publisher.PublishOutbound(req.Uid, tenantID, threadIDStr, result.MID, result.OTID,
-		latency.Milliseconds(), true, "", now)
+		latency.Milliseconds(), true, "", now, req.ClientDedupeId)
 	h.recordSend("ok")
 
 	// 6. Cache successful response under dedupe id.

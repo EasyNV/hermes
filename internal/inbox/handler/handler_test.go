@@ -55,6 +55,8 @@ type mockStore struct {
 	createMbsMessageFn            func(ctx context.Context, conversationID, direction, body, mbsMID string) (*MessageRow, error)
 	getMessageByMbsMIDFn          func(ctx context.Context, mbsMID string) (*MessageRow, error)
 	updateMbsMessageStatusFn      func(ctx context.Context, mbsMID, newStatus string) error
+	setMbsMIDFn                   func(ctx context.Context, messageID, mbsMID string) error
+	markOutboundFailedByIDFn      func(ctx context.Context, messageID string) error
 }
 
 func (m *mockStore) ListConversations(ctx context.Context, workspaceID, st, assignedTo, waNumberID, search, channel string, sortOrder int32, page, pageSize int32) ([]*ConversationRow, int64, error) {
@@ -317,6 +319,18 @@ func (m *mockStore) GetMessageByMbsMID(ctx context.Context, mbsMID string) (*Mes
 func (m *mockStore) UpdateMbsMessageStatus(ctx context.Context, mbsMID, newStatus string) error {
 	if m.updateMbsMessageStatusFn != nil {
 		return m.updateMbsMessageStatusFn(ctx, mbsMID, newStatus)
+	}
+	return nil
+}
+func (m *mockStore) SetMbsMID(ctx context.Context, messageID, mbsMID string) error {
+	if m.setMbsMIDFn != nil {
+		return m.setMbsMIDFn(ctx, messageID, mbsMID)
+	}
+	return nil
+}
+func (m *mockStore) MarkOutboundFailedByID(ctx context.Context, messageID string) error {
+	if m.markOutboundFailedByIDFn != nil {
+		return m.markOutboundFailedByIDFn(ctx, messageID)
 	}
 	return nil
 }

@@ -178,7 +178,7 @@ func (p *integrationPublisher) PublishInboundMessage(int64, string, string, stri
 	defer p.mu.Unlock()
 	p.inbound++
 }
-func (p *integrationPublisher) PublishOutbound(int64, string, string, string, string, int64, bool, string, time.Time) {
+func (p *integrationPublisher) PublishOutbound(int64, string, string, string, string, int64, bool, string, time.Time, []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.outbound++
