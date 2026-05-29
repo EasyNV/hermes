@@ -15,12 +15,14 @@ import {
 } from '@/api/inbox'
 import { listCannedResponses, clearAllConversations, clearAllowlist } from '@/api/inbox'
 import type {
-  Conversation, Message, CannedResponse, ConversationStatus,
+  Conversation, Message, CannedResponse, ConversationStatus, InboxChannel,
 } from '@/api/types'
-import { ConversationStatus as ConvStatus, ContentType, MessageDirection } from '@/api/types'
+import { ConversationStatus as ConvStatus, ContentType, MessageDirection, InboxChannel as InboxChan } from '@/api/types'
 import { CONVERSATION_STATUS, MSG_STATUS } from '@/lib/constants'
 import { cn, truncate, formatPhone } from '@/lib/utils'
 
+import { ChannelBadge } from '@/components/inbox/ChannelBadge'
+import { ChannelFilter } from '@/components/inbox/ChannelFilter'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -65,6 +67,7 @@ function ConversationItem({ conversation, isActive, onClick }: ConversationItemP
         <div className="flex items-center justify-between">
           <p className="truncate text-sm font-medium">
             {conversation.contactName || formatPhone(conversation.contactPhone)}
+            <ChannelBadge channel={conversation.channel} />
           </p>
           <span className="shrink-0 text-xs text-muted-foreground">{timeLabel}</span>
         </div>
@@ -205,6 +208,7 @@ export default function Inbox() {
 
   const [activeTab, setActiveTab] = useState<'unassigned' | 'mine'>('unassigned')
   const [searchQuery, setSearchQuery] = useState('')
+  const [channelFilter, setChannelFilter] = useState<InboxChannel | undefined>(undefined)
   const [messageText, setMessageText] = useState('')
   const [showCanned, setShowCanned] = useState(false)
   const [showTransfer, setShowTransfer] = useState(false)
@@ -215,22 +219,24 @@ export default function Inbox() {
   // ── Queries ──
 
   const unassignedQuery = useQuery({
-    queryKey: ['conversations', 'unassigned', workspaceId, searchQuery],
+    queryKey: ['conversations', 'unassigned', workspaceId, searchQuery, channelFilter],
     queryFn: () => listConversations({
       workspaceId,
       status: ConvStatus.UNASSIGNED as ConversationStatus,
       search: searchQuery || undefined,
+      channel: channelFilter,
       pageSize: 50,
     }),
     enabled: !!workspaceId && activeTab === 'unassigned',
   })
 
   const myQuery = useQuery({
-    queryKey: ['conversations', 'mine', workspaceId, userId, searchQuery],
+    queryKey: ['conversations', 'mine', workspaceId, userId, searchQuery, channelFilter],
     queryFn: () => listConversations({
       workspaceId,
       assignedTo: userId,
       search: searchQuery || undefined,
+      channel: channelFilter,
       pageSize: 50,
     }),
     enabled: !!workspaceId && !!userId && activeTab === 'mine',
@@ -437,6 +443,9 @@ export default function Inbox() {
               className="pl-9"
             />
           </div>
+          <div className="mt-2 flex justify-end">
+            <ChannelFilter value={channelFilter} onChange={setChannelFilter} />
+          </div>
         </div>
 
         <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as 'unassigned' | 'mine')}>
@@ -516,10 +525,17 @@ export default function Inbox() {
                 <div>
                   <p className="text-sm font-medium">
                     {activeConv?.contactName || formatPhone(activeConv?.contactPhone ?? '')}
+                    {activeConv && <ChannelBadge channel={activeConv.channel} />}
                   </p>
                   {activeConv?.contactName && (
                     <p className="text-xs text-muted-foreground">
                       {formatPhone(activeConv.contactPhone)}
+                    </p>
+                  )}
+                  {activeConv?.channel === InboxChan.MBS && (
+                    <p className="text-xs text-muted-foreground">
+                      Via Meta Business Suite · Thread {activeConv.mbsThreadId.slice(-8)}
+                      {activeConv.mbsPageId && ` · Page ${activeConv.mbsPageId}`}
                     </p>
                   )}
                 </div>

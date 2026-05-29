@@ -45,15 +45,15 @@ function handleEvent(event: WsEvent) {
       break
     case 'mbs_new_message':
       // MBS inbound feeds the Pages preview tile and the cold-compose
-      // composer's "last contact" indicator. Chunk 6 will additionally
-      // forward into useInboxStore via the mbs:<uid>:<thread>
-      // conversation prefix path. Keeping channels distinct here in
-      // chunk 4 prevents accidental cross-routing while the inbox
-      // integration is still in design.
+      // composer's "last contact" indicator. E3 chunk 5 ALSO bridges
+      // into the unified inbox store so the conversation list / drawer
+      // reflect MBS messages in real time without waiting for a refetch.
       mbs.handleInbound(event.payload)
+      inbox.handleMbsNewMessage(event.payload)
       break
     case 'mbs_outbound_status':
       mbs.handleOutbound(event.payload)
+      inbox.handleMbsOutboundStatus(event.payload)
       break
     case 'mbs_session_lifecycle':
       mbs.handleSessionLifecycle(event.payload)

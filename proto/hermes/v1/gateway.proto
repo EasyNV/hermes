@@ -1009,6 +1009,8 @@ message ListConversationsRequest {
   // Search by contact name or phone.
   string search = 5;
   PageRequest pagination = 6;
+  // E3 chunk 5: filter by channel. UNSPECIFIED = all channels.
+  InboxChannel channel = 7;
 }
 
 message ListConversationsResponse {

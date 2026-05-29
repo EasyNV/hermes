@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type {
   Conversation, Message, MessageStatus,
   WsNewMessagePayload, WsConversationUpdatedPayload, ConversationStatus,
+  WsMbsNewMessagePayload, WsMbsOutboundStatusPayload,
 } from '@/api/types'
 
 interface InboxState {
@@ -18,6 +19,13 @@ interface InboxState {
   handleNewMessage: (payload: WsNewMessagePayload) => void
   handleConversationUpdated: (payload: WsConversationUpdatedPayload) => void
   setTyping: (conversationId: string, isTyping: boolean) => void
+  // E3 chunk 5: MBS frontend bridge. Both are best-effort — if the local
+  // conversation hasn't been loaded yet, these no-op and the next list
+  // refetch reconciles. handleMbsOutbound is used for outbound MBS sends
+  // where the local row may not yet have mbs_mid set (correlation
+  // populated lazily by the inbox-service outbound consumer).
+  handleMbsNewMessage: (payload: WsMbsNewMessagePayload) => void
+  handleMbsOutboundStatus: (payload: WsMbsOutboundStatusPayload) => void
 }
 
 export const useInboxStore = create<InboxState>((set, get) => ({
@@ -104,4 +112,68 @@ export const useInboxStore = create<InboxState>((set, get) => ({
 
   setTyping: (conversationId, isTyping) =>
     set((s) => ({ typingMap: { ...s.typingMap, [conversationId]: isTyping } })),
+
+  // E3 chunk 5: MBS bridge. mbs_new_message fires from the gateway's
+  // direct subscription to hermes.mbs.message.inbound.*. inbox-service
+  // ALSO writes a Conversation + Message row via its consumer (chunk 3).
+  // We bridge frontend-side: find the local conversation row by the
+  // (uid, threadId) tuple and append the message; if not yet loaded,
+  // skip (next refetch picks it up).
+  handleMbsNewMessage: (payload) => {
+    const state = get()
+    const conv = state.conversations.find(
+      (c) =>
+        c.channel === 'INBOX_CHANNEL_MBS' &&
+        c.mbsSessionUid === payload.uid &&
+        c.mbsThreadId === payload.threadId,
+    )
+    if (!conv) {
+      // No local row yet. The list query will reconcile on next refetch.
+      return
+    }
+    // Update conversation list ordering + preview.
+    const updated: Conversation = {
+      ...conv,
+      lastMessagePreview: payload.text,
+      lastMessageAt: payload.receivedAt,
+      unreadCount: conv.unreadCount + (state.activeConversationId === conv.id ? 0 : 1),
+    }
+    set({
+      conversations: [updated, ...state.conversations.filter((c) => c.id !== conv.id)],
+    })
+    // Append message into the active drawer if open.
+    if (state.activeConversationId === conv.id) {
+      const synth: Message = {
+        id: payload.mid, // mbs_mid is unique enough for client-side dedupe
+        conversationId: conv.id,
+        direction: 'MESSAGE_DIRECTION_INBOUND',
+        contentType: 'CONTENT_TYPE_TEXT',
+        body: payload.text,
+        mediaUrl: '',
+        templateId: '',
+        resolvedVarsJson: '',
+        waMessageId: '',
+        status: 'MESSAGE_STATUS_DELIVERED',
+        createdAt: payload.receivedAt,
+        mbsMid: payload.mid,
+      }
+      set((s) => ({ messages: [...s.messages, synth] }))
+    }
+  },
+
+  // E3 chunk 5: mbs_outbound_status reconciliation. The inbox-service
+  // outbound consumer (chunk 4) writes the canonical UPDATE; this WS
+  // bridge is a UX speed-up so the row flips to sent/failed without
+  // waiting for a list refetch. Best-effort: match by mbsMid.
+  handleMbsOutboundStatus: (payload) => {
+    const state = get()
+    // Find the message in the currently-loaded drawer.
+    if (state.messages.length === 0) return
+    const newStatus: MessageStatus = payload.ok ? 'MESSAGE_STATUS_SENT' : 'MESSAGE_STATUS_FAILED'
+    set({
+      messages: state.messages.map((m) =>
+        m.mbsMid === payload.mid && m.mbsMid !== '' ? { ...m, status: newStatus } : m,
+      ),
+    })
+  },
 }))

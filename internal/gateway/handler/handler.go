@@ -1469,6 +1469,7 @@ func (h *Handler) ListConversations(ctx context.Context, req *hermesv1.ListConve
 		WaNumberId:  req.GetWaNumberId(),
 		Search:      req.GetSearch(),
 		Pagination:  req.GetPagination(),
+		Channel:     req.GetChannel(),
 	}
 
 	if role == "cs_agent" {

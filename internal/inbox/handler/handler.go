@@ -225,6 +225,20 @@ func strToInboxChannel(s string) hermesv1.InboxChannel {
 	}
 }
 
+// inboxChannelToStr is the inverse — proto enum to the DB-side textual
+// form used by Store.ListConversations as a filter. UNSPECIFIED maps to
+// the empty string (= no filter, both channels). E3 chunk 5.
+func inboxChannelToStr(c hermesv1.InboxChannel) string {
+	switch c {
+	case hermesv1.InboxChannel_INBOX_CHANNEL_WA:
+		return "wa"
+	case hermesv1.InboxChannel_INBOX_CHANNEL_MBS:
+		return "mbs"
+	default:
+		return ""
+	}
+}
+
 func cannedRowToProto(r *CannedResponseRow) *hermesv1.CannedResponse {
 	cr := &hermesv1.CannedResponse{
 		Id:          r.ID,
@@ -286,7 +300,7 @@ func (h *Handler) ListConversations(ctx context.Context, req *hermesv1.InboxList
 		req.AssignedTo,
 		req.WaNumberId,
 		req.Search,
-		"", // E3 chunk 2: channel filter — exposed via proto in E3.5.
+		inboxChannelToStr(req.Channel), // E3 chunk 5: channel filter
 		int32(req.SortOrder),
 		page, pageSize,
 	)

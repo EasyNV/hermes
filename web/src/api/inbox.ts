@@ -1,6 +1,6 @@
 import { api, qs } from './client'
 import type {
-  Conversation, ConversationStatus, Message, ContentType,
+  Conversation, ConversationStatus, Message, ContentType, InboxChannel,
   ListConversationsResponse, GetConversationResponse, ListMessagesResponse,
   SearchMessagesResponse, GetContactCampaignHistoryResponse, GetAgentPerformanceResponse,
   ListCannedResponsesResponse, CannedResponse, PageRequest,
@@ -10,7 +10,7 @@ import type {
 
 export function listConversations(params: {
   workspaceId: string; status?: ConversationStatus; assignedTo?: string
-  waNumberId?: string; search?: string
+  waNumberId?: string; search?: string; channel?: InboxChannel
 } & PageRequest) {
   return api.get<ListConversationsResponse>(`/conversations${qs(params)}`)
 }

@@ -750,12 +750,35 @@ func (a *Adapter) listCampaignNumbers(w http.ResponseWriter, r *http.Request) {
 // ═══════════════════════════════════════════════════════════════
 
 func (a *Adapter) listConversations(w http.ResponseWriter, r *http.Request) {
+	// E3 chunk 5: parse ?channel= query param. Accept full enum string
+	// (INBOX_CHANNEL_WA / INBOX_CHANNEL_MBS) for consistency with status.
+	var channel hermesv1.InboxChannel
+	switch r.URL.Query().Get("channel") {
+	case "INBOX_CHANNEL_WA":
+		channel = hermesv1.InboxChannel_INBOX_CHANNEL_WA
+	case "INBOX_CHANNEL_MBS":
+		channel = hermesv1.InboxChannel_INBOX_CHANNEL_MBS
+	default:
+		channel = hermesv1.InboxChannel_INBOX_CHANNEL_UNSPECIFIED
+	}
+	// Status param parsing (preserve existing behavior — UNSPECIFIED = all).
+	var statusVal hermesv1.ConversationStatus
+	switch r.URL.Query().Get("status") {
+	case "CONVERSATION_STATUS_UNASSIGNED":
+		statusVal = hermesv1.ConversationStatus_CONVERSATION_STATUS_UNASSIGNED
+	case "CONVERSATION_STATUS_ASSIGNED":
+		statusVal = hermesv1.ConversationStatus_CONVERSATION_STATUS_ASSIGNED
+	case "CONVERSATION_STATUS_CLOSED":
+		statusVal = hermesv1.ConversationStatus_CONVERSATION_STATUS_CLOSED
+	}
 	resp, err := a.gw.ListConversations(r.Context(), &hermesv1.ListConversationsRequest{
 		WorkspaceId: r.URL.Query().Get("workspaceId"),
+		Status:      statusVal,
 		AssignedTo:  r.URL.Query().Get("assignedTo"),
 		WaNumberId:  r.URL.Query().Get("waNumberId"),
 		Search:      r.URL.Query().Get("search"),
 		Pagination:  pagination(r),
+		Channel:     channel,
 	})
 	if err != nil {
 		a.grpcError(w, err)

@@ -112,6 +112,8 @@ message InboxListConversationsRequest {
   // Sort order. Default: last_message_at DESC.
   ConversationSortOrder sort_order = 6;
   PageRequest pagination = 7;
+  // E3 chunk 5: filter by channel. UNSPECIFIED = all channels.
+  InboxChannel channel = 8;
 }
 
 // ConversationSortOrder controls the list order.

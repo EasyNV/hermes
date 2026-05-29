@@ -426,6 +426,42 @@ func TestListConversations(t *testing.T) {
 	}
 }
 
+// E3 chunk 5: channel filter must be threaded from proto enum to store
+// string. Verifies inboxChannelToStr round-trip.
+func TestListConversations_ChannelFilter(t *testing.T) {
+	cases := []struct {
+		name        string
+		channel     hermesv1.InboxChannel
+		wantStrArg  string
+	}{
+		{"unspecified maps to empty (no filter)", hermesv1.InboxChannel_INBOX_CHANNEL_UNSPECIFIED, ""},
+		{"wa maps to wa", hermesv1.InboxChannel_INBOX_CHANNEL_WA, "wa"},
+		{"mbs maps to mbs", hermesv1.InboxChannel_INBOX_CHANNEL_MBS, "mbs"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var capturedChannel string
+			store := &mockStore{
+				listConversationsFn: func(_ context.Context, _, _, _, _, _, channelArg string, _ int32, _, _ int32) ([]*ConversationRow, int64, error) {
+					capturedChannel = channelArg
+					return nil, 0, nil
+				},
+			}
+			h := newTestHandler(store)
+			_, err := h.ListConversations(context.Background(), &hermesv1.InboxListConversationsRequest{
+				WorkspaceId: "ws-1",
+				Channel:     tc.channel,
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if capturedChannel != tc.wantStrArg {
+				t.Errorf("store channel arg: got %q, want %q", capturedChannel, tc.wantStrArg)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // GetConversation
 // ---------------------------------------------------------------------------
