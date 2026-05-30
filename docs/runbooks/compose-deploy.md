@@ -472,7 +472,7 @@ sudo journalctl -u caddy --since '1 minute ago' | grep -E '(certificate obtained
 
 Acceptance:
 ```sh
-curl -sS https://hermes.example.com/api/healthz   # 200
+curl -sS https://hermes.example.com/api/v1/auth/me   # 401 (no token) — proves /api/* is reaching gateway
 curl -sS https://hermes.example.com/             # SPA HTML
 curl -sS https://hermes.example.com/metrics      # 404 (correctly NOT proxied)
 ```

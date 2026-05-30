@@ -168,7 +168,7 @@ The migration at `migrations/gateway/000003_seed_superadmin.up.sql` seeds a defa
 
 ```bash
 # Log in as the seeded superadmin (use Caddy-fronted URL if behind reverse proxy)
-curl -X POST http://localhost:8081/api/auth/login \
+curl -X POST http://localhost:8081/api/v1/auth/login \
     -H 'Content-Type: application/json' \
     -d '{"email":"admin@hermes.local","password":"admin123"}'
 # Response: {"access_token":"eyJhbGc...","refresh_token":"..."}
@@ -232,7 +232,7 @@ COMMIT;
 Test the login:
 
 ```bash
-curl -X POST http://localhost:8081/api/auth/login \
+curl -X POST http://localhost:8081/api/v1/auth/login \
     -H 'Content-Type: application/json' \
     -d '{"email":"you@acme.com","password":"<your-new-password>"}'
 ```
@@ -246,7 +246,7 @@ If the response is a JSON object with `access_token`, the login chain is working
 Behind a reverse proxy (Caddy or nginx per `compose-deploy.md` §6):
 
 1. Browse to `https://<HERMES_DOMAIN>`.
-2. Caddy/nginx terminates TLS, proxies `/api/auth/login` to gateway:8081, returns the SPA static files for `/`.
+2. Caddy/nginx terminates TLS, proxies `/api/v1/auth/login` to gateway:8081, returns the SPA static files for `/`.
 3. Log in with `you@acme.com` / `<your password>`.
 4. You land on the Dashboard. No WhatsApp numbers yet — that's the next step.
 
@@ -347,5 +347,5 @@ Re-deploy, verify the flow works (browsers will mark the staging cert untrusted;
 | Boot stack | `make deploy-prod-up` |
 | Watch boot | `make deploy-prod-logs` |
 | Verify health | `make deploy-prod-ps` |
-| Login test | `curl -X POST http://localhost:8081/api/auth/login -H 'Content-Type: application/json' -d '{"email":"you@acme.com","password":"..."}'` |
+| Login test | `curl -X POST http://localhost:8081/api/v1/auth/login -H 'Content-Type: application/json' -d '{"email":"you@acme.com","password": "***"}'` |
 | Backup everything | See `docs/runbooks/backup-restore.md` §3.2 |

@@ -79,6 +79,16 @@ server {
     add_header X-Frame-Options "DENY" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
+    # ── Probe deny — chunk-4 invariant ─────────────────────────────────
+    # /metrics, /readyz, /livez are intra-network only. The SPA web
+    # container's `try_files ... /index.html` would otherwise return its
+    # index.html shell (200) for unknown paths — making /metrics look
+    # like a 200 OK to a probe scanner. Explicit 404 is the correct
+    # surface.
+    location ~ ^/(metrics|readyz|livez|healthz|debug)(/|$) {
+        return 404;
+    }
+
     # ── /api/* — REST adapter ──────────────────────────────────────────
     location /api/ {
         proxy_pass http://hermes_gateway_rest;

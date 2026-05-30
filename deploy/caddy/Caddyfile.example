@@ -40,6 +40,19 @@
 {$HERMES_DOMAIN} {
 	encode zstd gzip
 
+	# ── Explicit deny — probe surface MUST NOT leak ──────────────────────
+	# Chunk-4 invariant: /metrics, /readyz, /livez are intra-network only.
+	# The SPA web container's `try_files ... /index.html` would otherwise
+	# return its index.html shell (200) for unknown paths, which would
+	# happily proxy /metrics requests to the SPA shell — looks like a 200
+	# OK to a probe scanner. Must be `handle @probes` (not bare `respond`)
+	# so it joins the same handle-group as the other handlers and matches
+	# BEFORE the catch-all `handle { ... }` fallback to the web SPA.
+	@probes path /metrics /readyz /livez /healthz /debug/* /debug
+	handle @probes {
+		respond 404
+	}
+
 	# ── /api/* — REST adapter on gateway:8081 ────────────────────────────
 	handle /api/* {
 		reverse_proxy 127.0.0.1:8081 {

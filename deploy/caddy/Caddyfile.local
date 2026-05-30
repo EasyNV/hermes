@@ -1,0 +1,82 @@
+# Caddyfile.local — local-only variant of Caddyfile.example
+# Uses Caddy's internal CA (local-certs) so we don't need a real domain
+# or ACME. Browser will warn about untrusted cert; that's expected.
+#
+# Run (Caddy joins the hermes_hermes-net network so it can reach gateway
+# + web by container DNS on internal ports):
+#
+#   docker run --rm -d --name hermes-caddy \
+#     --network hermes_hermes-net \
+#     -p 8443:443 -p 8081:80 \
+#     -v $(pwd)/deploy/caddy/Caddyfile.local:/etc/caddy/Caddyfile \
+#     -v hermes_caddy_data:/data \
+#     caddy:2-alpine
+#
+# Browse: https://localhost:8443 (accept the self-signed cert warning)
+# /api/* -> gateway:8081 (internal)
+# /ws    -> gateway:8081
+# /      -> web:80
+# /metrics, /readyz, /livez NEVER reachable (chunk-4 invariant)
+
+{
+	local_certs
+}
+
+localhost {
+	encode zstd gzip
+
+	tls internal
+
+	# Explicit deny — probe ports MUST NOT leak through the reverse proxy
+	# even though the SPA web container would return its index.html shell
+	# for unknown paths (SPA fallback). Must be `handle @probes` (not bare
+	# `respond`) so it joins the same handle-group as the other handlers
+	# and matches BEFORE the catch-all `handle { ... }` fallback.
+	@probes path /metrics /readyz /livez /healthz /debug/* /debug
+	handle @probes {
+		respond 404
+	}
+
+	# /api/* — REST adapter on gateway:8081
+	handle /api/* {
+		reverse_proxy gateway:8081 {
+			health_uri /readyz
+			health_port 9100
+			health_interval 10s
+			health_timeout 5s
+		}
+	}
+
+	# /ws — WebSocket upgrade
+	handle /ws {
+		reverse_proxy gateway:8081 {
+			health_uri /readyz
+			health_port 9100
+			health_interval 10s
+			transport http {
+				read_timeout 0
+			}
+		}
+	}
+
+	# Default — web SPA (in-compose nginx on port 80)
+	handle {
+		reverse_proxy web:80 {
+			health_uri /healthz
+			health_interval 10s
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	log {
+		output stdout
+		format json
+		level INFO
+	}
+}
