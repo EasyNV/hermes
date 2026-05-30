@@ -131,11 +131,30 @@ export const useMbsStore = create<MbsStoreState>((set) => ({
 
 // ─────────────────────────────────────────────────────────────────────
 // Selectors
+//
+// IMPORTANT — Zustand v5 uses Object.is equality for selector results.
+// A selector that returns a freshly-built object/array on every call
+// (e.g. Object.values(...).sort(...)) makes the store report "changed"
+// on every render and triggers React error #185 (max update depth).
+//
+// Rule of thumb: selectors here return the STABLE raw state slice.
+// Components derive sorted/filtered views in a useMemo over that slice.
 // ─────────────────────────────────────────────────────────────────────
 
-/** Returns an array of sessions sorted by lastSeenAt desc. */
-export const selectSessionsList = (s: MbsStoreState): MbsSession[] =>
-  Object.values(s.sessions).sort((a, b) => (b.lastSeenAt || '').localeCompare(a.lastSeenAt || ''))
+/** Returns the raw sessions dict (stable reference until upsert/remove). */
+export const selectSessions = (s: MbsStoreState): Record<string, MbsSession> => s.sessions
+
+/**
+ * Stable helper for deriving a sorted list in a useMemo.
+ * Components: const list = useMemo(() => sortSessionsByLastSeen(sessions), [sessions])
+ */
+export function sortSessionsByLastSeen(
+  sessions: Record<string, MbsSession>,
+): MbsSession[] {
+  return Object.values(sessions).sort((a, b) =>
+    (b.lastSeenAt || '').localeCompare(a.lastSeenAt || ''),
+  )
+}
 
 export const selectSessionByUid = (uid: string) => (s: MbsStoreState): MbsSession | undefined =>
   s.sessions[uid]

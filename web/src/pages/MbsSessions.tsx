@@ -11,7 +11,7 @@ import {
   Building2,
 } from 'lucide-react'
 import { useAuthStore } from '@/stores/auth'
-import { useMbsStore, selectSessionsList } from '@/stores/mbs'
+import { useMbsStore, selectSessions, sortSessionsByLastSeen } from '@/stores/mbs'
 import {
   listMbsSessions,
   getMbsSessionStatus,
@@ -125,7 +125,15 @@ export default function MbsSessions() {
   }, [sessionsQuery.data])
 
   // Read from store so WS push updates show without a refetch.
-  const storeSessions = useMbsStore(selectSessionsList)
+  // Subscribe to the raw dict (stable ref) and derive the sorted view
+  // in a useMemo — a selector that re-sorts on every call would return
+  // a fresh array per render and trip Zustand v5's Object.is check,
+  // causing React error #185 (max update depth).
+  const storeSessionsDict = useMbsStore(selectSessions)
+  const storeSessions = useMemo(
+    () => sortSessionsByLastSeen(storeSessionsDict),
+    [storeSessionsDict],
+  )
 
   // Prefer store data once we have it; fall back to the raw query
   // until first hydrate.

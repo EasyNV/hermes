@@ -4,7 +4,7 @@ import { Link } from '@tanstack/react-router'
 import { useAuthStore } from '@/stores/auth'
 import { getDashboardStats } from '@/api/dashboard'
 import { listMbsSessions } from '@/api/mbs'
-import { useMbsStore, selectSessionsList } from '@/stores/mbs'
+import { useMbsStore, selectSessions, sortSessionsByLastSeen } from '@/stores/mbs'
 import { MbsSessionState, Role } from '@/api/types'
 import { formatNumber } from '@/lib/utils'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
@@ -91,7 +91,11 @@ export default function Dashboard() {
     }
   }, [mbsListQuery.data])
 
-  const mbsSessions = useMbsStore(selectSessionsList)
+  const mbsSessionsDict = useMbsStore(selectSessions)
+  const mbsSessions = useMemo(
+    () => sortSessionsByLastSeen(mbsSessionsDict),
+    [mbsSessionsDict],
+  )
   const mbsCounts = useMemo(() => {
     let active = 0
     let warming = 0

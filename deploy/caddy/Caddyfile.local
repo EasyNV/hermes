@@ -1,82 +1,102 @@
-# Caddyfile.local — local-only variant of Caddyfile.example
-# Uses Caddy's internal CA (local-certs) so we don't need a real domain
-# or ACME. Browser will warn about untrusted cert; that's expected.
+# Local dev reverse proxy — Caddy in front of the hermes stack on a Docker
+# network (hermes_hermes-net). HTTPS uses Caddy's local CA (self-signed).
+# Also exposes plain HTTP on :80 (mapped to host :8081) for headless tooling
+# that can't trust the local root.
 #
-# Run (Caddy joins the hermes_hermes-net network so it can reach gateway
-# + web by container DNS on internal ports):
-#
-#   docker run --rm -d --name hermes-caddy \
+# Run with:
+#   docker run -d --rm --name hermes-caddy \
 #     --network hermes_hermes-net \
 #     -p 8443:443 -p 8081:80 \
-#     -v $(pwd)/deploy/caddy/Caddyfile.local:/etc/caddy/Caddyfile \
-#     -v hermes_caddy_data:/data \
+#     -v $PWD/deploy/caddy/Caddyfile.local:/etc/caddy/Caddyfile:ro \
+#     -v hermes-caddy-data:/data \
 #     caddy:2-alpine
-#
-# Browse: https://localhost:8443 (accept the self-signed cert warning)
-# /api/* -> gateway:8081 (internal)
-# /ws    -> gateway:8081
-# /      -> web:80
-# /metrics, /readyz, /livez NEVER reachable (chunk-4 invariant)
 
 {
-	local_certs
+	# Disable the admin API on the default port to avoid host conflicts.
+	admin off
 }
 
-localhost {
-	encode zstd gzip
-
+# ── HTTPS (Caddy local CA — browser will warn until root cert trusted) ───
+https://localhost {
 	tls internal
 
-	# Explicit deny — probe ports MUST NOT leak through the reverse proxy
-	# even though the SPA web container would return its index.html shell
-	# for unknown paths (SPA fallback). Must be `handle @probes` (not bare
-	# `respond`) so it joins the same handle-group as the other handlers
-	# and matches BEFORE the catch-all `handle { ... }` fallback.
-	@probes path /metrics /readyz /livez /healthz /debug/* /debug
+	# Block probe paths — same set as Caddyfile.example.
+	@probes path /metrics /metrics/* /readyz /readyz/* /livez /livez/* /healthz /debug/pprof /debug/pprof/*
 	handle @probes {
 		respond 404
 	}
 
-	# /api/* — REST adapter on gateway:8081
+	# API → gateway. Use the in-network DNS name + container port (8081).
 	handle /api/* {
 		reverse_proxy gateway:8081 {
 			health_uri /readyz
 			health_port 9100
-			health_interval 10s
-			health_timeout 5s
+			health_interval 5s
+			health_timeout 3s
 		}
 	}
 
-	# /ws — WebSocket upgrade
-	handle /ws {
+	# WebSocket → gateway.
+	handle /ws* {
 		reverse_proxy gateway:8081 {
 			health_uri /readyz
 			health_port 9100
-			health_interval 10s
-			transport http {
-				read_timeout 0
-			}
+			health_interval 5s
+			health_timeout 3s
 		}
 	}
 
-	# Default — web SPA (in-compose nginx on port 80)
+	# Everything else → web container (SPA).
 	handle {
 		reverse_proxy web:80 {
 			health_uri /healthz
 			health_interval 10s
+			health_timeout 3s
 		}
 	}
 
+	encode gzip
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
-		X-Content-Type-Options "nosniff"
-		X-Frame-Options "DENY"
-		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Content-Type-Options    "nosniff"
+		X-Frame-Options           "DENY"
+		Referrer-Policy           "strict-origin-when-cross-origin"
+	}
+}
+
+# ── HTTP (plain) — for headless tooling that can't trust the local CA ────
+# Same routing, no TLS. NEVER ship this block in the prod Caddyfile.
+http://localhost {
+	@probes path /metrics /metrics/* /readyz /readyz/* /livez /livez/* /healthz /debug/pprof /debug/pprof/*
+	handle @probes {
+		respond 404
 	}
 
-	log {
-		output stdout
-		format json
-		level INFO
+	handle /api/* {
+		reverse_proxy gateway:8081 {
+			health_uri /readyz
+			health_port 9100
+			health_interval 5s
+			health_timeout 3s
+		}
 	}
+
+	handle /ws* {
+		reverse_proxy gateway:8081 {
+			health_uri /readyz
+			health_port 9100
+			health_interval 5s
+			health_timeout 3s
+		}
+	}
+
+	handle {
+		reverse_proxy web:80 {
+			health_uri /healthz
+			health_interval 10s
+			health_timeout 3s
+		}
+	}
+
+	encode gzip
 }
