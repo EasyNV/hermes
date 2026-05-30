@@ -1,4 +1,17 @@
-.PHONY: proto-gen migrate dev test build tools clean
+.PHONY: proto-gen migrate dev test build tools clean \
+        docker-build-all docker-build-web
+
+# ── Build-time stamps for OCI labels (overridable from env) ─────────────
+GIT_VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+GIT_REVISION ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+BUILD_DATE   ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+
+DOCKER_BUILD_ARGS = \
+  --build-arg VERSION=$(GIT_VERSION) \
+  --build-arg REVISION=$(GIT_REVISION) \
+  --build-arg CREATED=$(BUILD_DATE)
+
+GO_SERVICES = gateway wa mbs campaign inbox contacts proxy notify
 
 # Proto code generation
 proto-gen:
@@ -54,3 +67,32 @@ build:
 # Clean generated files
 clean:
 	rm -rf gen/go gen/ts bin/
+
+# ─── Docker (production images, chunk 2) ─────────────────────────────────
+#
+# Build every Go service as hermes-<svc>:<version> and hermes-<svc>:latest.
+# Depends on `proto-gen` so a clean clone produces working images via:
+#     make docker-build-all
+#
+# Override stamps from env if you don't want git autodetect, e.g.:
+#     make docker-build-mbs GIT_VERSION=v0.2.0 GIT_REVISION=$(git rev-parse HEAD)
+
+docker-build-all: proto-gen
+	@for svc in $(GO_SERVICES); do \
+		echo "Building hermes-$$svc:$(GIT_VERSION) (revision $(GIT_REVISION))..."; \
+		docker build -f Dockerfile $(DOCKER_BUILD_ARGS) --build-arg SERVICE=$$svc \
+			-t hermes-$$svc:$(GIT_VERSION) -t hermes-$$svc:latest . || exit 1; \
+	done
+	$(MAKE) docker-build-web
+
+docker-build-web:
+	@echo "Building hermes-web:$(GIT_VERSION) (revision $(GIT_REVISION))..."
+	docker build -f Dockerfile.web $(DOCKER_BUILD_ARGS) \
+		-t hermes-web:$(GIT_VERSION) -t hermes-web:latest .
+
+# Single-service build: `make docker-build-mbs`, `make docker-build-gateway`, etc.
+# Pattern target — runs proto-gen first.
+docker-build-%: proto-gen
+	@echo "Building hermes-$*:$(GIT_VERSION) (revision $(GIT_REVISION))..."
+	docker build -f Dockerfile $(DOCKER_BUILD_ARGS) --build-arg SERVICE=$* \
+		-t hermes-$*:$(GIT_VERSION) -t hermes-$*:latest .

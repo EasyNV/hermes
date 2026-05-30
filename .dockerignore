@@ -8,9 +8,12 @@
 # go.mod replace directives REQUIRE these paths in the context:
 #   replace mbs-native             => ./re/mbs/mbs-native
 #   replace go.mau.fi/mautrix-meta => ./re/mbs/mautrix-meta-patched
+#
+# `gen/` (proto-generated Go + TS stubs) IS gitignored at repo level but
+# MUST stay in the build context. Operator contract: run `make proto-gen`
+# before `make docker-build-*`. The Makefile target enforces this.
 
-# Block all of re/ heavy subdirectories. These are the GB-scale paths
-# that destroyed earlier build attempts.
+# ── Heavy re/mbs subdirectories (RE artefacts, not the build) ───────────
 re/mbs/android-mbs/
 re/mbs/ghidra/
 re/mbs/ipa/
@@ -39,8 +42,7 @@ re/mbs/*.md
 re/mbs/*.bak.*
 re/mbs/c8750f0d.0
 
-# Within mbs-native (which IS needed for the build), exclude its own
-# heavy noise paths that aren't imported by the parent module.
+# ── mbs-native: trim test-only fixtures but keep //go:embed paths ───────
 #
 # DO NOT use a blanket `**/testdata/` glob — production code embeds
 # from `auth/testdata/` (deletepregent_reg_info_template.json,
@@ -57,15 +59,23 @@ re/mbs/mbs-native/third_party/utls/testdata/
 re/mbs/mbs-native/graphql/testdata/
 re/mbs/mbs-native/auth/testdata/gold_responses/
 
-# Unrelated research dirs at repo root
-celestial-research/
+# ── Test sources (not needed by production builds) ──────────────────────
+#
+# Keeping these out shrinks the build context and prevents stray testdata
+# imports from triggering rebuild churn. Restricted to repo-managed code
+# only; do NOT add `**/*_test.go` because that would also match inside
+# re/mbs/mbs-native/auth/ where some `//go:embed`-touching tests live.
+cmd/**/*_test.go
+internal/**/*_test.go
+pkg/**/*_test.go
 
-# git metadata
+# ── Repo-root noise ─────────────────────────────────────────────────────
+celestial-research/
 .git
 .gitignore
 .gitattributes
 
-# IDE / editor
+# ── IDE / editor ────────────────────────────────────────────────────────
 .idea
 .vscode
 .cursor
@@ -73,7 +83,7 @@ celestial-research/
 *.swo
 .DS_Store
 
-# Hermes session / plan / runbook content (not needed in image)
+# ── Hermes session / plan / runbook content (not needed in image) ──────
 .hermes/
 docs/
 README.md
@@ -81,18 +91,18 @@ AGENTS.md
 CLAUDE.md
 *.md
 
-# build outputs (NOT gen/ — it has protobuf bindings)
+# ── Build outputs (NOT gen/ — it has protobuf bindings) ────────────────
 bin/
 
-# frontend
+# ── Frontend (the Go images don't need it; Dockerfile.web COPYs web/) ──
 web/node_modules/
 web/dist/
 web/.vite/
 
-# secrets (never ship in image)
+# ── Secrets (never ship in image) ──────────────────────────────────────
 deploy/secrets/
 
-# temp
+# ── Temp ────────────────────────────────────────────────────────────────
 *.tmp
 *.log
 tmp/
