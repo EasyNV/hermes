@@ -563,13 +563,29 @@ func (h *Handler) StartCampaign(ctx context.Context, req *hermesv1.CampaignStart
 		return nil, status.Errorf(codes.FailedPrecondition, "campaign status is %s, must be draft or scheduled", campaign.Status)
 	}
 
-	// Validate has numbers and contacts.
-	numCount, err := h.store.CountCampaignNumbers(ctx, req.Id)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "counting numbers: %v", err)
-	}
-	if numCount == 0 {
-		return nil, status.Error(codes.FailedPrecondition, "campaign has no assigned numbers")
+	// Validate has senders and contacts. Branch on channel — chunk 9.
+	// 'wa' (or empty for wire-compat) checks campaign_senders WHERE sender_kind='wa'.
+	// 'mbs' checks campaign_senders WHERE sender_kind='mbs'.
+	var senderCount int32
+	switch campaign.Channel {
+	case "", "wa":
+		senderCount, err = h.store.CountCampaignNumbers(ctx, req.Id)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "counting numbers: %v", err)
+		}
+		if senderCount == 0 {
+			return nil, status.Error(codes.FailedPrecondition, "campaign has no assigned numbers")
+		}
+	case "mbs":
+		senderCount, err = h.store.CountCampaignMbsSessions(ctx, req.Id)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "counting mbs sessions: %v", err)
+		}
+		if senderCount == 0 {
+			return nil, status.Error(codes.FailedPrecondition, "campaign has no assigned mbs sessions")
+		}
+	default:
+		return nil, status.Errorf(codes.FailedPrecondition, "unknown campaign channel %q", campaign.Channel)
 	}
 
 	contactCount, err := h.store.CountCampaignContacts(ctx, req.Id)

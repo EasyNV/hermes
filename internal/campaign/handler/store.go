@@ -146,6 +146,8 @@ type Store interface {
 	ListCampaignContacts(ctx context.Context, campaignID, status string, page, pageSize int32) ([]*CampaignContactJoinRow, int64, error)
 	GetPendingContacts(ctx context.Context, campaignID string, limit int32) ([]*PendingContactRow, error)
 	UpdateContactSent(ctx context.Context, campaignID, contactID, waNumberID string) error
+	// UpdateContactSentMbs is the MBS-channel sibling. Added chunk 9.
+	UpdateContactSentMbs(ctx context.Context, campaignID, contactID string, uid int64) error
 	SkipPendingContacts(ctx context.Context, campaignID string) (int32, error)
 
 	// Campaign stats
@@ -161,6 +163,8 @@ type Store interface {
 	FindContactInActiveCampaigns(ctx context.Context, senderPhone string) ([]CampaignContactMatch, error)
 	GetCampaignsUsingNumber(ctx context.Context, waNumberID string, statuses []string) ([]*CampaignRow, error)
 	CountCampaignNumbers(ctx context.Context, campaignID string) (int32, error)
+	// CountCampaignMbsSessions counts MBS-channel senders (added chunk 9).
+	CountCampaignMbsSessions(ctx context.Context, campaignID string) (int32, error)
 	CountCampaignContacts(ctx context.Context, campaignID string) (int32, error)
 }
 
@@ -735,6 +739,19 @@ func (s *PgStore) UpdateContactSent(ctx context.Context, campaignID, contactID, 
 	return err
 }
 
+// UpdateContactSentMbs is the MBS-channel sibling of UpdateContactSent.
+// Writes mbs_session_uid and explicitly clears wa_number_id (defense in
+// depth against a row that was previously WA — channel is immutable
+// post-create, but the SET=NULL is cheap and forces a clean state).
+// Added chunk 9.
+func (s *PgStore) UpdateContactSentMbs(ctx context.Context, campaignID, contactID string, uid int64) error {
+	_, err := s.pool.Exec(ctx,
+		"UPDATE campaign_contacts SET status='sent', mbs_session_uid=$1, wa_number_id=NULL, sent_at=now() "+
+			"WHERE campaign_id=$2 AND contact_id=$3",
+		uid, campaignID, contactID)
+	return err
+}
+
 func (s *PgStore) SkipPendingContacts(ctx context.Context, campaignID string) (int32, error) {
 	tag, err := s.pool.Exec(ctx,
 		"UPDATE campaign_contacts SET status='skipped' WHERE campaign_id=$1 AND status='pending'",
@@ -838,6 +855,16 @@ func (s *PgStore) CountCampaignNumbers(ctx context.Context, campaignID string) (
 	// that interpret this as "how many WhatsApp numbers" (e.g. handler's
 	// CountCampaignNumbers wrapper used in summary stats).
 	err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM campaign_senders WHERE campaign_id=$1 AND sender_kind='wa'", campaignID).Scan(&count)
+	return count, err
+}
+
+// CountCampaignMbsSessions counts MBS-channel senders. MBS-side sibling
+// of CountCampaignNumbers; used by StartCampaign precondition to validate
+// that an MBS campaign has at least one assigned session before dispatch.
+// Added chunk 9.
+func (s *PgStore) CountCampaignMbsSessions(ctx context.Context, campaignID string) (int32, error) {
+	var count int32
+	err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM campaign_senders WHERE campaign_id=$1 AND sender_kind='mbs'", campaignID).Scan(&count)
 	return count, err
 }
 

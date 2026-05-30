@@ -259,6 +259,13 @@ func (m *mockStore) UpdateContactSent(ctx context.Context, campaignID, contactID
 	return nil
 }
 
+// UpdateContactSentMbs added chunk 9 — mock stub mirrors UpdateContactSent.
+// No tests exercise it via mockStore today (engine tests use their own
+// fake); kept as a no-op for interface satisfaction.
+func (m *mockStore) UpdateContactSentMbs(ctx context.Context, campaignID, contactID string, uid int64) error {
+	return nil
+}
+
 func (m *mockStore) SkipPendingContacts(ctx context.Context, campaignID string) (int32, error) {
 	if m.skipPendingContactsFn != nil {
 		return m.skipPendingContactsFn(ctx, campaignID)
@@ -326,6 +333,14 @@ func (m *mockStore) CountCampaignNumbers(ctx context.Context, campaignID string)
 	if m.countCampaignNumbersFn != nil {
 		return m.countCampaignNumbersFn(ctx, campaignID)
 	}
+	return 0, nil
+}
+
+// CountCampaignMbsSessions added chunk 9 — mock stub. Mirrors the WA stub
+// shape (no-op default) since no existing tests exercise the MBS branch
+// of StartCampaign through mockStore. Per-test overrides can wrap this
+// via a fixture (see channel_validation_test.go pattern).
+func (m *mockStore) CountCampaignMbsSessions(ctx context.Context, campaignID string) (int32, error) {
 	return 0, nil
 }
 

@@ -30,6 +30,11 @@ type engineStore interface {
 	IncrementSentCount(ctx context.Context, campaignID string) error
 	IncrementNumberSentCount(ctx context.Context, campaignID, waNumberID string) error
 	UpdateCampaignStatus(ctx context.Context, id, status string, setStarted, setCompleted bool) (*handler.CampaignRow, error)
+
+	// MBS-channel siblings, added chunk 9.
+	GetActiveCampaignMbsSessions(ctx context.Context, campaignID string) ([]*handler.CampaignMbsSessionRow, error)
+	UpdateContactSentMbs(ctx context.Context, campaignID, contactID string, uid int64) error
+	IncrementMbsSessionSentCount(ctx context.Context, campaignID string, uid int64) error
 }
 
 type runningCampaign struct {
@@ -118,6 +123,26 @@ func (e *Engine) dispatchLoop(ctx context.Context, campaignID, tenantID, workspa
 		e.log.Error().Err(err).Str("campaign_id", campaignID).Msg("failed to load template for dispatch")
 		return
 	}
+
+	// Branch on channel. Empty defaults to "wa" for wire-compat with rows
+	// that pre-date chunk-8 migration (which backfills to 'wa', but defense
+	// in depth — we never want a silent no-op dispatch).
+	switch campaign.Channel {
+	case "", "wa":
+		e.dispatchWaLoop(ctx, campaign, tmpl, tenantID, workspaceID)
+	case "mbs":
+		e.dispatchMbsLoop(ctx, campaign, tmpl, tenantID, workspaceID)
+	default:
+		e.log.Error().
+			Str("campaign_id", campaignID).
+			Str("channel", campaign.Channel).
+			Msg("unknown campaign channel, refusing dispatch")
+		return
+	}
+}
+
+func (e *Engine) dispatchWaLoop(ctx context.Context, campaign *handler.CampaignRow, tmpl *handler.TemplateRow, tenantID, workspaceID string) {
+	campaignID := campaign.ID
 
 	var rotator Rotator
 	switch campaign.RotationStrategy {
