@@ -13,12 +13,14 @@ require (
 	github.com/rs/zerolog v1.35.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	go.mau.fi/mautrix-meta v0.0.0-00010101000000-000000000000
+	go.mau.fi/util v0.9.9-0.20260505143909-8e67f0d355e0
 	go.mau.fi/whatsmeow v0.0.0-20260416104156-3ff20cd3462a
 	golang.org/x/crypto v0.50.0
 	golang.org/x/net v0.53.0
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260120221211-b8f7ae30c516
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
+	maunium.net/go/mautrix v0.27.1-0.20260507135742-7ec18e08eac3
 	mbs-native v0.0.0-00010101000000-000000000000
 )
 
@@ -57,7 +59,6 @@ require (
 	github.com/vektah/gqlparser/v2 v2.5.27 // indirect
 	github.com/yuin/goldmark v1.8.2 // indirect
 	go.mau.fi/libsignal v0.2.1 // indirect
-	go.mau.fi/util v0.9.9-0.20260505143909-8e67f0d355e0 // indirect
 	go.mau.fi/zeroconfig v0.2.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
@@ -66,7 +67,6 @@ require (
 	golang.org/x/text v0.36.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	maunium.net/go/mautrix v0.27.1-0.20260507135742-7ec18e08eac3 // indirect
 )
 
 // Stage E: hermes-mbs depends on the mbs-native client library and the
@@ -74,3 +74,14 @@ require (
 replace mbs-native => ./re/mbs/mbs-native
 
 replace go.mau.fi/mautrix-meta => ./re/mbs/mautrix-meta-patched
+
+// Stage F follow-up (2026-05-30): mbs-native/transport advertises Meta's
+// proprietary 0xfb1a TLS-version codepoint in supported_versions for JA4
+// fidelity. Upstream refraction-networking/utls rejects 0xfb1a when the
+// server picks it back, with "tls: server selected unsupported protocol
+// version fb1a". Our vendored fork at re/mbs/mbs-native/third_party/utls
+// patches pickTLSVersion to alias 0xfb1a → VersionTLS13. The replace
+// MUST live in the main module's go.mod — replace directives inside a
+// replaced module (re/mbs/mbs-native/go.mod) are ignored by the build.
+// See docs/research/mbs-fb1a-utls-fork-future-work.md.
+replace github.com/refraction-networking/utls => ./re/mbs/mbs-native/third_party/utls

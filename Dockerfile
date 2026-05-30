@@ -30,9 +30,10 @@ WORKDIR /src
 
 # ── Module-graph layer (cached unless go.mod / go.sum changes) ──────────────
 #
-# The hermes-mbs build pulls in two local-replace modules:
-#   replace mbs-native             => ./re/mbs/mbs-native
-#   replace go.mau.fi/mautrix-meta => ./re/mbs/mautrix-meta-patched
+# The hermes-mbs build pulls in three local-replace modules:
+#   replace mbs-native                            => ./re/mbs/mbs-native
+#   replace go.mau.fi/mautrix-meta                => ./re/mbs/mautrix-meta-patched
+#   replace github.com/refraction-networking/utls => ./re/mbs/mbs-native/third_party/utls
 #
 # Their go.mod / go.sum must be present *before* `go mod download` so the
 # replace targets resolve. Other services don't import them, but copying these
@@ -40,6 +41,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 COPY re/mbs/mautrix-meta-patched/go.mod re/mbs/mautrix-meta-patched/go.sum re/mbs/mautrix-meta-patched/
 COPY re/mbs/mbs-native/go.mod re/mbs/mbs-native/go.sum re/mbs/mbs-native/
+COPY re/mbs/mbs-native/third_party/utls/go.mod re/mbs/mbs-native/third_party/utls/go.sum re/mbs/mbs-native/third_party/utls/
 
 RUN go mod download
 
