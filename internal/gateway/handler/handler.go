@@ -1183,6 +1183,10 @@ func (h *Handler) CreateCampaign(ctx context.Context, req *hermesv1.CreateCampai
 		WaNumberIds:       req.GetWaNumberIds(),
 		ContactIds:        req.GetContactIds(),
 		CreatedBy:         userID,
+		// Chunk 8: forward channel + mbs_session_uids. Campaign service
+		// owns validation (mutual exclusion, allowed values).
+		Channel:        req.GetChannel(),
+		MbsSessionUids: req.GetMbsSessionUids(),
 	})
 	if err != nil {
 		return nil, err

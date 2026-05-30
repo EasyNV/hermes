@@ -165,6 +165,7 @@ func campaignRowToProto(r *CampaignRow) *hermesv1.Campaign {
 		BannedCount:       r.BannedCount,
 		CreatedBy:         r.CreatedBy,
 		CreatedAt:         timestamppb.New(r.CreatedAt),
+		Channel:           r.Channel,
 	}
 	if r.ScheduleAt != nil {
 		c.ScheduleAt = timestamppb.New(*r.ScheduleAt)
@@ -380,6 +381,30 @@ func (h *Handler) CreateCampaign(ctx context.Context, req *hermesv1.CampaignCrea
 		return nil, status.Error(codes.InvalidArgument, "name is required")
 	}
 
+	// ─── Chunk 8: channel validation ──────────────────────────────
+	//
+	// Defaults: empty channel → 'wa' (wire-compat with pre-chunk-8
+	// clients). Anything other than 'wa'/'mbs' is rejected.
+	//
+	// Mutual exclusion: callers MUST set wa_number_ids xor
+	// mbs_session_uids matching their declared channel. Both empty is
+	// allowed (DRAFT campaign with no senders yet; UpdateCampaignNumbers
+	// can attach later). Setting the OTHER channel's senders is a
+	// programmer error and gets InvalidArgument.
+	channel := req.Channel
+	if channel == "" {
+		channel = "wa"
+	}
+	if channel != "wa" && channel != "mbs" {
+		return nil, status.Errorf(codes.InvalidArgument, "channel must be 'wa' or 'mbs', got %q", channel)
+	}
+	if channel == "wa" && len(req.MbsSessionUids) > 0 {
+		return nil, status.Error(codes.InvalidArgument, "mbs_session_uids must be empty when channel='wa'")
+	}
+	if channel == "mbs" && len(req.WaNumberIds) > 0 {
+		return nil, status.Error(codes.InvalidArgument, "wa_number_ids must be empty when channel='mbs'")
+	}
+
 	// Verify template exists.
 	tmpl, err := h.store.GetTemplate(ctx, req.TemplateId)
 	if err != nil {
@@ -399,6 +424,7 @@ func (h *Handler) CreateCampaign(ctx context.Context, req *hermesv1.CampaignCrea
 		DelayMinMs:        req.DelayMinMs,
 		DelayMaxMs:        req.DelayMaxMs,
 		CreatedBy:         req.CreatedBy,
+		Channel:           channel,
 	}
 	if req.ScheduleAt != nil {
 		t := req.ScheduleAt.AsTime()
@@ -419,10 +445,17 @@ func (h *Handler) CreateCampaign(ctx context.Context, req *hermesv1.CampaignCrea
 		return nil, status.Errorf(codes.Internal, "creating campaign: %v", err)
 	}
 
-	// Add initial numbers and contacts if provided.
+	// Add initial senders + contacts if provided. Channel selects which
+	// add path runs; the validation above ensures the OTHER channel's
+	// field is empty so only one branch fires.
 	if len(req.WaNumberIds) > 0 {
 		if err := h.store.AddCampaignNumbers(ctx, campaign.ID, req.WaNumberIds); err != nil {
 			return nil, status.Errorf(codes.Internal, "adding numbers: %v", err)
+		}
+	}
+	if len(req.MbsSessionUids) > 0 {
+		if err := h.store.AddCampaignMbsSessions(ctx, campaign.ID, req.MbsSessionUids); err != nil {
+			return nil, status.Errorf(codes.Internal, "adding mbs sessions: %v", err)
 		}
 	}
 	if len(req.ContactIds) > 0 {

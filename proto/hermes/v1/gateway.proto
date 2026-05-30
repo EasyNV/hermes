@@ -885,10 +885,15 @@ message CreateCampaignRequest {
   RotationStrategy rotation_strategy = 7;
   int32 delay_min_ms = 8;
   int32 delay_max_ms = 9;
-  // WA number IDs to assign to this campaign.
+  // WA number IDs to assign. Required + non-empty iff channel='wa'.
   repeated string wa_number_ids = 10;
   // Contact IDs to include in this campaign.
   repeated string contact_ids = 11;
+  // Dispatch channel: 'wa' (default) or 'mbs'. Added Stage F follow-up
+  // chunk 8 (2026-05-30). Mirror of CampaignCreateRequest.channel.
+  string channel = 12;
+  // MBS session UIDs to assign. Required + non-empty iff channel='mbs'.
+  repeated int64 mbs_session_uids = 13;
 }
 
 message CreateCampaignResponse {

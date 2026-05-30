@@ -60,13 +60,28 @@ type CampaignRow struct {
 	CreatedAt         time.Time
 	StartedAt         *time.Time
 	CompletedAt       *time.Time
+	// Channel: 'wa' or 'mbs'. Added Stage F follow-up chunk 8.
+	// Persisted as TEXT NOT NULL DEFAULT 'wa'; existing rows backfilled
+	// to 'wa' by migrations/campaign/000002_multi_channel.up.sql.
+	Channel string
 }
 
 type CampaignNumberRow struct {
-	CampaignID string
-	WaNumberID string
-	Status     string
-	SentCount  int32
+	CampaignID  string
+	WaNumberID  string
+	Status      string
+	SentCount   int32
+	FailedCount int32
+}
+
+// CampaignMbsSessionRow mirrors campaign_senders rows where
+// sender_kind='mbs'. UID is parsed from sender_id::TEXT at read time.
+// Added chunk 8.
+type CampaignMbsSessionRow struct {
+	CampaignID  string
+	UID         int64
+	Status      string
+	SentCount   int32
 	FailedCount int32
 }
 
@@ -118,6 +133,13 @@ type Store interface {
 	UpdateCampaignNumberStatus(ctx context.Context, campaignID, waNumberID, status string) error
 	IncrementNumberSentCount(ctx context.Context, campaignID, waNumberID string) error
 
+	// Campaign MBS Sessions (added chunk 8 — channel='mbs' siblings).
+	AddCampaignMbsSessions(ctx context.Context, campaignID string, uids []int64) error
+	RemoveCampaignMbsSessions(ctx context.Context, campaignID string, uids []int64) error
+	GetActiveCampaignMbsSessions(ctx context.Context, campaignID string) ([]*CampaignMbsSessionRow, error)
+	UpdateCampaignMbsSessionStatus(ctx context.Context, campaignID string, uid int64, status string) error
+	IncrementMbsSessionSentCount(ctx context.Context, campaignID string, uid int64) error
+
 	// Campaign Contacts
 	AddCampaignContacts(ctx context.Context, campaignID string, contactIDs []string) (int32, error)
 	RemoveCampaignContacts(ctx context.Context, campaignID string, contactIDs []string) (int32, error)
@@ -160,7 +182,13 @@ func NewPgStore(pool *pgxpool.Pool) *PgStore {
 }
 
 const templateCols = "id, workspace_id, name, body, media_url, media_type, variables, created_by, created_at"
-const campaignCols = "id, workspace_id, template_id, name, status, schedule_at, daily_cap_per_num, ban_pause_threshold, rotation_strategy, delay_min_ms, delay_max_ms, total_contacts, sent_count, failed_count, replied_count, banned_count, created_by, created_at, started_at, completed_at"
+
+// campaignCols includes `channel` at position 21 (added chunk 8).
+// All scanCampaign/scanCampaigns scans must include &c.Channel at the
+// same position. CreateCampaign does NOT include channel in its INSERT
+// list because the DB default ('wa') applies; CreateCampaign explicitly
+// passes channel only when the caller specified 'mbs'.
+const campaignCols = "id, workspace_id, template_id, name, status, schedule_at, daily_cap_per_num, ban_pause_threshold, rotation_strategy, delay_min_ms, delay_max_ms, total_contacts, sent_count, failed_count, replied_count, banned_count, created_by, created_at, started_at, completed_at, channel"
 
 func scanTemplate(row pgx.Row) (*TemplateRow, error) {
 	t := &TemplateRow{}
@@ -183,6 +211,7 @@ func scanCampaign(row pgx.Row) (*CampaignRow, error) {
 		&c.TotalContacts, &c.SentCount, &c.FailedCount,
 		&c.RepliedCount, &c.BannedCount, &c.CreatedBy,
 		&c.CreatedAt, &c.StartedAt, &c.CompletedAt,
+		&c.Channel,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -205,6 +234,7 @@ func scanCampaigns(rows pgx.Rows) ([]*CampaignRow, error) {
 			&c.TotalContacts, &c.SentCount, &c.FailedCount,
 			&c.RepliedCount, &c.BannedCount, &c.CreatedBy,
 			&c.CreatedAt, &c.StartedAt, &c.CompletedAt,
+			&c.Channel,
 		); err != nil {
 			return nil, err
 		}
@@ -342,12 +372,19 @@ func (s *PgStore) TemplateUsedByActiveCampaign(ctx context.Context, templateID s
 // ---------------------------------------------------------------------------
 
 func (s *PgStore) CreateCampaign(ctx context.Context, r *CampaignRow) (*CampaignRow, error) {
+	// Channel defaults to 'wa' at the DB layer; explicit pass-through
+	// supports 'mbs' (added chunk 8). Empty Channel falls through to the
+	// default — preserves wire-compat for old clients that don't set it.
+	channel := r.Channel
+	if channel == "" {
+		channel = "wa"
+	}
 	row := s.pool.QueryRow(ctx,
-		`INSERT INTO campaigns (workspace_id, template_id, name, schedule_at, daily_cap_per_num, ban_pause_threshold, rotation_strategy, delay_min_ms, delay_max_ms, created_by)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING `+campaignCols,
+		`INSERT INTO campaigns (workspace_id, template_id, name, schedule_at, daily_cap_per_num, ban_pause_threshold, rotation_strategy, delay_min_ms, delay_max_ms, created_by, channel)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING `+campaignCols,
 		r.WorkspaceID, r.TemplateID, r.Name, r.ScheduleAt,
 		r.DailyCapPerNum, r.BanPauseThreshold, r.RotationStrategy,
-		r.DelayMinMs, r.DelayMaxMs, r.CreatedBy,
+		r.DelayMinMs, r.DelayMaxMs, r.CreatedBy, channel,
 	)
 	c, err := scanCampaign(row)
 	if err != nil {
@@ -417,10 +454,19 @@ func (s *PgStore) UpdateCampaignStatus(ctx context.Context, id, status string, s
 // Campaign Numbers
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Campaign Senders (campaign_senders table, sender_kind discriminated)
+//
+// The original campaign_numbers table was renamed to campaign_senders in
+// chunk 8 (migrations/campaign/000002_multi_channel.up.sql). Existing
+// methods preserve their WA-only semantics by filtering sender_kind='wa';
+// new MBS-side methods are siblings filtering sender_kind='mbs'.
+// ---------------------------------------------------------------------------
+
 func (s *PgStore) AddCampaignNumbers(ctx context.Context, campaignID string, waNumberIDs []string) error {
 	for _, nid := range waNumberIDs {
 		_, err := s.pool.Exec(ctx,
-			"INSERT INTO campaign_numbers (campaign_id, wa_number_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+			"INSERT INTO campaign_senders (campaign_id, sender_kind, sender_id) VALUES ($1, 'wa', $2) ON CONFLICT DO NOTHING",
 			campaignID, nid)
 		if err != nil {
 			return fmt.Errorf("adding campaign number %s: %w", nid, err)
@@ -432,7 +478,7 @@ func (s *PgStore) AddCampaignNumbers(ctx context.Context, campaignID string, waN
 func (s *PgStore) RemoveCampaignNumbers(ctx context.Context, campaignID string, waNumberIDs []string) error {
 	for _, nid := range waNumberIDs {
 		_, err := s.pool.Exec(ctx,
-			"DELETE FROM campaign_numbers WHERE campaign_id=$1 AND wa_number_id=$2",
+			"DELETE FROM campaign_senders WHERE campaign_id=$1 AND sender_kind='wa' AND sender_id=$2",
 			campaignID, nid)
 		if err != nil {
 			return fmt.Errorf("removing campaign number %s: %w", nid, err)
@@ -443,13 +489,13 @@ func (s *PgStore) RemoveCampaignNumbers(ctx context.Context, campaignID string, 
 
 func (s *PgStore) ListCampaignNumbers(ctx context.Context, campaignID string, page, pageSize int32) ([]*CampaignNumberRow, int64, error) {
 	var total int64
-	if err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM campaign_numbers WHERE campaign_id=$1", campaignID).Scan(&total); err != nil {
+	if err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM campaign_senders WHERE campaign_id=$1 AND sender_kind='wa'", campaignID).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
 	offset := (page - 1) * pageSize
 	rows, err := s.pool.Query(ctx,
-		"SELECT campaign_id, wa_number_id, status, sent_count, failed_count FROM campaign_numbers WHERE campaign_id=$1 ORDER BY wa_number_id LIMIT $2 OFFSET $3",
+		"SELECT campaign_id, sender_id, status, sent_count, failed_count FROM campaign_senders WHERE campaign_id=$1 AND sender_kind='wa' ORDER BY sender_id LIMIT $2 OFFSET $3",
 		campaignID, pageSize, offset)
 	if err != nil {
 		return nil, 0, err
@@ -469,7 +515,7 @@ func (s *PgStore) ListCampaignNumbers(ctx context.Context, campaignID string, pa
 
 func (s *PgStore) GetActiveCampaignNumbers(ctx context.Context, campaignID string) ([]*CampaignNumberRow, error) {
 	rows, err := s.pool.Query(ctx,
-		"SELECT campaign_id, wa_number_id, status, sent_count, failed_count FROM campaign_numbers WHERE campaign_id=$1 AND status='active'",
+		"SELECT campaign_id, sender_id, status, sent_count, failed_count FROM campaign_senders WHERE campaign_id=$1 AND sender_kind='wa' AND status='active'",
 		campaignID)
 	if err != nil {
 		return nil, err
@@ -489,15 +535,87 @@ func (s *PgStore) GetActiveCampaignNumbers(ctx context.Context, campaignID strin
 
 func (s *PgStore) UpdateCampaignNumberStatus(ctx context.Context, campaignID, waNumberID, status string) error {
 	_, err := s.pool.Exec(ctx,
-		"UPDATE campaign_numbers SET status=$1 WHERE campaign_id=$2 AND wa_number_id=$3",
+		"UPDATE campaign_senders SET status=$1 WHERE campaign_id=$2 AND sender_kind='wa' AND sender_id=$3",
 		status, campaignID, waNumberID)
 	return err
 }
 
 func (s *PgStore) IncrementNumberSentCount(ctx context.Context, campaignID, waNumberID string) error {
 	_, err := s.pool.Exec(ctx,
-		"UPDATE campaign_numbers SET sent_count = sent_count + 1 WHERE campaign_id=$1 AND wa_number_id=$2",
+		"UPDATE campaign_senders SET sent_count = sent_count + 1 WHERE campaign_id=$1 AND sender_kind='wa' AND sender_id=$2",
 		campaignID, waNumberID)
+	return err
+}
+
+// ─── MBS sender variants (added chunk 8) ────────────────────────────
+//
+// Mirror the WA-side methods but filter sender_kind='mbs' and cast
+// sender_id (TEXT) ↔ uid (BIGINT) at the boundary. UID is stored as the
+// decimal string of the BIGINT so the column type stays uniform with
+// WA's UUID strings.
+
+func (s *PgStore) AddCampaignMbsSessions(ctx context.Context, campaignID string, uids []int64) error {
+	for _, uid := range uids {
+		_, err := s.pool.Exec(ctx,
+			"INSERT INTO campaign_senders (campaign_id, sender_kind, sender_id) VALUES ($1, 'mbs', $2) ON CONFLICT DO NOTHING",
+			campaignID, fmt.Sprintf("%d", uid))
+		if err != nil {
+			return fmt.Errorf("adding campaign mbs session %d: %w", uid, err)
+		}
+	}
+	return nil
+}
+
+func (s *PgStore) RemoveCampaignMbsSessions(ctx context.Context, campaignID string, uids []int64) error {
+	for _, uid := range uids {
+		_, err := s.pool.Exec(ctx,
+			"DELETE FROM campaign_senders WHERE campaign_id=$1 AND sender_kind='mbs' AND sender_id=$2",
+			campaignID, fmt.Sprintf("%d", uid))
+		if err != nil {
+			return fmt.Errorf("removing campaign mbs session %d: %w", uid, err)
+		}
+	}
+	return nil
+}
+
+func (s *PgStore) GetActiveCampaignMbsSessions(ctx context.Context, campaignID string) ([]*CampaignMbsSessionRow, error) {
+	rows, err := s.pool.Query(ctx,
+		"SELECT campaign_id, sender_id, status, sent_count, failed_count FROM campaign_senders WHERE campaign_id=$1 AND sender_kind='mbs' AND status='active'",
+		campaignID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []*CampaignMbsSessionRow
+	for rows.Next() {
+		var uidStr string
+		row := &CampaignMbsSessionRow{}
+		if err := rows.Scan(&row.CampaignID, &uidStr, &row.Status, &row.SentCount, &row.FailedCount); err != nil {
+			return nil, err
+		}
+		// Defensive: refuse to silently drop a row with a corrupt sender_id.
+		// The migration backfills only valid digit strings; bad data here
+		// would mean an external write went rogue.
+		if _, err := fmt.Sscanf(uidStr, "%d", &row.UID); err != nil {
+			return nil, fmt.Errorf("campaign_senders.sender_id %q is not a valid MBS uid: %w", uidStr, err)
+		}
+		list = append(list, row)
+	}
+	return list, rows.Err()
+}
+
+func (s *PgStore) UpdateCampaignMbsSessionStatus(ctx context.Context, campaignID string, uid int64, status string) error {
+	_, err := s.pool.Exec(ctx,
+		"UPDATE campaign_senders SET status=$1 WHERE campaign_id=$2 AND sender_kind='mbs' AND sender_id=$3",
+		status, campaignID, fmt.Sprintf("%d", uid))
+	return err
+}
+
+func (s *PgStore) IncrementMbsSessionSentCount(ctx context.Context, campaignID string, uid int64) error {
+	_, err := s.pool.Exec(ctx,
+		"UPDATE campaign_senders SET sent_count = sent_count + 1 WHERE campaign_id=$1 AND sender_kind='mbs' AND sender_id=$2",
+		campaignID, fmt.Sprintf("%d", uid))
 	return err
 }
 
@@ -704,8 +822,8 @@ func (s *PgStore) FindContactInActiveCampaigns(ctx context.Context, senderPhone 
 func (s *PgStore) GetCampaignsUsingNumber(ctx context.Context, waNumberID string, statuses []string) ([]*CampaignRow, error) {
 	query := fmt.Sprintf(
 		`SELECT DISTINCT %s FROM campaigns c
-		 JOIN campaign_numbers cn ON cn.campaign_id = c.id
-		 WHERE cn.wa_number_id = $1 AND c.status = ANY($2)`, campaignCols)
+		 JOIN campaign_senders cn ON cn.campaign_id = c.id
+		 WHERE cn.sender_kind='wa' AND cn.sender_id = $1 AND c.status = ANY($2)`, campaignCols)
 
 	rows, err := s.pool.Query(ctx, query, waNumberID, statuses)
 	if err != nil {
@@ -716,7 +834,10 @@ func (s *PgStore) GetCampaignsUsingNumber(ctx context.Context, waNumberID string
 
 func (s *PgStore) CountCampaignNumbers(ctx context.Context, campaignID string) (int32, error) {
 	var count int32
-	err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM campaign_numbers WHERE campaign_id=$1", campaignID).Scan(&count)
+	// Counts WA-channel senders only — keeps backward-compat with callers
+	// that interpret this as "how many WhatsApp numbers" (e.g. handler's
+	// CountCampaignNumbers wrapper used in summary stats).
+	err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM campaign_senders WHERE campaign_id=$1 AND sender_kind='wa'", campaignID).Scan(&count)
 	return count, err
 }
 

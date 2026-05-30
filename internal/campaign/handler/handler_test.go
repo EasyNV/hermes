@@ -199,6 +199,31 @@ func (m *mockStore) IncrementNumberSentCount(ctx context.Context, campaignID, wa
 	return nil
 }
 
+// ── Chunk 8 MBS sender mock methods (no scripting hooks needed; tests
+// don't exercise MBS dispatch yet — these stubs satisfy Store interface
+// so the WA-focused test suite still compiles. Chunk 9 will add tests
+// that exercise these paths with real scripting.) ─────────────────
+
+func (m *mockStore) AddCampaignMbsSessions(_ context.Context, _ string, _ []int64) error {
+	return nil
+}
+
+func (m *mockStore) RemoveCampaignMbsSessions(_ context.Context, _ string, _ []int64) error {
+	return nil
+}
+
+func (m *mockStore) GetActiveCampaignMbsSessions(_ context.Context, _ string) ([]*CampaignMbsSessionRow, error) {
+	return nil, nil
+}
+
+func (m *mockStore) UpdateCampaignMbsSessionStatus(_ context.Context, _ string, _ int64, _ string) error {
+	return nil
+}
+
+func (m *mockStore) IncrementMbsSessionSentCount(_ context.Context, _ string, _ int64) error {
+	return nil
+}
+
 func (m *mockStore) AddCampaignContacts(ctx context.Context, campaignID string, contactIDs []string) (int32, error) {
 	if m.addCampaignContactsFn != nil {
 		return m.addCampaignContactsFn(ctx, campaignID, contactIDs)

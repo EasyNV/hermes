@@ -126,12 +126,19 @@ message CampaignCreateRequest {
   int32 delay_min_ms = 8;
   // Max delay between consecutive sends from the same number (ms).
   int32 delay_max_ms = 9;
-  // WA number IDs to assign.
+  // WA number IDs to assign. Required + non-empty iff channel='wa'.
   repeated string wa_number_ids = 10;
   // Contact IDs to include.
   repeated string contact_ids = 11;
   // User who created this campaign.
   string created_by = 12;
+  // Dispatch channel: 'wa' (default) or 'mbs'. Added Stage F follow-up
+  // chunk 8 (2026-05-30). Empty defaults to 'wa' for backward compat.
+  string channel = 13;
+  // MBS session UIDs to assign. Required + non-empty iff channel='mbs'.
+  // Mutually exclusive with wa_number_ids — server rejects requests
+  // that set both with InvalidArgument.
+  repeated int64 mbs_session_uids = 14;
 }
 
 message CampaignCreateResponse {

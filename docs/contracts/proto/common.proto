@@ -405,6 +405,11 @@ message Campaign {
   google.protobuf.Timestamp created_at = 18;
   google.protobuf.Timestamp started_at = 19;
   google.protobuf.Timestamp completed_at = 20;
+  // Dispatch channel: 'wa' (WhatsApp via hermes-wa) or 'mbs' (Meta
+  // Business Suite via hermes-mbs). Added Stage F follow-up chunk 8
+  // (2026-05-30). Empty / unset on the wire treated as 'wa' for
+  // backward compat. Immutable after CreateCampaign.
+  string channel = 21;
 }
 
 // CampaignNumber is a WhatsApp number assigned to a campaign.

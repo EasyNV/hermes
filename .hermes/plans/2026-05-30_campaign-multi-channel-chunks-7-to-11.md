@@ -101,24 +101,18 @@ This chunk is **schema only**, no behaviour change yet. Splitting it from chunk 
 | `internal/gateway/handler/handler.go::CreateCampaign` | Forward `channel` + `mbs_session_uids` to campaign client |
 | `internal/gateway/rest/handlers.go` | No change needed (proto-driven through `readProto`) |
 
-### Schema decision — parallel table vs. discriminated column
+### Schema decision — confirmed: discriminated column (option α)
 
-**Option α — Discriminated column** (`campaign_numbers` becomes `campaign_senders` with `sender_kind`/`sender_id`):
-- ✅ Single rotation/dispatch query no matter the channel
-- ✅ Future channels (LinkedIn, Telegram?) drop in cleanly
-- ❌ Breaking change to the table — needs data migration on existing campaigns
-- ❌ FK to `wa_numbers(id)` lost (sender_id is generic text)
+Sam picked **α (discriminated column)**. `campaign_numbers` becomes
+`campaign_senders` with `sender_kind` + `sender_id` (TEXT). Single
+rotation/dispatch query no matter the channel; future channels drop in
+cleanly. The data migration on the small senders table is acceptable
+(rows = num_campaigns × num_senders_per_campaign, low cardinality).
 
-**Option β — Parallel table** (`campaign_mbs_sessions(campaign_id, mbs_session_uid)`):
-- ✅ Zero impact on existing `campaign_numbers` and existing WA campaigns
-- ✅ Per-channel FK constraints preserved
-- ✅ Easy rollback (drop the new table)
-- ❌ Engine has to dispatch on `campaign.channel` and read from different tables
-- ❌ Two parallel codepaths in the campaign service
-
-**Recommendation: Option β (parallel table).** WA and MBS sends have genuinely different semantics — different rate limits, different rotation criteria (WA: daily cap + health score; MBS: per-page cooldown + asset registration), different idempotency keys. Forcing them into one rotation table creates accidental complexity. The two-codepath cost is honest about the underlying difference; the rotation interface in `internal/campaign/engine/rotation.go` is small enough to copy-with-edits for MBS.
-
-If you want α instead, say so before I migrate.
+For `campaign_contacts` (chunk 9) Sam picked **9-α (additive BIGINT
+column)** to AVOID renaming the potentially-large contacts log table.
+The asymmetry is intentional: discriminate the small table, keep the
+large one additive.
 
 ### Behaviour
 
