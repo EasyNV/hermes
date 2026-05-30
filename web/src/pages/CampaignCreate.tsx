@@ -15,6 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Separator } from '@/components/ui/separator'
 import { Pagination } from '@/components/shared/Pagination'
 import { StatusBadge } from '@/components/shared/StatusBadge'
+import { TagInput } from '@/components/shared/TagInput'
 import { WA_STATUS } from '@/lib/constants'
 import { cn, formatPhone, formatNumber, truncate } from '@/lib/utils'
 
@@ -173,10 +174,21 @@ function StepSelectContacts({
 }) {
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
+  // Chunk 7: tag filter for the picker. Filter applies to the LIST view only;
+  // selection persists across filter changes because `selectedIds` is the
+  // wizard's `form.contactIds` (lifted state). Backend filters with AND
+  // cardinality — a contact must carry every selected tag to appear.
+  const [filterTags, setFilterTags] = useState<string[]>([])
 
   const { data, isLoading } = useQuery({
-    queryKey: ['contacts', tenantId, page, search],
-    queryFn: () => listContacts({ tenantId, search: search || undefined, page, pageSize: PAGE_SIZE }),
+    queryKey: ['contacts', tenantId, page, search, filterTags],
+    queryFn: () => listContacts({
+      tenantId,
+      search: search || undefined,
+      tags: filterTags.length > 0 ? filterTags : undefined,
+      page,
+      pageSize: PAGE_SIZE,
+    }),
   })
 
   const contacts = data?.contacts ?? []
@@ -184,16 +196,28 @@ function StepSelectContacts({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-4">
-        <Input
-          placeholder="Search contacts by name or phone..."
-          value={search}
-          onChange={(e) => {
-            setSearch(e.target.value)
-            setPage(1)
-          }}
-          className="max-w-sm"
-        />
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-1 flex-col gap-2 sm:flex-row sm:items-center">
+          <Input
+            placeholder="Search contacts by name or phone..."
+            value={search}
+            onChange={(e) => {
+              setSearch(e.target.value)
+              setPage(1)
+            }}
+            className="sm:max-w-sm"
+          />
+          <div className="flex-1 sm:max-w-md">
+            <TagInput
+              value={filterTags}
+              onChange={(next) => {
+                setFilterTags(next)
+                setPage(1)
+              }}
+              placeholder="Filter by tags (Enter to add)"
+            />
+          </div>
+        </div>
         <span className="text-sm font-medium text-muted-foreground whitespace-nowrap">
           {formatNumber(selectedIds.length)} selected
         </span>

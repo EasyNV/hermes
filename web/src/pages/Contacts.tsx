@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Search, Plus, Upload, MoreHorizontal, Pencil, Trash2, X } from 'lucide-react'
+import { Search, Plus, Upload, MoreHorizontal, Pencil, Trash2 } from 'lucide-react'
 import { useAuthStore } from '@/stores/auth'
 import { useDebounce } from '@/hooks/useDebounce'
 import { listContacts, createContact, updateContact, deleteContact, importContacts } from '@/api/contacts'
@@ -8,6 +8,7 @@ import type { Contact } from '@/api/types'
 import { formatPhone, truncate } from '@/lib/utils'
 import { Pagination } from '@/components/shared/Pagination'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+import { TagInput } from '@/components/shared/TagInput'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -24,55 +25,6 @@ import {
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from '@/components/ui/select'
-
-// ── Tag Input ───────────────────────────────────────────────
-interface TagInputProps {
-  value: string[]
-  onChange: (tags: string[]) => void
-  placeholder?: string
-}
-
-function TagInput({ value, onChange, placeholder = 'Type and press Enter' }: TagInputProps) {
-  const [input, setInput] = useState('')
-
-  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (e.key === 'Enter' && input.trim()) {
-      e.preventDefault()
-      const tag = input.trim()
-      if (!value.includes(tag)) {
-        onChange([...value, tag])
-      }
-      setInput('')
-    }
-    if (e.key === 'Backspace' && !input && value.length > 0) {
-      onChange(value.slice(0, -1))
-    }
-  }
-
-  function removeTag(tag: string) {
-    onChange(value.filter((t) => t !== tag))
-  }
-
-  return (
-    <div className="flex flex-wrap items-center gap-1.5 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2">
-      {value.map((tag) => (
-        <Badge key={tag} variant="secondary" className="gap-1">
-          {tag}
-          <button type="button" onClick={() => removeTag(tag)} className="ml-0.5 hover:text-destructive">
-            <X className="h-3 w-3" />
-          </button>
-        </Badge>
-      ))}
-      <input
-        className="flex-1 bg-transparent outline-none placeholder:text-muted-foreground min-w-[80px]"
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={handleKeyDown}
-        placeholder={value.length === 0 ? placeholder : ''}
-      />
-    </div>
-  )
-}
 
 // ── CSV Column Mapping ──────────────────────────────────────
 const MAPPABLE_FIELDS = ['phone', 'name', 'tags'] as const
