@@ -192,6 +192,11 @@ export interface Campaign {
   createdAt: string
   startedAt?: string
   completedAt?: string
+  // Stage F follow-up chunk 8 (2026-05-30) — dispatch channel.
+  // 'wa' (default) | 'mbs'. Empty in wire payloads is treated as 'wa'
+  // by the server for backward compat with old clients; new code should
+  // always populate this.
+  channel: 'wa' | 'mbs'
 }
 
 export interface CampaignNumber {
@@ -328,6 +333,13 @@ export interface MbsSession {
   cookieExpiresAt: string
   burnedAt: string         // empty unless state === BURNED
   burnedReason: string
+  // Primary asset embedded inline by listMbsSessions / getMbsSessionStatus.
+  // Added Stage F follow-up chunk 8 (2026-05-30) — campaign picker reads
+  // wecPhoneNumber + wecAccountRegistered to decide pickability.
+  // Optional: a session in 'bridging' state may not yet have a primary
+  // asset (Stage B.2 sets is_primary on a row in mbs_session_assets only
+  // after the WEC verification roundtrip).
+  primaryAsset?: MbsAsset
 }
 
 // MbsAsset — wire shape from proto MbsAsset (proto/hermes/v1/mbs.proto).

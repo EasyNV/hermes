@@ -8,7 +8,13 @@ import type {
 export function createCampaign(params: {
   workspaceId: string; templateId: string; name: string; scheduleAt?: string
   dailyCapPerNum?: number; banPauseThreshold?: number; rotationStrategy?: RotationStrategy
-  delayMinMs?: number; delayMaxMs?: number; waNumberIds: string[]; contactIds: string[]
+  delayMinMs?: number; delayMaxMs?: number; contactIds: string[]
+  // Stage F follow-up chunk 8 — channel-first. 'wa' (default) or 'mbs'.
+  // The two ID lists are mutually exclusive at the API boundary; the
+  // server rejects mixed combinations with InvalidArgument.
+  channel?: 'wa' | 'mbs'
+  waNumberIds?: string[]
+  mbsSessionUids?: string[]
 }) {
   return api.post<{ campaign: Campaign }>('/campaigns', params)
 }

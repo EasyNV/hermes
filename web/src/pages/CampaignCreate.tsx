@@ -5,8 +5,9 @@ import { useAuthStore } from '@/stores/auth'
 import { listTemplates } from '@/api/templates'
 import { listContacts } from '@/api/contacts'
 import { listWaNumbers } from '@/api/numbers'
+import { listMbsSessions } from '@/api/mbs'
 import { createCampaign, startCampaign } from '@/api/campaigns'
-import type { Template, Contact, WaNumber, RotationStrategy } from '@/api/types'
+import type { Template, Contact, WaNumber, MbsSession, RotationStrategy } from '@/api/types'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -19,13 +20,20 @@ import { TagInput } from '@/components/shared/TagInput'
 import { WA_STATUS } from '@/lib/constants'
 import { cn, formatPhone, formatNumber, truncate } from '@/lib/utils'
 
-const STEPS = ['Select Template', 'Select Contacts', 'Select Numbers', 'Configure', 'Review & Launch'] as const
+type Channel = 'wa' | 'mbs'
+
+// Chunk 10 — channel-first wizard. New step 0 picks the channel, then
+// step 3 conditionally renders WA-numbers or MBS-sessions. Existing
+// 5-step WA flow is preserved; MBS flow follows the same shape.
+const STEPS = ['Select Channel', 'Select Template', 'Select Contacts', 'Select Senders', 'Configure', 'Review & Launch'] as const
 const PAGE_SIZE = 10
 
 interface FormState {
+  channel: Channel
   templateId: string
   contactIds: string[]
   waNumberIds: string[]
+  mbsSessionUids: string[]
   name: string
   dailyCapPerNum: number
   banPauseThreshold: number
@@ -35,9 +43,11 @@ interface FormState {
 }
 
 const initialForm: FormState = {
+  channel: 'wa',
   templateId: '',
   contactIds: [],
   waNumberIds: [],
+  mbsSessionUids: [],
   name: '',
   dailyCapPerNum: 200,
   banPauseThreshold: 3,
@@ -159,6 +169,66 @@ function StepSelectTemplate({
         ))}
       </div>
       {data?.pagination && <Pagination pagination={data.pagination} onPageChange={setPage} />}
+    </div>
+  )
+}
+
+function StepSelectChannel({
+  value,
+  onChange,
+}: {
+  value: Channel
+  onChange: (next: Channel) => void
+}) {
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground">
+        Choose the dispatch channel. WhatsApp uses your connected WA numbers; Meta Business Suite
+        sends through registered Page WhatsApp Business accounts (WEC).
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {(
+          [
+            {
+              key: 'wa' as Channel,
+              title: 'WhatsApp',
+              desc: 'Send via your linked WA numbers (whatsmeow). Best for high-volume outbound.',
+            },
+            {
+              key: 'mbs' as Channel,
+              title: 'Meta Business Suite',
+              desc: 'Send via registered Page WEC accounts (Stage F). Lower throughput, higher trust.',
+            },
+          ] as const
+        ).map((opt) => (
+          <Card
+            key={opt.key}
+            className={cn(
+              'cursor-pointer transition-colors hover:border-primary/50',
+              value === opt.key && 'border-primary ring-2 ring-primary/20',
+            )}
+            onClick={() => onChange(opt.key)}
+            data-testid={`channel-${opt.key}`}
+          >
+            <CardContent className="p-5">
+              <div className="flex items-start gap-3">
+                <div
+                  className={cn(
+                    'mt-0.5 h-4 w-4 rounded-full border-2 flex items-center justify-center',
+                    value === opt.key ? 'border-primary' : 'border-muted-foreground/30',
+                  )}
+                >
+                  {value === opt.key && <div className="h-2 w-2 rounded-full bg-primary" />}
+                </div>
+                <div className="flex-1">
+                  <h4 className="font-medium">{opt.title}</h4>
+                  <p className="mt-1 text-sm text-muted-foreground">{opt.desc}</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
     </div>
   )
 }
@@ -364,6 +434,135 @@ function StepSelectNumbers({
   )
 }
 
+// StepSelectMbsSessions — chunk 10. Renders only when form.channel === 'mbs'.
+// Filter rules (D3 = show-disabled-with-tooltip):
+//   - Sessions in non-ACTIVE state are hidden entirely (no point picking
+//     a session you can't dispatch from).
+//   - Sessions in ACTIVE state with a primary asset are SHOWN.
+//   - Sessions where primaryAsset.wecAccountRegistered === false are
+//     SHOWN DISABLED with an explanatory tooltip — the WEC roundtrip
+//     hasn't completed so send-to-phone won't work.
+//   - Sessions with no primary asset or empty wecPhoneNumber are SHOWN
+//     DISABLED with a "no WEC phone available" hint.
+function StepSelectMbsSessions({
+  tenantId,
+  selectedUids,
+  onToggle,
+}: {
+  tenantId: string
+  selectedUids: string[]
+  onToggle: (uid: string) => void
+}) {
+  const [page, setPage] = useState(1)
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['mbsSessions', tenantId, page],
+    queryFn: () => listMbsSessions({
+      tenantId,
+      state: 'MBS_SESSION_STATE_ACTIVE',
+      page,
+      pageSize: PAGE_SIZE,
+    }),
+    enabled: !!tenantId,
+  })
+
+  const sessions = data?.sessions ?? []
+  const selectedSet = new Set(selectedUids)
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-muted-foreground">
+          Select Meta Business Suite sessions to send from. Sessions without a registered WEC
+          phone are shown disabled.
+        </p>
+        <span className="text-sm font-medium text-muted-foreground whitespace-nowrap">
+          {formatNumber(selectedUids.length)} selected
+        </span>
+      </div>
+
+      {isLoading ? (
+        <p className="text-center text-muted-foreground py-8">Loading MBS sessions...</p>
+      ) : sessions.length === 0 ? (
+        <p className="text-center text-muted-foreground py-8">No active MBS sessions available.</p>
+      ) : (
+        <div className="grid gap-3 sm:grid-cols-2">
+          {sessions.map((s: MbsSession) => {
+            const asset = s.primaryAsset
+            const wecPhone = asset?.wecPhoneNumber ?? ''
+            const wecRegistered = asset?.wecAccountRegistered ?? false
+            // Pickability gate: must have a wec phone AND be wec-registered.
+            const disabled = !wecPhone || !wecRegistered
+            const reason = !asset
+              ? 'No primary asset linked yet'
+              : !wecPhone
+                ? 'No WEC phone number on this session'
+                : !wecRegistered
+                  ? 'WEC account not registered — verification pending'
+                  : ''
+            const checked = selectedSet.has(s.uid)
+            return (
+              <Card
+                key={s.uid}
+                className={cn(
+                  'transition-colors',
+                  disabled
+                    ? 'opacity-60 cursor-not-allowed border-muted'
+                    : 'cursor-pointer hover:border-primary/50',
+                  !disabled && checked && 'border-primary ring-2 ring-primary/20',
+                )}
+                onClick={() => {
+                  if (!disabled) onToggle(s.uid)
+                }}
+                title={disabled ? reason : ''}
+                data-testid={`mbs-session-${s.uid}`}
+                data-disabled={disabled ? 'true' : 'false'}
+              >
+                <CardContent className="p-4">
+                  <div className="flex items-start gap-3">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={disabled}
+                      onChange={() => onToggle(s.uid)}
+                      className="mt-1 h-4 w-4 rounded border-gray-300"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <h4 className="font-medium truncate">
+                          {asset?.pageName || `Session ${s.uid}`}
+                        </h4>
+                        {asset?.isPrimary && (
+                          <StatusBadge label="PRIMARY" variant="default" />
+                        )}
+                      </div>
+                      <p className="text-sm text-muted-foreground mt-0.5">
+                        {wecPhone ? formatPhone(`+${wecPhone}`) : '— no WEC phone —'}
+                      </p>
+                      <div className="flex gap-3 mt-2 text-xs text-muted-foreground flex-wrap">
+                        <span>UID: {s.uid}</span>
+                        {asset?.businessName && <span>Biz: {asset.businessName}</span>}
+                        <span className={wecRegistered ? 'text-green-600' : 'text-amber-600'}>
+                          WEC: {wecRegistered ? '✓' : '✗'}
+                        </span>
+                      </div>
+                      {disabled && reason && (
+                        <p className="mt-2 text-xs text-amber-600">{reason}</p>
+                      )}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )
+          })}
+        </div>
+      )}
+
+      {data?.pagination && <Pagination pagination={data.pagination} onPageChange={setPage} />}
+    </div>
+  )
+}
+
 function StepConfigure({
   form,
   onChange,
@@ -464,16 +663,18 @@ function StepReview({
   form,
   templates,
   contactCount,
-  numberCount,
+  senderCount,
 }: {
   form: FormState
   templates: Template[]
   contactCount: number
-  numberCount: number
+  senderCount: number
 }) {
   const template = templates.find((t) => t.id === form.templateId)
   const strategyLabel =
     form.rotationStrategy === 'ROTATION_STRATEGY_ROUND_ROBIN' ? 'Round Robin' : 'Least Used'
+  const channelLabel = form.channel === 'wa' ? 'WhatsApp' : 'Meta Business Suite'
+  const senderLabel = form.channel === 'wa' ? 'WhatsApp numbers' : 'MBS sessions'
 
   return (
     <div className="space-y-6 max-w-lg">
@@ -486,6 +687,10 @@ function StepReview({
 
       <div className="space-y-4">
         <div className="flex justify-between">
+          <span className="text-sm text-muted-foreground">Channel</span>
+          <span className="text-sm font-medium">{channelLabel}</span>
+        </div>
+        <div className="flex justify-between">
           <span className="text-sm text-muted-foreground">Template</span>
           <span className="text-sm font-medium">{template?.name ?? 'Unknown'}</span>
         </div>
@@ -497,14 +702,14 @@ function StepReview({
           <span className="text-sm font-medium">{formatNumber(contactCount)} contacts</span>
         </div>
         <div className="flex justify-between">
-          <span className="text-sm text-muted-foreground">Numbers</span>
-          <span className="text-sm font-medium">{formatNumber(numberCount)} numbers</span>
+          <span className="text-sm text-muted-foreground">Senders</span>
+          <span className="text-sm font-medium">{formatNumber(senderCount)} {senderLabel}</span>
         </div>
 
         <Separator />
 
         <div className="flex justify-between">
-          <span className="text-sm text-muted-foreground">Daily Cap / Number</span>
+          <span className="text-sm text-muted-foreground">Daily Cap / Sender</span>
           <span className="text-sm font-medium">{formatNumber(form.dailyCapPerNum)}</span>
         </div>
         <div className="flex justify-between">
@@ -565,17 +770,54 @@ export default function CampaignCreate() {
     }))
   }
 
+  const toggleMbsSession = (uid: string) => {
+    setForm((prev) => ({
+      ...prev,
+      mbsSessionUids: prev.mbsSessionUids.includes(uid)
+        ? prev.mbsSessionUids.filter((u) => u !== uid)
+        : [...prev.mbsSessionUids, uid],
+    }))
+  }
+
+  // Channel switch — C10-G1: prompt before clearing non-empty sender list,
+  // then clear the off-channel selection so the wizard doesn't try to send
+  // both lists to the server (which would 400 InvalidArgument).
+  const handleChannelChange = (next: Channel) => {
+    if (next === form.channel) return
+    const otherSelectedCount = next === 'wa' ? form.mbsSessionUids.length : form.waNumberIds.length
+    if (otherSelectedCount > 0) {
+      const ok = window.confirm(
+        `You have ${otherSelectedCount} ${form.channel === 'wa' ? 'WhatsApp number' : 'MBS session'}` +
+        `${otherSelectedCount === 1 ? '' : 's'} selected. Switching channel will clear that selection. Continue?`
+      )
+      if (!ok) return
+    }
+    setForm((prev) => ({
+      ...prev,
+      channel: next,
+      waNumberIds: next === 'wa' ? prev.waNumberIds : [],
+      mbsSessionUids: next === 'mbs' ? prev.mbsSessionUids : [],
+    }))
+  }
+
+  // canProceed — chunk 10: step indices shift +1 vs the old WA-only flow.
+  // 0 = Channel, 1 = Template, 2 = Contacts, 3 = Senders (WA|MBS),
+  // 4 = Configure, 5 = Review.
   const canProceed = (): boolean => {
     switch (step) {
       case 0:
-        return form.templateId !== ''
+        return form.channel === 'wa' || form.channel === 'mbs'
       case 1:
-        return form.contactIds.length > 0
+        return form.templateId !== ''
       case 2:
-        return form.waNumberIds.length > 0
+        return form.contactIds.length > 0
       case 3:
-        return form.name.trim() !== '' && form.delayMinMs < form.delayMaxMs
+        return form.channel === 'wa'
+          ? form.waNumberIds.length > 0
+          : form.mbsSessionUids.length > 0
       case 4:
+        return form.name.trim() !== '' && form.delayMinMs < form.delayMaxMs
+      case 5:
         return true
       default:
         return false
@@ -593,8 +835,14 @@ export default function CampaignCreate() {
         rotationStrategy: form.rotationStrategy,
         delayMinMs: form.delayMinMs,
         delayMaxMs: form.delayMaxMs,
-        waNumberIds: form.waNumberIds,
         contactIds: form.contactIds,
+        channel: form.channel,
+        // C10-G4: backend rejects mixed-channel payloads. The wizard's
+        // channel-switch handler already clears the off-channel list, but
+        // we explicitly omit it here as defense in depth — undefined is
+        // serialized away by client.ts's qs/JSON helpers.
+        waNumberIds: form.channel === 'wa' ? form.waNumberIds : undefined,
+        mbsSessionUids: form.channel === 'mbs' ? form.mbsSessionUids : undefined,
       })
       const campaignId = createRes.campaign.id
       await startCampaign(campaignId)
@@ -626,6 +874,10 @@ export default function CampaignCreate() {
         </CardHeader>
         <CardContent>
           {step === 0 && (
+            <StepSelectChannel value={form.channel} onChange={handleChannelChange} />
+          )}
+
+          {step === 1 && (
             <StepSelectTemplate
               workspaceId={workspaceId}
               selectedId={form.templateId}
@@ -633,7 +885,7 @@ export default function CampaignCreate() {
             />
           )}
 
-          {step === 1 && (
+          {step === 2 && (
             <StepSelectContacts
               tenantId={tenantId}
               selectedIds={form.contactIds}
@@ -641,7 +893,7 @@ export default function CampaignCreate() {
             />
           )}
 
-          {step === 2 && (
+          {step === 3 && form.channel === 'wa' && (
             <StepSelectNumbers
               tenantId={tenantId}
               workspaceId={workspaceId}
@@ -650,14 +902,22 @@ export default function CampaignCreate() {
             />
           )}
 
-          {step === 3 && <StepConfigure form={form} onChange={updateForm} />}
+          {step === 3 && form.channel === 'mbs' && (
+            <StepSelectMbsSessions
+              tenantId={tenantId}
+              selectedUids={form.mbsSessionUids}
+              onToggle={toggleMbsSession}
+            />
+          )}
 
-          {step === 4 && (
+          {step === 4 && <StepConfigure form={form} onChange={updateForm} />}
+
+          {step === 5 && (
             <StepReview
               form={form}
               templates={templatesQuery.data?.templates ?? []}
               contactCount={form.contactIds.length}
-              numberCount={form.waNumberIds.length}
+              senderCount={form.channel === 'wa' ? form.waNumberIds.length : form.mbsSessionUids.length}
             />
           )}
 
