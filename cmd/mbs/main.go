@@ -60,7 +60,7 @@ import (
 	mbsconfig "github.com/hermes-waba/hermes/internal/mbs/config"
 	"github.com/hermes-waba/hermes/internal/mbs/handler"
 	"github.com/hermes-waba/hermes/internal/mbs/importer"
-	"github.com/hermes-waba/hermes/internal/mbs/observability"
+	"github.com/hermes-waba/hermes/pkg/observability"
 	"github.com/hermes-waba/hermes/internal/mbs/refresh"
 	"github.com/hermes-waba/hermes/internal/mbs/session"
 	"github.com/hermes-waba/hermes/internal/mbs/store"
@@ -220,7 +220,7 @@ func main() {
 	diagDoneCtx, diagDoneCancel := context.WithCancel(context.Background())
 	diagErrCh := make(chan error, 1)
 	go func() {
-		diagErrCh <- serveDiag(diagDoneCtx, diagSrv, diagListener)
+		diagErrCh <- diagSrv.Serve(diagDoneCtx, diagListener)
 	}()
 
 	// ── 9. gRPC server with tenant interceptors + keepalive
@@ -408,30 +408,4 @@ func loadDEK(cfg mbsconfig.Config) (crypto.DataEncryptionKey, error) {
 	}
 	return crypto.DataEncryptionKey{}, errors.New(
 		"no DEK source configured: set HERMES_MBS_DEK_FILE or HERMES_MBS_DEK_HEX")
-}
-
-// serveDiag drives the observability HTTP server on a pre-bound
-// listener so port-collision errors surface synchronously at boot
-// (chunk-5 audit R2). Returns nil on graceful ctx shutdown.
-func serveDiag(ctx context.Context, srv *observability.HTTPServer, lis net.Listener) error {
-	// Build an http.Server that reuses the observability HTTPServer's
-	// handler. The observability.HTTPServer wraps its own internal
-	// http.Server; we re-use the Handler() and drive Serve ourselves
-	// against the listener we already bound in main.
-	httpSrv := &http.Server{
-		Handler:           srv.Handler(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	errCh := make(chan error, 1)
-	go func() { errCh <- httpSrv.Serve(lis) }()
-	select {
-	case <-ctx.Done():
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = httpSrv.Shutdown(shutCtx)
-		<-errCh
-		return nil
-	case err := <-errCh:
-		return err
-	}
 }

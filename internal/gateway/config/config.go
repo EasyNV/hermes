@@ -6,6 +6,7 @@ import (
 
 type Config struct {
 	Port        int
+	MetricsPort int
 	DatabaseURL string
 	NatsURL     string
 	JWTSecret   string
@@ -37,6 +38,7 @@ func Load() Config {
 
 	return Config{
 		Port:         pkgconfig.GetEnvInt("PORT", 8080),
+		MetricsPort:  pkgconfig.GetEnvInt("METRICS_PORT", 9100),
 		DatabaseURL:  pkgconfig.GetEnv("DATABASE_URL", "postgres://hermes:***@localhost:5433/hermes?sslmode=disable"),
 		NatsURL:      pkgconfig.GetEnv("NATS_URL", "nats://localhost:4222"),
 		JWTSecret:    jwtSecret,

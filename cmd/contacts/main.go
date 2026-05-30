@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
@@ -17,6 +20,7 @@ import (
 	"github.com/hermes-waba/hermes/pkg/db"
 	"github.com/hermes-waba/hermes/pkg/logger"
 	hermesnats "github.com/hermes-waba/hermes/pkg/nats"
+	"github.com/hermes-waba/hermes/pkg/observability"
 )
 
 func main() {
@@ -42,6 +46,30 @@ func main() {
 	}
 	defer nc.Close()
 
+	// ── Diagnostic HTTP server (Stage F chunk 4).
+	// Pre-bind so a port collision surfaces synchronously, then Serve
+	// on a goroutine. /readyz returns 503 until SetReady(true) below.
+	diagSrv := observability.NewHTTPServer(observability.Options{
+		Addr:       fmt.Sprintf(":%d", cfg.MetricsPort),
+		Registerer: prometheus.DefaultGatherer,
+		ReadinessFn: func(ctx context.Context) error {
+			if err := pool.Ping(ctx); err != nil {
+				return fmt.Errorf("db: %w", err)
+			}
+			if !nc.IsConnected() {
+				return errors.New("nats: not connected")
+			}
+			return nil
+		},
+	})
+	diagListener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.MetricsPort))
+	if err != nil {
+		log.Fatal().Err(err).Int("port", cfg.MetricsPort).Msg("diagnostic HTTP listen failed")
+	}
+	diagCtx, diagCancel := context.WithCancel(context.Background())
+	diagErrCh := make(chan error, 1)
+	go func() { diagErrCh <- diagSrv.Serve(diagCtx, diagListener) }()
+
 	store := handler.NewPgxStore(pool)
 	h := handler.New(store, js, log)
 
@@ -54,17 +82,29 @@ func main() {
 		log.Fatal().Err(err).Int("port", cfg.Port).Msg("failed to listen")
 	}
 
+	// Mark ready: gRPC listener is bound, deps are reachable.
+	diagSrv.SetReady(true)
+
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		log.Info().Msg("shutting down")
+		// Drop /readyz to 503 BEFORE gRPC stops accepting — gives any
+		// upstream `depends_on: service_healthy` graph time to drain.
+		diagSrv.SetReady(false)
 		srv.GracefulStop()
 		cancel()
 	}()
 
-	log.Info().Int("port", cfg.Port).Msg("starting hermes-contacts")
+	log.Info().Int("port", cfg.Port).Int("metrics_port", cfg.MetricsPort).Msg("starting hermes-contacts")
 	if err := srv.Serve(lis); err != nil {
 		log.Fatal().Err(err).Msg("server failed")
+	}
+
+	// Diag last — operators see /livez until the very end.
+	diagCancel()
+	if err := <-diagErrCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Warn().Err(err).Msg("diagnostic HTTP server exited with error")
 	}
 }

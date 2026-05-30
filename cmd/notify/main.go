@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
@@ -20,6 +23,7 @@ import (
 	"github.com/hermes-waba/hermes/pkg/db"
 	"github.com/hermes-waba/hermes/pkg/logger"
 	hermesnats "github.com/hermes-waba/hermes/pkg/nats"
+	"github.com/hermes-waba/hermes/pkg/observability"
 )
 
 func main() {
@@ -54,6 +58,28 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to ensure HERMES_NOTIFY stream")
 	}
 
+	// ── Diagnostic HTTP server (Stage F chunk 4).
+	diagSrv := observability.NewHTTPServer(observability.Options{
+		Addr:       fmt.Sprintf(":%d", cfg.MetricsPort),
+		Registerer: prometheus.DefaultGatherer,
+		ReadinessFn: func(ctx context.Context) error {
+			if err := pool.Ping(ctx); err != nil {
+				return fmt.Errorf("db: %w", err)
+			}
+			if !nc.IsConnected() {
+				return errors.New("nats: not connected")
+			}
+			return nil
+		},
+	})
+	diagListener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.MetricsPort))
+	if err != nil {
+		log.Fatal().Err(err).Int("port", cfg.MetricsPort).Msg("diagnostic HTTP listen failed")
+	}
+	diagCtx, diagCancel := context.WithCancel(context.Background())
+	diagErrCh := make(chan error, 1)
+	go func() { diagErrCh <- diagSrv.Serve(diagCtx, diagListener) }()
+
 	// Dependencies
 	store := handler.NewPGStore(pool)
 	disp := dispatch.New(nil, nc, log)
@@ -83,12 +109,23 @@ func main() {
 	go func() {
 		<-ctx.Done()
 		log.Info().Msg("shutting down gRPC server")
+		// /readyz → 503 before gRPC stops accepting.
+		diagSrv.SetReady(false)
 		srv.GracefulStop()
 	}()
 
-	log.Info().Int("port", cfg.Port).Msg("gRPC server listening")
+	// Mark ready: gRPC listener + diag listener + deps are all up.
+	diagSrv.SetReady(true)
+
+	log.Info().Int("port", cfg.Port).Int("metrics_port", cfg.MetricsPort).Msg("gRPC server listening")
 	if err := srv.Serve(lis); err != nil {
 		log.Fatal().Err(err).Msg("gRPC server failed")
+	}
+
+	// Diag last — operators see /livez until shutdown completes.
+	diagCancel()
+	if err := <-diagErrCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Warn().Err(err).Msg("diagnostic HTTP server exited with error")
 	}
 }
 

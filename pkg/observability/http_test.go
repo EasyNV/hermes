@@ -24,7 +24,12 @@ func newServer(t *testing.T, readinessFn ReadinessFunc, enablePprof bool) *HTTPS
 	t.Helper()
 	reg := freshRegistry(t)
 	// Register a single metric so /metrics has something to emit.
-	_ = New(reg)
+	// We register a no-op counter inline rather than depend on any
+	// service-specific metric struct (pkg/observability is shared).
+	reg.MustRegister(prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "hermes_obs_test_counter_total",
+		Help: "Pkg observability test no-op counter.",
+	}))
 	return NewHTTPServer(Options{
 		Addr:        ":0",
 		Registerer:  reg,
@@ -148,8 +153,8 @@ func TestMetrics_PrometheusFormat(t *testing.T) {
 	// time, so it must appear in the exposition. (HistogramVec/CounterVec
 	// only emit after first observation — they're not useful spot-checks
 	// in a steady-state test.)
-	if !strings.Contains(body, "hermes_mbs_refresh_total") {
-		t.Errorf("expected hermes_mbs_refresh_total in /metrics, got:\n%s", body)
+	if !strings.Contains(body, "hermes_obs_test_counter_total") {
+		t.Errorf("expected hermes_obs_test_counter_total in /metrics, got:\n%s", body)
 	}
 	// Sanity check the content type indicates Prometheus text format.
 	// httptest doesn't expose headers via our helper; do an inline check.

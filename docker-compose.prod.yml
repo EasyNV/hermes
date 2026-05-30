@@ -143,6 +143,7 @@ services:
     image: hermes-proxy:${HERMES_VERSION:-latest}
     environment:
       PORT: "9101"
+      METRICS_PORT: "9111"
       DATABASE_URL: ${DATABASE_URL}
       NATS_URL: nats://nats:4222
       BAN_FLAG_THRESHOLD: "3"
@@ -155,11 +156,11 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "wget --spider -q http://localhost:9101/ 2>&1 || nc -z localhost 9101"]
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:9111/readyz"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 20s
     deploy:
       resources:
         limits:
@@ -173,6 +174,7 @@ services:
     image: hermes-contacts:${HERMES_VERSION:-latest}
     environment:
       PORT: "9102"
+      METRICS_PORT: "9112"
       DATABASE_URL: ${DATABASE_URL}
       NATS_URL: nats://nats:4222
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -184,11 +186,11 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 9102"]
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:9112/readyz"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 20s
     deploy:
       resources:
         limits:
@@ -202,6 +204,7 @@ services:
     image: hermes-notify:${HERMES_VERSION:-latest}
     environment:
       PORT: "9103"
+      METRICS_PORT: "9113"
       DATABASE_URL: ${DATABASE_URL}
       NATS_URL: nats://nats:4222
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -213,11 +216,11 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 9103"]
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:9113/readyz"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 20s
     deploy:
       resources:
         limits:
@@ -235,6 +238,7 @@ services:
     image: hermes-wa:${HERMES_VERSION:-latest}
     environment:
       PORT: "9104"
+      METRICS_PORT: "9114"
       POD_ID: ${POD_ID_WA:-hermes-wa-prod-0}
       DATABASE_URL: ${DATABASE_URL}
       NATS_URL: nats://nats:4222
@@ -249,15 +253,15 @@ services:
       redis:
         condition: service_healthy
       proxy:
-        condition: service_started
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 9104"]
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:9114/readyz"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 15s
+      start_period: 25s
     deploy:
       resources:
         limits:
@@ -271,6 +275,7 @@ services:
     image: hermes-campaign:${HERMES_VERSION:-latest}
     environment:
       PORT: "9105"
+      METRICS_PORT: "9115"
       DATABASE_URL: ${DATABASE_URL}
       NATS_URL: nats://nats:4222
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -282,11 +287,11 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 9105"]
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:9115/readyz"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 20s
     deploy:
       resources:
         limits:
@@ -300,6 +305,7 @@ services:
     image: hermes-inbox:${HERMES_VERSION:-latest}
     environment:
       PORT: "9106"
+      METRICS_PORT: "9116"
       DATABASE_URL: ${DATABASE_URL}
       NATS_URL: nats://nats:4222
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -311,11 +317,11 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 9106"]
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:9116/readyz"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 20s
     deploy:
       resources:
         limits:
@@ -358,7 +364,7 @@ services:
         gid: "65532"
         mode: 0400
     healthcheck:
-      test: ["CMD-SHELL", "wget --spider -q http://localhost:9092/readyz 2>&1 || nc -z localhost 8082"]
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:9092/readyz"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -383,6 +389,7 @@ services:
       - /tmp
     environment:
       PORT: "8080"
+      METRICS_PORT: "9100"
       DATABASE_URL: ${DATABASE_URL}
       NATS_URL: nats://nats:4222
       # JWT_SECRET intentionally NOT set — gateway reads the file via
@@ -409,19 +416,19 @@ services:
       nats:
         condition: service_healthy
       proxy:
-        condition: service_started
+        condition: service_healthy
       contacts:
-        condition: service_started
+        condition: service_healthy
       notify:
-        condition: service_started
+        condition: service_healthy
       wa:
-        condition: service_started
+        condition: service_healthy
       campaign:
-        condition: service_started
+        condition: service_healthy
       inbox:
-        condition: service_started
+        condition: service_healthy
       mbs:
-        condition: service_started
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     secrets:
@@ -431,11 +438,11 @@ services:
         gid: "65532"
         mode: 0400
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 8080"]
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:9100/readyz"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 15s
+      start_period: 25s
     deploy:
       resources:
         limits:

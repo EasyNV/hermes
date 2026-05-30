@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -23,7 +24,9 @@ import (
 	"github.com/hermes-waba/hermes/pkg/db"
 	"github.com/hermes-waba/hermes/pkg/logger"
 	hermesnats "github.com/hermes-waba/hermes/pkg/nats"
+	"github.com/hermes-waba/hermes/pkg/observability"
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"google.golang.org/grpc"
@@ -131,23 +134,58 @@ func main() {
 	// Reconnect sessions assigned to this pod.
 	go reconnectSessions(ctx, store, mgr, proxyClient, cfg.PodID, log)
 
+	// ── Diagnostic HTTP server (Stage F chunk 4).
+	// Bound on a dedicated METRICS_PORT (default 9114). Separate from
+	// gRPC port (9104) and pair-phone HTTP port (9105 / cfg.Port+1).
+	// wa doesn't actually use Redis in this codebase — readiness only
+	// probes DB + NATS (plan §3.3 listed Redis as a placeholder that
+	// would matter once the proxy-rotation cache lands).
+	diagSrv := observability.NewHTTPServer(observability.Options{
+		Addr:       fmt.Sprintf(":%d", cfg.MetricsPort),
+		Registerer: prometheus.DefaultGatherer,
+		ReadinessFn: func(ctx context.Context) error {
+			if err := pool.Ping(ctx); err != nil {
+				return fmt.Errorf("db: %w", err)
+			}
+			if !nc.IsConnected() {
+				return errors.New("nats: not connected")
+			}
+			return nil
+		},
+	})
+	diagListener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.MetricsPort))
+	if err != nil {
+		log.Fatal().Err(err).Int("port", cfg.MetricsPort).Msg("diagnostic HTTP listen failed")
+	}
+	diagCtx, diagCancel := context.WithCancel(context.Background())
+	diagErrCh := make(chan error, 1)
+	go func() { diagErrCh <- diagSrv.Serve(diagCtx, diagListener) }()
+
 	// Start gRPC server.
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Port))
 	if err != nil {
 		log.Fatal().Err(err).Int("port", cfg.Port).Msg("failed to listen")
 	}
 
+	diagSrv.SetReady(true)
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-quit
 		log.Info().Msg("shutting down hermes-wa")
+		diagSrv.SetReady(false)
 		grpcServer.GracefulStop()
 	}()
 
-	log.Info().Int("port", cfg.Port).Str("pod_id", cfg.PodID).Msg("hermes-wa started")
+	log.Info().Int("port", cfg.Port).Int("metrics_port", cfg.MetricsPort).Str("pod_id", cfg.PodID).Msg("hermes-wa started")
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatal().Err(err).Msg("gRPC server failed")
+	}
+
+	diagCancel()
+	if err := <-diagErrCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Warn().Err(err).Msg("diagnostic HTTP server exited with error")
 	}
 }
 

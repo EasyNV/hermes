@@ -1,9 +1,37 @@
+// Package observability provides a reusable diagnostic HTTP server
+// (/livez, /readyz, /metrics, optional /debug/pprof) shared by every
+// Hermes service.
+//
+// Pattern (per cmd/<svc>/main.go):
+//
+//  1. config + log + DB + NATS connect
+//  2. pre-bind diagListener on cfg.MetricsPort
+//  3. construct diagSrv with a ReadinessFn that probes its deps
+//  4. start diagSrv goroutine (now /livez returns 200, /readyz returns 503)
+//  5. start NATS consumers / service-specific work
+//  6. bind gRPC listener
+//  7. diagSrv.SetReady(true)
+//  8. grpcSrv.Serve(lis)
+//
+// On shutdown, the reverse: SetReady(false) → grpc health
+// NOT_SERVING → drain consumers → gRPC GracefulStop → close DB/NATS →
+// diagSrv shutdown LAST. The 503-before-NOT_SERVING ordering matters:
+// it gives load balancers and `depends_on: service_healthy` graphs
+// time to drain in-flight traffic before connections start refusing.
+//
+// Stage F chunk 4 extracted this package from
+// internal/mbs/observability/http.go to share the shape across all
+// services. Mbs-specific metric structs (HandlerMetrics,
+// SessionMetrics) stay in their internal packages — only the HTTP
+// probe surface is shared.
+
 package observability
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/pprof"
 	"sync/atomic"
@@ -30,7 +58,7 @@ type ReadinessFunc func(ctx context.Context) error
 // HTTPServer hosts /healthz, /readyz, /metrics, and optional /debug/pprof
 // on a dedicated diagnostic port (default :9092). Wraps an http.Server
 // and exposes a ready flag toggled by SetReady — main.go flips it
-// after Postgres+NATS are connected, and back off during graceful
+// after its dependencies are connected, and back off during graceful
 // shutdown so probes see the transition.
 type HTTPServer struct {
 	addr        string
@@ -57,6 +85,10 @@ func NewHTTPServer(opts Options) *HTTPServer {
 	}
 
 	mux := http.NewServeMux()
+	// /livez is the K8s-aligned liveness probe name. /healthz is the
+	// historical Hermes name preserved for chunk-1 dev compose
+	// compatibility — both routes return identical 200 ok\n.
+	mux.HandleFunc("/livez", h.handleHealthz)
 	mux.HandleFunc("/healthz", h.handleHealthz)
 	mux.HandleFunc("/readyz", h.handleReadyz)
 	mux.Handle("/metrics", promhttp.HandlerFor(opts.Registerer, promhttp.HandlerOpts{
@@ -81,11 +113,15 @@ func NewHTTPServer(opts Options) *HTTPServer {
 }
 
 // SetReady toggles the ready flag. main.go calls SetReady(true) once
-// Postgres+NATS are connected, SetReady(false) at shutdown.
+// its dependencies are connected, SetReady(false) at shutdown.
 func (h *HTTPServer) SetReady(ready bool) { h.ready.Store(ready) }
 
 // Start runs the HTTP server until ctx is canceled. Returns nil on
 // graceful shutdown, error otherwise. Safe to call once.
+//
+// Prefer Serve(ctx, lis) when callers want to pre-bind the listener
+// so port-collision errors surface synchronously at boot rather than
+// on the goroutine that runs Start.
 func (h *HTTPServer) Start(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {
@@ -103,6 +139,34 @@ func (h *HTTPServer) Start(ctx context.Context) error {
 		defer cancel()
 		// Mark not-ready so probes flip before listener closes.
 		h.ready.Store(false)
+		_ = h.srv.Shutdown(shutCtx)
+		return <-errCh
+	case err := <-errCh:
+		return err
+	}
+}
+
+// Serve drives the HTTP server on a pre-bound listener. Use this when
+// the caller wants port-bind errors to surface synchronously at boot
+// (the recommended pattern — see package doc). The listener is closed
+// by the server's Shutdown call on graceful exit; callers should NOT
+// double-close.
+//
+// Returns nil on graceful shutdown via ctx, the http.Serve error
+// otherwise (excluding http.ErrServerClosed which is normalised to nil).
+func (h *HTTPServer) Serve(ctx context.Context, lis net.Listener) error {
+	errCh := make(chan error, 1)
+	go func() {
+		if err := h.srv.Serve(lis); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+	select {
+	case <-ctx.Done():
+		shutCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
 		_ = h.srv.Shutdown(shutCtx)
 		return <-errCh
 	case err := <-errCh:
