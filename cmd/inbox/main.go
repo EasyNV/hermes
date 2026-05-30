@@ -90,49 +90,44 @@ func main() {
 }
 
 // ensureStreams creates NATS streams needed by the inbox service.
+//
+// Idempotent: queries StreamInfo first and only calls AddStream if the
+// stream doesn't already exist. NATS rejects AddStream-with-different-config
+// as "name already in use" — without this guard, two services racing to
+// boot (e.g. notify owns HERMES_NOTIFY as WorkQueuePolicy, inbox here
+// defines it as default LimitsPolicy) will crash whichever loses the race.
+// Same pattern as cmd/notify/main.go::ensureStream, cmd/gateway/main.go::
+// ensureStreams, cmd/mbs/nats_streams.go::ensureStreams.
 func ensureStreams(js natsgo.JetStreamContext) error {
-	// HERMES_WA — consumed for inbound/outbound events.
-	if _, err := js.AddStream(&natsgo.StreamConfig{
-		Name:     "HERMES_WA",
-		Subjects: []string{"hermes.wa.message.>", "hermes.wa.ban.>", "hermes.wa.connection.>", "hermes.wa.presence.>"},
-		Storage:  natsgo.FileStorage,
-		MaxAge:   7 * 24 * time.Hour,
-	}); err != nil {
-		return fmt.Errorf("ensuring HERMES_WA stream: %w", err)
+	streams := []struct {
+		name     string
+		subjects []string
+		maxAge   time.Duration
+	}{
+		// HERMES_WA — consumed for inbound/outbound events.
+		{"HERMES_WA", []string{"hermes.wa.message.>", "hermes.wa.ban.>", "hermes.wa.connection.>", "hermes.wa.presence.>"}, 7 * 24 * time.Hour},
+		// HERMES_INBOX — manual send tasks published by this service.
+		{"HERMES_INBOX", []string{"hermes.wa.send.manual.>"}, 24 * time.Hour},
+		// HERMES_NOTIFY — notification dispatch events.
+		{"HERMES_NOTIFY", []string{"hermes.notify.>"}, time.Hour},
+		// HERMES_MBS — MBS inbound/outbound/session events. Gateway and
+		// mbs also ensure this stream on their boot. Subjects must match
+		// across services so the StreamInfo-check skips correctly.
+		{"HERMES_MBS", []string{"hermes.mbs.message.>", "hermes.mbs.session.>"}, 7 * 24 * time.Hour},
 	}
-
-	// HERMES_INBOX — manual send tasks published by this service.
-	if _, err := js.AddStream(&natsgo.StreamConfig{
-		Name:     "HERMES_INBOX",
-		Subjects: []string{"hermes.wa.send.manual.>"},
-		Storage:  natsgo.FileStorage,
-		MaxAge:   24 * time.Hour,
-	}); err != nil {
-		return fmt.Errorf("ensuring HERMES_INBOX stream: %w", err)
+	for _, s := range streams {
+		if _, err := js.StreamInfo(s.name); err == nil {
+			continue
+		}
+		if _, err := js.AddStream(&natsgo.StreamConfig{
+			Name:     s.name,
+			Subjects: s.subjects,
+			Storage:  natsgo.FileStorage,
+			MaxAge:   s.maxAge,
+		}); err != nil {
+			return fmt.Errorf("ensuring %s stream: %w", s.name, err)
+		}
 	}
-
-	// HERMES_NOTIFY — notification dispatch events.
-	if _, err := js.AddStream(&natsgo.StreamConfig{
-		Name:     "HERMES_NOTIFY",
-		Subjects: []string{"hermes.notify.>"},
-		Storage:  natsgo.FileStorage,
-		MaxAge:   1 * time.Hour,
-	}); err != nil {
-		return fmt.Errorf("ensuring HERMES_NOTIFY stream: %w", err)
-	}
-
-	// HERMES_MBS — MBS inbound/outbound/session events. Gateway also
-	// ensures this stream on its boot (E2 chunk 3); double-creation
-	// is a no-op as long as the subject set matches.
-	if _, err := js.AddStream(&natsgo.StreamConfig{
-		Name:     "HERMES_MBS",
-		Subjects: []string{"hermes.mbs.message.>", "hermes.mbs.session.>"},
-		Storage:  natsgo.FileStorage,
-		MaxAge:   7 * 24 * time.Hour,
-	}); err != nil {
-		return fmt.Errorf("ensuring HERMES_MBS stream: %w", err)
-	}
-
 	return nil
 }
 

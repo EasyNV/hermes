@@ -178,6 +178,21 @@ func ensureStreams(js natsgo.JetStreamContext) error {
 	}
 
 	for _, s := range streams {
+		// Idempotent ensure: query first, only call AddStream if the
+		// stream doesn't already exist. Multiple services (notify,
+		// inbox, mbs, gateway) define overlapping streams (HERMES_NOTIFY,
+		// HERMES_MBS); whoever boots first owns the stream's config and
+		// the others must not race AddStream against it (NATS rejects
+		// AddStream-with-different-config as "name already in use",
+		// which would otherwise crash whichever service lost the race
+		// — exactly what happened in the Stage F chunk 3 prod-compose
+		// boot smoke test).
+		//
+		// Same pattern as cmd/notify/main.go::ensureStream and
+		// cmd/mbs/nats_streams.go::ensureStreams.
+		if _, err := js.StreamInfo(s.name); err == nil {
+			continue
+		}
 		_, err := js.AddStream(&natsgo.StreamConfig{
 			Name:     s.name,
 			Subjects: s.subjects,

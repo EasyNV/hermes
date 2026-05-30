@@ -96,14 +96,19 @@ docker-build-all` and (optional future) `docker push` to a registry.
   (DEK, JWT, BIZAPP). PG password rotation is a coordinated drift —
   documented separately, not chunk-3 scope to automate.
 
-#### `bizapp_client_token`
-- Host file: `./deploy/secrets/prod/bizapp-client-token` (gitignored)
-- Container path: `/run/secrets/bizapp_client_token`
-- Mode: `0400`
-- Consumer: `mbs` service. Currently mautrix-meta bridge driver reads
-  `BIZAPP_CLIENT_TOKEN` env. Chunk 3 introduces `BIZAPP_CLIENT_TOKEN_FILE`
-  env support (file-based fallback).
-- Rotation: see `secret-management.md` §BIZAPP
+#### `bizapp_client_token` — DROPPED FROM CHUNK 3 SCOPE
+
+**Discovery during build prep (2026-05-30):** `grep -rni "bizapp" internal/
+pkg/ cmd/` returns only a comment in `internal/mbs/bridge/envelope.go` and
+a test fixture — there is **no** `BIZAPP_CLIENT_TOKEN` env read in the
+hermes-mbs codebase. The mautrix-meta bridge driver gets per-tenant tokens
+from the encrypted `cookie_blobs` table (decrypted with the DEK per
+request). There is no top-level service secret to externalise.
+
+**Action:** drop `bizapp_client_token` secret from the prod compose file
+and the `.env.prod.example`. Drop the `BIZAPP_CLIENT_TOKEN_FILE` Go
+support change from the implementation steps. Document this in the
+hostile audit as a contract-vs-reality reconciliation.
 
 ### 3.4 `.env.prod.example` contract
 

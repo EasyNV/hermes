@@ -1,5 +1,7 @@
 .PHONY: proto-gen migrate dev test build tools clean \
-        docker-build-all docker-build-web
+        docker-build-all docker-build-web \
+        deploy-prod-up deploy-prod-down deploy-prod-logs deploy-prod-ps \
+        deploy-prod-restart
 
 # ── Build-time stamps for OCI labels (overridable from env) ─────────────
 GIT_VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -96,3 +98,32 @@ docker-build-%: proto-gen
 	@echo "Building hermes-$*:$(GIT_VERSION) (revision $(GIT_REVISION))..."
 	docker build -f Dockerfile $(DOCKER_BUILD_ARGS) --build-arg SERVICE=$* \
 		-t hermes-$*:$(GIT_VERSION) -t hermes-$*:latest .
+
+# ─── Deploy (production compose, chunk 3) ────────────────────────────────
+#
+# Wraps `docker compose -f docker-compose.prod.yml --env-file .env.prod`
+# so operators get one consistent CLI surface. The runbook in
+# docs/runbooks/compose-deploy.md documents the full first-time deploy
+# (image build, secret provisioning, .env.prod fill-in). These targets
+# are the post-bootstrap day-2 controls.
+
+COMPOSE_PROD = docker-compose -f docker-compose.prod.yml --env-file .env.prod
+
+deploy-prod-up:
+	@test -f .env.prod || { echo "ERROR: .env.prod missing. cp .env.prod.example .env.prod && editor .env.prod" >&2; exit 1; }
+	@test -f deploy/secrets/prod/mbs-dek.bin || { echo "ERROR: deploy/secrets/prod/mbs-dek.bin missing. Run scripts/dek-generate.sh deploy/secrets/prod/mbs-dek.bin" >&2; exit 1; }
+	@test -f deploy/secrets/prod/jwt-signing-key || { echo "ERROR: deploy/secrets/prod/jwt-signing-key missing. Run scripts/dek-generate.sh deploy/secrets/prod/jwt-signing-key" >&2; exit 1; }
+	@test -f deploy/secrets/prod/postgres-password || { echo "ERROR: deploy/secrets/prod/postgres-password missing. Run: printf '%s' \"\$$STRONG_PASSWORD\" > deploy/secrets/prod/postgres-password && chmod 0400 deploy/secrets/prod/postgres-password" >&2; exit 1; }
+	$(COMPOSE_PROD) up -d
+
+deploy-prod-down:
+	$(COMPOSE_PROD) down
+
+deploy-prod-logs:
+	$(COMPOSE_PROD) logs -f --tail=200
+
+deploy-prod-ps:
+	$(COMPOSE_PROD) ps
+
+deploy-prod-restart:
+	$(COMPOSE_PROD) restart

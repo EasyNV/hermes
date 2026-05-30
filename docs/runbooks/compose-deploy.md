@@ -240,15 +240,216 @@ entirely if you only need in-network access).
 
 ---
 
+## Prod deploy (chunk 3)
+
+The prod compose stack (`docker-compose.prod.yml`) boots from prebuilt
+images instead of mounting source. The wire surface is identical to
+dev — gateway, web, NATS, Postgres — but every service runs from
+`hermes-<svc>:${HERMES_VERSION}` images you build out-of-band via
+`make docker-build-all`.
+
+### Prod prerequisites
+
+- Docker Engine ≥ 24 (Compose v2 / Buildx required).
+- `make docker-build-all` has succeeded on this host (or images are
+  pulled from a registry — see "image registry" below).
+- The repo is checked out (proto sources, migrations).
+- One host has ≥ 4 vCPU / 8 GB RAM (the resource limits in the prod
+  compose total ~5 GB memory; the limits cap blast radius, they do not
+  reserve).
+
+### Build artifacts
+
+The prod stack expects these container images to exist locally (or be
+pullable):
+
+```
+hermes-gateway:<version>
+hermes-wa:<version>
+hermes-mbs:<version>
+hermes-campaign:<version>
+hermes-inbox:<version>
+hermes-contacts:<version>
+hermes-proxy:<version>
+hermes-notify:<version>
+hermes-web:<version>
+```
+
+Where `<version>` matches `HERMES_VERSION` in `.env.prod` (default
+`latest`).
+
+**Operator contract:** before `make docker-build-all`, run `make
+proto-gen` so `gen/go/hermes/v1/*.pb.go` are present in the build
+context. The `docker-build-*` Makefile targets depend on `proto-gen`
+so this is automatic if you go through the Makefile.
+
+### First-time deploy procedure
+
+```sh
+# 1. Generate the proto stubs (idempotent, fast).
+make proto-gen
+
+# 2. Build every image. ~5-10 minutes on a 4-core machine; mostly
+#    spent inside the mbs build pulling mautrix-meta + utls deps.
+make docker-build-all
+
+# 3. Bootstrap secrets. The DEK and JWT signing key are 32-byte hex.
+./scripts/dek-generate.sh deploy/secrets/prod/mbs-dek.bin
+./scripts/dek-generate.sh deploy/secrets/prod/jwt-signing-key
+
+# 4. PG password — 32 chars, ASCII, no metachars. See
+#    docs/runbooks/secret-management.md §3 for full rationale.
+PASSWORD=$(openssl rand -base64 32 | tr -d '=+/' | head -c 32)
+printf '%s' "$PASSWORD" > deploy/secrets/prod/postgres-password
+chmod 0400 deploy/secrets/prod/postgres-password
+
+# 5. .env.prod
+cp .env.prod.example .env.prod
+# Edit .env.prod and set DATABASE_URL to include the same PG password
+# you wrote in step 4. The file is gitignored; .env.prod.example is
+# the committed template.
+editor .env.prod
+
+# 6. Boot.
+make deploy-prod-up
+
+# 7. Verify.
+make deploy-prod-ps
+# Every service should be Up (healthy) within ~30 seconds.
+
+# 8. Smoke test.
+curl -fsS http://localhost:8081/api/v1/healthz   # gateway
+curl -fsS http://localhost/healthz               # web
+docker-compose -f docker-compose.prod.yml exec mbs \
+  wget --spider -q http://localhost:9092/readyz && echo MBS_READY
+```
+
+### Day-2 controls (Makefile targets)
+
+```sh
+make deploy-prod-up      # boot (idempotent; safe to re-run after edits)
+make deploy-prod-down    # graceful stop, keep volumes
+make deploy-prod-ps      # show service status
+make deploy-prod-logs    # tail aggregated logs
+make deploy-prod-restart # rolling restart
+```
+
+`deploy-prod-up` refuses to run if `.env.prod` or any required secret
+file is missing. The error message tells you which one and how to
+generate it.
+
+### What's mounted vs what's not
+
+The prod stack uses **no source bind mounts**. The only host->container
+mounts are:
+
+- `./migrations` → `/migrations:ro` (migrate init container only)
+- Docker secrets (`deploy/secrets/prod/*`) → `/run/secrets/*`
+- Named volumes: `pgdata`, `natsdata`, `redisdata`
+
+Backend Go containers run **read-only** with a `/tmp` tmpfs. mbs in
+particular is verified clean (chunk-2 hostile audit F5).
+
+### Image registry (future)
+
+Stage F doesn't ship a `docker push` workflow — images live in the
+local Docker daemon. To deploy to a remote VPS today: build locally
+then `docker save | ssh remote 'docker load'`, or set up a private
+registry and `docker push` in your wrap script. CI/CD wiring is a
+follow-up stage.
+
+### Restart behaviour
+
+Every service except `migrate` has `restart: unless-stopped`. A
+panicking service will be restarted by the Docker daemon indefinitely.
+Without monitoring this will silently masquerade as healthy at the
+docker layer — see master-plan R5 — but the resource limits cap the
+blast radius. Future stage adds Prometheus alerting.
+
+### Resource limits summary
+
+| Service | CPU | Mem limit | Mem reserve |
+|---|--:|--:|--:|
+| postgres | 2.0 | 1 GB | 512 MB |
+| nats | 1.0 | 512 MB | 256 MB |
+| redis | 0.5 | 256 MB | 128 MB |
+| gateway | 1.0 | 256 MB | 128 MB |
+| wa | 2.0 | 512 MB | 256 MB |
+| mbs | 2.0 | 512 MB | 256 MB |
+| campaign | 1.0 | 256 MB | 128 MB |
+| inbox | 1.0 | 256 MB | 128 MB |
+| contacts | 0.5 | 256 MB | 128 MB |
+| proxy | 0.5 | 256 MB | 128 MB |
+| notify | 0.5 | 256 MB | 128 MB |
+| web | 0.5 | 128 MB | 64 MB |
+| **Total** | 12.5 | 5.0 GB | 2.5 GB |
+
+CPU is oversubscribed against a 4-vCPU host — that's fine because Docker
+CPU limits are *quota*, not *reservation*. Memory limits are hard caps
+(OOM-kill on overrun); reservations are scheduling hints.
+
+### Troubleshooting prod
+
+#### `make deploy-prod-up` fails with "secrets missing"
+
+Run the missing step from the first-time procedure above. The
+Makefile target prints the exact command.
+
+#### `migrate` container exits non-zero
+
+The PG password in `.env.prod` (the inline part of `DATABASE_URL`)
+doesn't match `deploy/secrets/prod/postgres-password`. Both must be
+the same string. See `docs/runbooks/secret-management.md` §3.
+
+#### `gateway` logs "JWT secret not set"
+
+`JWT_SECRET_FILE=/run/secrets/jwt_signing_key` env is set in the
+compose file, but the secret file is empty or unreadable. Check:
+
+```sh
+docker-compose -f docker-compose.prod.yml exec gateway \
+  wc -c /run/secrets/jwt_signing_key
+# Must print 65 (64 hex chars + newline).
+```
+
+If 0 / missing: regenerate via `./scripts/dek-generate.sh
+deploy/secrets/prod/jwt-signing-key` and restart gateway.
+
+#### A backend container restarts continuously
+
+```sh
+make deploy-prod-logs
+# Look for "fatal" / "panic" lines.
+docker-compose -f docker-compose.prod.yml --env-file .env.prod \
+  logs --tail=100 <svc>
+```
+
+Common causes:
+
+- Postgres password mismatch → see migrate troubleshooting.
+- Missing/wrong DEK on `mbs` → §1 of secret-management.md.
+- Migration table conflict → re-run migrations: `make migrate`.
+
+### Tear-down
+
+```sh
+make deploy-prod-down               # stop + remove containers, KEEP volumes
+docker-compose -f docker-compose.prod.yml down -v   # also drop volumes (destructive)
+```
+
+The DEK lives in `deploy/secrets/prod/mbs-dek.bin` on the host
+filesystem. Loss of that file → loss of every encrypted blob's
+plaintext. **Back it up before you tear anything down.** See
+`docs/runbooks/secret-management.md` §5.
+
+---
+
 ## What's not yet here (and why)
 
-- **`docker-compose.prod.yml`** — chunk 3.
 - **A real `/readyz` on every service** — chunk 4.
 - **Reverse-proxy fronting (Caddy/nginx)** — chunk 5.
 - **Backup + restore procedure** — chunk 5
   (`docs/runbooks/backup-restore.md`).
-- **Secret rotation procedure** — chunk 3
-  (`docs/runbooks/secret-management.md`).
 - **Image registry / `docker push`** — out of Stage F scope.
 - **Kubernetes manifests** — Stage G.
 

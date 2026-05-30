@@ -1,6 +1,9 @@
 gen/
 bin/
 .env
+.env.prod
+.env.local
+!.env.prod.example
 web/node_modules/
 web/dist/
 /gateway

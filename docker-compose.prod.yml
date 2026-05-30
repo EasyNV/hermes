@@ -1,0 +1,501 @@
+# Hermès — Production Compose Stack (Stage F chunk 3)
+#
+# Image-based, no source bind mounts, restart policies, resource limits,
+# file-based secrets, single-host VPS posture. Boots from images produced
+# by `make docker-build-all` (chunk 2).
+#
+# Usage:
+#   cp .env.prod.example .env.prod && editor .env.prod
+#   scripts/dek-generate.sh deploy/secrets/prod/mbs-dek.bin
+#   scripts/dek-generate.sh deploy/secrets/prod/jwt-signing-key
+#   printf '%s' "$STRONG_PG_PASSWORD" > deploy/secrets/prod/postgres-password
+#   chmod 0400 deploy/secrets/prod/*
+#   make docker-build-all
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+#
+# Compose-v2 (`docker compose`). v1 invocation (`docker-compose`) also
+# works against this file thanks to the v3-compatible schema.
+
+x-resource-defaults: &service-defaults
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+  networks:
+    - hermes-net
+
+services:
+  # ═══════════════════════════════════════════════════════════════
+  # Infrastructure
+  # ═══════════════════════════════════════════════════════════════
+
+  postgres:
+    <<: *service-defaults
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hermes}
+      POSTGRES_USER: ${POSTGRES_USER:-hermes}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-hermes}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    secrets:
+      - source: postgres_password
+        target: postgres_password
+        mode: 0444
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          memory: 512M
+
+  redis:
+    <<: *service-defaults
+    image: redis:7-alpine
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          memory: 128M
+
+  nats:
+    <<: *service-defaults
+    image: nats:2-alpine
+    command: >
+      -js
+      -sd /data
+      -m 8222
+    volumes:
+      - natsdata:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  # ═══════════════════════════════════════════════════════════════
+  # Migrations (run-once init container)
+  # ═══════════════════════════════════════════════════════════════
+
+  migrate:
+    image: migrate/migrate:v4.18.2
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+    secrets:
+      - source: postgres_password
+        target: postgres_password
+        mode: 0444
+    entrypoint: /bin/sh
+    # The migrate image doesn't honour POSTGRES_PASSWORD_FILE natively, so
+    # we cat the secret into a shell var before invoking the binary.
+    command:
+      - "-c"
+      - |
+        set -e
+        PGPW=$$(cat /run/secrets/postgres_password)
+        for svc in gateway wa mbs campaign inbox contacts proxy notify; do
+          echo "Migrating $$svc..."
+          /migrate -path /migrations/$$svc \
+            -database "postgres://$${POSTGRES_USER}:$${PGPW}@postgres:5432/$${POSTGRES_DB}?sslmode=disable&x-migrations-table=schema_migrations_$$svc" \
+            up || exit 1
+        done
+        echo "All migrations complete."
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hermes}
+      POSTGRES_DB: ${POSTGRES_DB:-hermes}
+    networks:
+      - hermes-net
+
+  # ═══════════════════════════════════════════════════════════════
+  # Backend Services (Layer 1 — no gRPC deps on other services)
+  # ═══════════════════════════════════════════════════════════════
+
+  proxy:
+    <<: *service-defaults
+    image: hermes-proxy:${HERMES_VERSION:-latest}
+    environment:
+      PORT: "9101"
+      DATABASE_URL: ${DATABASE_URL}
+      NATS_URL: nats://nats:4222
+      BAN_FLAG_THRESHOLD: "3"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:9101/ 2>&1 || nc -z localhost 9101"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          memory: 128M
+
+  contacts:
+    <<: *service-defaults
+    image: hermes-contacts:${HERMES_VERSION:-latest}
+    environment:
+      PORT: "9102"
+      DATABASE_URL: ${DATABASE_URL}
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9102"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          memory: 128M
+
+  notify:
+    <<: *service-defaults
+    image: hermes-notify:${HERMES_VERSION:-latest}
+    environment:
+      PORT: "9103"
+      DATABASE_URL: ${DATABASE_URL}
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9103"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          memory: 128M
+
+  # ═══════════════════════════════════════════════════════════════
+  # Backend Services (Layer 2 — wa depends on proxy)
+  # ═══════════════════════════════════════════════════════════════
+
+  wa:
+    <<: *service-defaults
+    image: hermes-wa:${HERMES_VERSION:-latest}
+    environment:
+      PORT: "9104"
+      POD_ID: ${POD_ID_WA:-hermes-wa-prod-0}
+      DATABASE_URL: ${DATABASE_URL}
+      NATS_URL: nats://nats:4222
+      REDIS_URL: redis://redis:6379
+      PROXY_SERVICE_ADDR: proxy:9101
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      proxy:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9104"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  campaign:
+    <<: *service-defaults
+    image: hermes-campaign:${HERMES_VERSION:-latest}
+    environment:
+      PORT: "9105"
+      DATABASE_URL: ${DATABASE_URL}
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9105"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+        reservations:
+          memory: 128M
+
+  inbox:
+    <<: *service-defaults
+    image: hermes-inbox:${HERMES_VERSION:-latest}
+    environment:
+      PORT: "9106"
+      DATABASE_URL: ${DATABASE_URL}
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9106"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+        reservations:
+          memory: 128M
+
+  mbs:
+    <<: *service-defaults
+    image: hermes-mbs:${HERMES_VERSION:-latest}
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      PORT: "8082"
+      METRICS_PORT: "9092"
+      POD_ID: ${POD_ID_MBS:-hermes-mbs-prod-0}
+      DATABASE_URL: ${DATABASE_URL}
+      DB_SSLMODE: disable
+      NATS_URL: nats://nats:4222
+      HERMES_MBS_DEK_FILE: /run/secrets/mbs_dek
+      # MAUTRIX_DISABLE_TLS must stay false in prod — see master plan R6.
+      # Set explicitly even though false is the default; defence in depth.
+      HERMES_MBS_DISABLE_TLS: "false"
+      MBS_BRIDGE_MAX_CONCURRENT: ${MBS_BRIDGE_MAX_CONCURRENT:-10}
+      MBS_STREAM_REPLICAS: ${MBS_STREAM_REPLICAS:-1}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    secrets:
+      - source: mbs_dek
+        target: mbs_dek
+        uid: "65532"
+        gid: "65532"
+        mode: 0400
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:9092/readyz 2>&1 || nc -z localhost 8082"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  # ═══════════════════════════════════════════════════════════════
+  # Gateway (Layer 4 — depends on all backend services)
+  # ═══════════════════════════════════════════════════════════════
+
+  gateway:
+    <<: *service-defaults
+    image: hermes-gateway:${HERMES_VERSION:-latest}
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      PORT: "8080"
+      DATABASE_URL: ${DATABASE_URL}
+      NATS_URL: nats://nats:4222
+      # JWT_SECRET intentionally NOT set — gateway reads the file via
+      # JWT_SECRET_FILE. pkg/config.LoadSecret enforces inline-wins-over-file
+      # precedence, so leaving JWT_SECRET unset (or empty) makes it use the
+      # file. Empty inline + file path = prod posture.
+      JWT_SECRET_FILE: /run/secrets/jwt_signing_key
+      WA_ADDR: wa:9104
+      MBS_ADDR: mbs:8082
+      PROXY_ADDR: proxy:9101
+      CONTACTS_ADDR: contacts:9102
+      CAMPAIGN_ADDR: campaign:9105
+      INBOX_ADDR: inbox:9106
+      NOTIFY_ADDR: notify:9103
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      # gRPC-Web + REST/WS for the in-stack web container and any local
+      # operator. Chunk 5's Caddyfile sits in front of these and adds TLS.
+      - "${HERMES_GATEWAY_GRPC_PORT:-8080}:8080"
+      - "${HERMES_GATEWAY_HTTP_PORT:-8081}:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      proxy:
+        condition: service_started
+      contacts:
+        condition: service_started
+      notify:
+        condition: service_started
+      wa:
+        condition: service_started
+      campaign:
+        condition: service_started
+      inbox:
+        condition: service_started
+      mbs:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+    secrets:
+      - source: jwt_signing_key
+        target: jwt_signing_key
+        uid: "65532"
+        gid: "65532"
+        mode: 0400
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+        reservations:
+          memory: 128M
+
+  # ═══════════════════════════════════════════════════════════════
+  # Frontend (in-compose nginx serving the prebuilt SPA)
+  # ═══════════════════════════════════════════════════════════════
+
+  web:
+    <<: *service-defaults
+    image: hermes-web:${HERMES_VERSION:-latest}
+    ports:
+      - "${HERMES_WEB_PORT:-80}:80"
+    depends_on:
+      gateway:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+        reservations:
+          memory: 64M
+
+# ═══════════════════════════════════════════════════════════════
+# Secrets (host file -> tmpfs mount)
+# ═══════════════════════════════════════════════════════════════
+#
+# File-based Docker secrets. Each is mounted at /run/secrets/<name> inside
+# the consumer container with the uid/gid/mode shown in the `secrets:`
+# block of each service definition above. uid/gid "65532" matches the
+# non-root `hermes` user baked into the chunk-2 Dockerfile.
+#
+# Rotation: docs/runbooks/secret-management.md
+secrets:
+  mbs_dek:
+    file: ./deploy/secrets/prod/mbs-dek.bin
+  jwt_signing_key:
+    file: ./deploy/secrets/prod/jwt-signing-key
+  postgres_password:
+    file: ./deploy/secrets/prod/postgres-password
+
+# ═══════════════════════════════════════════════════════════════
+# Named volumes (operator owns the backup story)
+# ═══════════════════════════════════════════════════════════════
+volumes:
+  pgdata:
+  natsdata:
+  redisdata:
+
+networks:
+  hermes-net:
+    driver: bridge
