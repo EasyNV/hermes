@@ -343,17 +343,66 @@ export default function MbsSessions() {
                               <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                                 Assets ({assetsQuery.data.assets.length})
                               </div>
-                              <ul className="grid grid-cols-1 gap-1 sm:grid-cols-2 lg:grid-cols-3">
+                              <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
                                 {assetsQuery.data.assets.map((a) => (
                                   <li
-                                    key={`${a.kind}:${a.externalId}`}
-                                    className="rounded border bg-card px-2 py-1.5 text-xs"
+                                    key={a.pageId || a.wecMailboxId || a.wabaId}
+                                    className={`rounded border bg-card px-2 py-1.5 text-xs ${
+                                      a.isPrimary ? 'ring-1 ring-primary' : ''
+                                    }`}
                                   >
-                                    <div className="font-medium">
-                                      {a.displayName || a.externalId}
+                                    <div className="flex items-center justify-between font-medium">
+                                      <span className="truncate">
+                                        {a.pageName || a.pageId || a.wecMailboxId || '—'}
+                                      </span>
+                                      {a.isPrimary && (
+                                        <span className="ml-1 shrink-0 rounded bg-primary/15 px-1 text-[9px] font-semibold uppercase tracking-wide text-primary">
+                                          Primary
+                                        </span>
+                                      )}
                                     </div>
-                                    <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                                      {a.kind}
+                                    <div className="mt-0.5 space-y-0.5 text-[10px] text-muted-foreground">
+                                      {a.pageId && (
+                                        <div>
+                                          <span className="uppercase tracking-wide">Page</span>
+                                          <span className="ml-1 font-mono">{a.pageId}</span>
+                                        </div>
+                                      )}
+                                      {a.businessName && <div>biz: {a.businessName}</div>}
+                                      {a.businessId && !a.businessName && (
+                                        <div>
+                                          <span className="uppercase tracking-wide">Biz</span>
+                                          <span className="ml-1 font-mono">{a.businessId}</span>
+                                        </div>
+                                      )}
+                                      {a.wabaId && (
+                                        <div>
+                                          <span className="uppercase tracking-wide">WABA</span>
+                                          <span className="ml-1 font-mono">{a.wabaId}</span>
+                                        </div>
+                                      )}
+                                      {a.wecPhoneNumber && (
+                                        <div>
+                                          <span className="uppercase tracking-wide">WEC</span>
+                                          <span className="ml-1 font-mono">
+                                            +{a.wecPhoneNumber}
+                                          </span>
+                                          <span
+                                            className={`ml-1 ${
+                                              a.wecAccountRegistered
+                                                ? 'text-emerald-500'
+                                                : 'text-amber-500'
+                                            }`}
+                                            title={
+                                              a.wecAccountRegistered
+                                                ? 'WEC account registered (send-to-phone enabled)'
+                                                : 'WEC account NOT registered (send-to-phone disabled)'
+                                            }
+                                          >
+                                            {a.wecAccountRegistered ? '✓' : '✗'}
+                                          </span>
+                                        </div>
+                                      )}
                                     </div>
                                   </li>
                                 ))}

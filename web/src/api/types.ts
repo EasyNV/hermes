@@ -330,17 +330,37 @@ export interface MbsSession {
   burnedReason: string
 }
 
-export interface MbsSessionAsset {
-  uid: string
-  kind: string             // server-controlled vocab ("page" | "wec_mailbox" today)
-  externalId: string
-  displayName: string
-  metadata: string         // JSON blob; opaque to client
+// MbsAsset — wire shape from proto MbsAsset (proto/hermes/v1/mbs.proto).
+//
+// Source-of-truth field list and numbers live in the .proto. This is
+// hand-rolled because the frontend doesn't pull from gen/ts (the
+// build only generates Go).
+//
+// Stage F follow-up chunk 4 (2026-05-30): replaced the speculative
+// {uid, kind, externalId, displayName, metadata} type that never
+// matched the actual API response. The old shape would have required
+// a server change none of us shipped — the assets endpoint has
+// always returned the proto field set below.
+export interface MbsAsset {
+  pageId: string
+  pageName: string
+  wabaId: string
+  wecMailboxId: string
+  wecPhoneNumber: string
+  businessPresenceNodeId: string
+  igAccountId: string
+  hasWaba: boolean
+  // Added wire-side in chunk 4 — fields existed in mbs_session_assets
+  // but were dropped by proto_conv until 2026-05-30.
+  businessId: string
+  businessName: string
+  isPrimary: boolean
+  wecAccountRegistered: boolean
 }
 
 export interface MbsListSessionsResponse { sessions: MbsSession[]; pagination: PageResponse }
 export interface MbsGetSessionStatusResponse { session: MbsSession }
-export interface MbsListSessionAssetsResponse { assets: MbsSessionAsset[] }
+export interface MbsListSessionAssetsResponse { assets: MbsAsset[] }
 export interface MbsBurnSessionResponse { session: MbsSession }
 export interface MbsResolvePhoneResponse {
   threadId: string         // FBID-keyed thread id; empty if exists=false

@@ -236,6 +236,14 @@ message MbsAsset {
   string business_presence_node_id = 6;
   string ig_account_id = 7;          // optional, set if page has IG
   bool has_waba = 8;
+  // ── Added Stage F follow-up chunk 4 (2026-05-30) ──
+  // These fields existed in store.AssetRow / mbs_session_assets since
+  // Stage B but were never surfaced on the wire. Field numbers 9-12
+  // were unused.
+  string business_id = 9;            // Business Manager parent ID (Stage B.1)
+  string business_name = 10;         // Business Manager parent display name (Stage B.1)
+  bool is_primary = 11;              // gated by partial unique index uniq_mbs_session_assets_one_primary
+  bool wec_account_registered = 12;  // WEC send-to-phone gate (Stage B.2)
 }
 
 message ListMbsSessionsRequest {

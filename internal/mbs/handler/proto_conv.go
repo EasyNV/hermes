@@ -112,6 +112,15 @@ func assetRowToProto(r *store.AssetRow) *hermesv1.MbsAsset {
 		BusinessPresenceNodeId: r.BusinessPresenceNodeID,
 		IgAccountId:            r.IgAccountID,
 		HasWaba:                r.WabaID != "" || r.WecMailboxID != "",
+		// ── Stage F follow-up chunk 4 (2026-05-30) ──
+		// Previously dropped on the wire even though store.AssetRow
+		// already carried them. UI needs all four to render the
+		// asset card properly (PRIMARY badge, business parent,
+		// WEC registration status).
+		BusinessId:           r.BusinessID,
+		BusinessName:         r.BusinessName,
+		IsPrimary:            r.IsPrimary,
+		WecAccountRegistered: r.WECAccountRegistered,
 	}
 }
 
