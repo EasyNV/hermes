@@ -9,6 +9,7 @@ import (
 
 	hermesv1 "github.com/hermes-waba/hermes/gen/go/hermes/v1"
 	"github.com/hermes-waba/hermes/internal/gateway/middleware"
+	mbshandler "github.com/hermes-waba/hermes/internal/mbs/handler"
 )
 
 // ─────────────────────────────────────────────────────────────────────
@@ -92,15 +93,26 @@ func isSuperadmin(ctx context.Context) bool {
 // anonymous and either fails closed or — worse — leaks across tenant
 // boundaries. Closing chunk-1 carrying gap C1-G1.
 //
-// The metadata keys MUST match what mbs's interceptor reads. The
-// chunk-4 mbs tenant interceptor reads `tenant-id` and `user-id`
-// (hyphen, lowercase) — gRPC normalizes metadata keys to lowercase
-// already, but spelling the convention here makes the lock-step
-// visible.
+// withTenantMetadata derives a child context carrying tenant-id and
+// user-id outgoing gRPC metadata so mbs's server-side tenant
+// interceptor (internal/mbs/handler/tenant.go) sees the right tenant.
+//
+// Without this, in-process gRPC dispatch between the gateway gRPC
+// server and the gateway-held HermesMbsClient drops inbound metadata
+// — mbs's interceptor treats every uid-keyed RPC (GetSessionStatus,
+// ListSessionAssets, BurnSession, ResolvePhone, SendMessage) as
+// anonymous and either fails closed or — worse — leaks across tenant
+// boundaries. Closing chunk-1 carrying gap C1-G1.
+//
+// The metadata key MUST match mbs's TenantMetadataKey constant
+// (internal/mbs/handler/tenant.go) — currently "x-tenant-id". An
+// earlier revision sent "tenant-id" (no x-) which silently broke every
+// MBS REST route because the mbs interceptor read x-tenant-id and saw
+// nothing in incoming metadata. user-id follows the same convention.
 func withTenantMetadata(ctx context.Context, tenantID string) context.Context {
 	md := metadata.New(map[string]string{
-		"tenant-id": tenantID,
-		"user-id":   middleware.UserIDFromCtx(ctx),
+		mbshandler.TenantMetadataKey: tenantID,
+		"x-user-id":                  middleware.UserIDFromCtx(ctx),
 	})
 	return metadata.NewOutgoingContext(ctx, md)
 }

@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	hermesv1 "github.com/hermes-waba/hermes/gen/go/hermes/v1"
+	mbshandler "github.com/hermes-waba/hermes/internal/mbs/handler"
 )
 
 // ─────────────────────────────────────────────────────────────────────
@@ -312,8 +313,8 @@ func TestBridgeWS_StartTenantForcedFromJWT(t *testing.T) {
 	if req.TenantId != "tenant-A" {
 		t.Errorf("tenant not forced: got %q want tenant-A", req.TenantId)
 	}
-	if got := fake.outgoingMD().Get("tenant-id"); len(got) != 1 || got[0] != "tenant-A" {
-		t.Errorf("outgoing metadata tenant-id: got %v", got)
+	if got := fake.outgoingMD().Get(mbshandler.TenantMetadataKey); len(got) != 1 || got[0] != "tenant-A" {
+		t.Errorf("outgoing metadata %s: got %v", mbshandler.TenantMetadataKey, got)
 	}
 
 	// Cleanly terminate.

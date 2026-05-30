@@ -15,6 +15,7 @@ import (
 
 	hermesv1 "github.com/hermes-waba/hermes/gen/go/hermes/v1"
 	"github.com/hermes-waba/hermes/internal/gateway/middleware"
+	mbshandler "github.com/hermes-waba/hermes/internal/mbs/handler"
 )
 
 // ─────────────────────────────────────────────────────────────────────
@@ -152,9 +153,14 @@ func (a *Adapter) bridgeLoginWS(w http.ResponseWriter, r *http.Request) {
 	// ── 4. gRPC context with outgoing metadata ──
 	bridgeCtx, cancel := context.WithTimeout(r.Context(), bridgeWSIdleTimeout)
 	defer cancel()
+	// Keys MUST match mbshandler.TenantMetadataKey ("x-tenant-id") —
+	// the mbs server-side interceptor in internal/mbs/handler/tenant.go
+	// reads that constant. An earlier revision sent bare "tenant-id"
+	// (no x-) which silently broke every BridgeLogin RPC. x-user-id
+	// follows the same convention for symmetry with the unary path.
 	md := metadata.New(map[string]string{
-		"tenant-id": claims.TenantID,
-		"user-id":   claims.UserID,
+		mbshandler.TenantMetadataKey: claims.TenantID,
+		"x-user-id":                  claims.UserID,
 	})
 	grpcCtx := metadata.NewOutgoingContext(bridgeCtx, md)
 

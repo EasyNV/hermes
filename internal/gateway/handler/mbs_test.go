@@ -12,6 +12,7 @@ import (
 
 	hermesv1 "github.com/hermes-waba/hermes/gen/go/hermes/v1"
 	"github.com/hermes-waba/hermes/internal/gateway/middleware"
+	mbshandler "github.com/hermes-waba/hermes/internal/mbs/handler"
 )
 
 // ─────────────────────────────────────────────────────────────────────
@@ -32,7 +33,11 @@ type stubMbsClient struct {
 	lastSendReq    *hermesv1.MbsSendMessageRequest
 
 	// last outgoing gRPC metadata observed on the most recent call.
-	// Tests assert `lastMD.Get("tenant-id")` matches the JWT tenant.
+	// Tests assert `lastMD.Get("x-tenant-id")` matches the JWT tenant.
+	// The key MUST match mbshandler.TenantMetadataKey — the mbs server
+	// reads x-tenant-id (not tenant-id). An earlier revision tested the
+	// wrong key, which hid a wire-level metadata-key mismatch that
+	// broke every MBS REST call against the running stack.
 	lastMD metadata.MD
 
 	// configurable responses
@@ -401,11 +406,11 @@ func TestHandler_MbsMethods_PropagateTenantMetadata(t *testing.T) {
 			if err := c.fn(h); err != nil {
 				t.Fatalf("%s: unexpected: %v", c.name, err)
 			}
-			if got := stub.lastMD.Get("tenant-id"); len(got) != 1 || got[0] != "tenant-A" {
-				t.Errorf("%s: tenant-id metadata: got %v, want [tenant-A]", c.name, got)
+			if got := stub.lastMD.Get(mbshandler.TenantMetadataKey); len(got) != 1 || got[0] != "tenant-A" {
+				t.Errorf("%s: %s metadata: got %v, want [tenant-A]", c.name, mbshandler.TenantMetadataKey, got)
 			}
-			if got := stub.lastMD.Get("user-id"); len(got) != 1 || got[0] != "user-007" {
-				t.Errorf("%s: user-id metadata: got %v, want [user-007]", c.name, got)
+			if got := stub.lastMD.Get("x-user-id"); len(got) != 1 || got[0] != "user-007" {
+				t.Errorf("%s: x-user-id metadata: got %v, want [user-007]", c.name, got)
 			}
 		})
 	}
@@ -425,7 +430,7 @@ func TestHandler_MbsMethods_SuperadminMetadataUsesRequestTenant(t *testing.T) {
 	if _, err := h.ListMbsSessions(ctx, req); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
-	if got := stub.lastMD.Get("tenant-id"); len(got) != 1 || got[0] != "tenant-X" {
-		t.Errorf("superadmin: tenant-id metadata: got %v, want [tenant-X]", got)
+	if got := stub.lastMD.Get(mbshandler.TenantMetadataKey); len(got) != 1 || got[0] != "tenant-X" {
+		t.Errorf("superadmin: %s metadata: got %v, want [tenant-X]", mbshandler.TenantMetadataKey, got)
 	}
 }
