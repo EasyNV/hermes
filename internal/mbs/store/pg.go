@@ -315,12 +315,78 @@ func (s *PgStore) UpdateSessionState(ctx context.Context, uid int64, state strin
 	return nil
 }
 
+// UpdateSessionCookies rewrites the encrypted_cookies blob and the
+// two cookie-freshness timestamps for uid. Used by:
+//
+//   - importer --force path (importer.go:286) after replacing the
+//     access-token triple, to install the legacy archive's cookies.
+//   - refresh ticker (refresh/attempt.go:171,224) to persist merged
+//     cookies post-rotation, or to bump LastValidatedAt on a no-cookie-
+//     change validation hit.
+//
+// Single statement, no transaction needed — concurrent writers race
+// last-writer-wins on the cookies/timestamps columns and that's the
+// correct semantics for both call sites (importer wins over a stale
+// refresh; refresh wins over a stale importer; either way the row
+// stays internally consistent because all three columns move together).
+//
+// Empty encryptedCookies and zero-value timestamps are permitted —
+// caller's responsibility to pass meaningful values. Returns ErrNotFound
+// if uid has no row (importer should not call this on a path where the
+// CreateSession/UpdateSessionTokens predecessor failed; refresh ticker's
+// row was loaded via ListSessions so it exists).
 func (s *PgStore) UpdateSessionCookies(ctx context.Context, uid int64, encryptedCookies []byte, lastRefreshedAt, lastValidatedAt time.Time) error {
-	return ErrNotImplemented
+	tag, err := s.pool.Exec(ctx, `
+        UPDATE mbs_sessions
+           SET cookies           = $1,
+               last_refreshed_at = $2,
+               last_validated_at = $3,
+               updated_at        = NOW()
+         WHERE uid = $4`,
+		encryptedCookies, lastRefreshedAt, lastValidatedAt, uid)
+	if err != nil {
+		return fmt.Errorf("update session cookies: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
+// UpdateSessionTokens rewrites the encrypted access-token triple
+// (access_token, secret, session_key) for uid. Used by the importer's
+// --force path (importer.go:280) when re-importing a legacy archive
+// onto an existing row.
+//
+// Does NOT touch cookies, state, pod_id, or any identity column.
+// Caller composes with UpdateSessionCookies + UpdateSessionState as
+// needed (importer's --force flow runs all three back-to-back).
+//
+// All three byte slices are passed through verbatim — empty/nil is
+// allowed (legacy archives occasionally have a missing field; the
+// encryption layer encodes "field absent" as sealed-empty, which is
+// distinct from nil). No length validation here — that belongs to the
+// AAD-bound encrypt path which produced these bytes.
+//
+// Single statement, no transaction. Returns ErrNotFound if uid has no
+// row (importer should fall through to CreateSession in that case;
+// it currently branches on ExistsSession before calling us).
 func (s *PgStore) UpdateSessionTokens(ctx context.Context, uid int64, encAccessToken, encSecret, encSessionKey []byte) error {
-	return ErrNotImplemented
+	tag, err := s.pool.Exec(ctx, `
+        UPDATE mbs_sessions
+           SET access_token = $1,
+               secret       = $2,
+               session_key  = $3,
+               updated_at   = NOW()
+         WHERE uid = $4`,
+		encAccessToken, encSecret, encSessionKey, uid)
+	if err != nil {
+		return fmt.Errorf("update session tokens: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // BurnSession marks the session as burned, records the reason, and
