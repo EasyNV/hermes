@@ -344,12 +344,162 @@ func (s *PgStore) BurnSession(ctx context.Context, uid int64, reason string) err
 	return nil
 }
 
+// DeleteSession removes the mbs_sessions row for uid. Cascade FKs
+// (mbs_session_assets ON DELETE CASCADE) clear dependent rows; callers
+// who care about cascading children that DON'T have ON DELETE CASCADE
+// (mbs_phone_threads — verify via \d before relying on this) must
+// delete those first.
+//
+// Returns ErrNotFound if uid has no row. Burn-and-keep flow uses
+// UpdateSessionState→BURNED instead; DeleteSession is reserved for
+// operator-initiated removal (GDPR / wrong-tenant cleanup / test
+// teardown).
 func (s *PgStore) DeleteSession(ctx context.Context, uid int64) error {
-	return ErrNotImplemented
+	tag, err := s.pool.Exec(ctx, `DELETE FROM mbs_sessions WHERE uid = $1`, uid)
+	if err != nil {
+		return fmt.Errorf("delete session: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
+// UpsertAssets persists a session's business asset map (one row per
+// page_id) in mbs_session_assets. Semantics:
+//
+//   - Per-row upsert by natural key (uid, page_id). Existing rows are
+//     UPDATEd in place; new rows INSERTed.
+//   - discovered_at is PRESERVED on update — first-discovery timestamp
+//     matters for ops. The SQL uses ON CONFLICT DO UPDATE without
+//     touching discovered_at.
+//   - is_primary is overwritten by caller's value. The DB enforces the
+//     at-most-one-primary invariant via the partial unique index
+//     uniq_mbs_session_assets_one_primary; concurrent writers that
+//     both submit IsPrimary=true for the same uid will have the second
+//     commit fail with 23505 (wrapped as ErrConflict here).
+//   - assets NOT present in the input are NOT deleted. UpsertAssets is
+//     additive/refresh. Removal is via DeleteSession (cascade) or a
+//     future TrimAssets path.
+//   - Empty assets slice is a no-op — returns nil without opening a
+//     transaction.
+//   - All upserts run in a single transaction. Any error rolls back.
+//
+// Foreign-key contract: caller MUST ensure mbs_sessions(uid) exists
+// before calling. FK violation surfaces as a wrapped error containing
+// the pgconn code "23503" so callers may classify if needed.
 func (s *PgStore) UpsertAssets(ctx context.Context, uid int64, assets []*AssetRow) error {
-	return ErrNotImplemented
+	if len(assets) == 0 {
+		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("upsert assets: begin: %w", err)
+	}
+	// Rollback is a no-op after Commit; deferring is the standard pgx pattern.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	const stmt = `
+        INSERT INTO mbs_session_assets (
+            uid, page_id, page_name, business_presence_node_id,
+            business_id, business_name,
+            waba_id, wec_mailbox_id, wec_phone_number,
+            ig_account_id, is_primary, wec_account_registered,
+            discovered_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                  COALESCE($13, now()))
+        ON CONFLICT (uid, page_id) DO UPDATE SET
+            page_name                 = EXCLUDED.page_name,
+            business_presence_node_id = EXCLUDED.business_presence_node_id,
+            business_id               = EXCLUDED.business_id,
+            business_name             = EXCLUDED.business_name,
+            waba_id                   = EXCLUDED.waba_id,
+            wec_mailbox_id            = EXCLUDED.wec_mailbox_id,
+            wec_phone_number          = EXCLUDED.wec_phone_number,
+            ig_account_id             = EXCLUDED.ig_account_id,
+            is_primary                = EXCLUDED.is_primary,
+            wec_account_registered    = EXCLUDED.wec_account_registered`
+
+	for _, a := range assets {
+		if a == nil {
+			continue
+		}
+		// nil discovered_at → COALESCE($13, now()) on the SQL side.
+		var discoveredAt any
+		if !a.DiscoveredAt.IsZero() {
+			discoveredAt = a.DiscoveredAt
+		}
+		if _, err := tx.Exec(ctx, stmt,
+			uid, a.PageID, a.PageName, a.BusinessPresenceNodeID,
+			a.BusinessID, a.BusinessName,
+			a.WabaID, a.WecMailboxID, a.WecPhoneNumber,
+			a.IgAccountID, a.IsPrimary, a.WECAccountRegistered,
+			discoveredAt,
+		); err != nil {
+			// Classify pgconn errors for caller observability without
+			// breaking errors.Is on sentinels.
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) {
+				switch pgErr.Code {
+				case "23505": // unique_violation — primary partial index race
+					return fmt.Errorf("upsert assets: primary conflict for uid=%d page=%s: %w",
+						uid, a.PageID, ErrConflict)
+				case "23503": // foreign_key_violation — uid not in mbs_sessions
+					return fmt.Errorf("upsert assets: FK violation for uid=%d (session row missing?): %w", uid, err)
+				}
+			}
+			return fmt.Errorf("upsert assets: exec uid=%d page=%s: %w", uid, a.PageID, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("upsert assets: commit: %w", err)
+	}
+	return nil
+}
+
+// SetPrimaryAsset atomically flips primary to (uid, pageID), clearing
+// any other primary on the same uid. Two-statement transaction:
+//
+//  1. Clear any current primary on uid except pageID.
+//  2. Set is_primary=true on (uid, pageID).
+//
+// Returns ErrNotFound if (uid, pageID) has no row. Returns ErrConflict
+// if a concurrent SetPrimaryAsset races and trips the partial unique
+// index — callers MAY retry once after refetching the assets list.
+func (s *PgStore) SetPrimaryAsset(ctx context.Context, uid int64, pageID string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("set primary asset: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `
+        UPDATE mbs_session_assets
+           SET is_primary = false
+         WHERE uid = $1 AND is_primary = true AND page_id <> $2`,
+		uid, pageID); err != nil {
+		return fmt.Errorf("set primary asset: clear: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx, `
+        UPDATE mbs_session_assets
+           SET is_primary = true
+         WHERE uid = $1 AND page_id = $2`,
+		uid, pageID)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return fmt.Errorf("set primary asset: race for uid=%d page=%s: %w", uid, pageID, ErrConflict)
+		}
+		return fmt.Errorf("set primary asset: set: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("set primary asset: commit: %w", err)
+	}
+	return nil
 }
 
 // ListAssets returns all rows from mbs_session_assets for uid, ordered
@@ -408,10 +558,6 @@ func (s *PgStore) ListAssets(ctx context.Context, uid int64) ([]*AssetRow, error
 		return nil, err
 	}
 	return out, nil
-}
-
-func (s *PgStore) SetPrimaryAsset(ctx context.Context, uid int64, pageID string) error {
-	return ErrNotImplemented
 }
 
 // GetPhoneThread returns the cached (uid, page_id, phone) → thread_id

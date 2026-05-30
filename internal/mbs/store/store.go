@@ -40,6 +40,15 @@ var (
 	// filled in by their first caller. Callers SHOULD NOT swallow this —
 	// it signals "this code path is not wired yet, finish the impl".
 	ErrNotImplemented = errors.New("store: method not yet implemented (see plan chunk 3-5)")
+
+	// ErrConflict is returned when a write fails because of a
+	// concurrent writer (e.g. partial-unique-index race on
+	// mbs_session_assets.is_primary). Callers MAY retry once after
+	// refetching the relevant slice; persistent ErrConflict indicates
+	// a logic bug in the caller (e.g. two writers both setting
+	// IsPrimary=true on the same uid). Maps to gRPC codes.Aborted at
+	// the handler layer.
+	ErrConflict = errors.New("store: concurrent write conflict")
 )
 
 // Store is the data-access surface for hermes-mbs. All methods take a
