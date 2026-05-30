@@ -1,7 +1,9 @@
 .PHONY: proto-gen migrate dev test build tools clean \
         docker-build-all docker-build-web \
         deploy-prod-up deploy-prod-down deploy-prod-logs deploy-prod-ps \
-        deploy-prod-restart
+        deploy-prod-restart \
+        deploy-dev-up deploy-dev-down deploy-dev-logs deploy-dev-ps \
+        deploy-dev-restart
 
 # ── Build-time stamps for OCI labels (overridable from env) ─────────────
 GIT_VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -127,3 +129,44 @@ deploy-prod-ps:
 
 deploy-prod-restart:
 	$(COMPOSE_PROD) restart
+
+# ─── Deploy (dev compose, chunk 5) ───────────────────────────────────────
+#
+# Symmetric to deploy-prod-*. Dev compose (`docker-compose.dev.yml`) builds
+# each backend service from `Dockerfile.dev` with the local source tree —
+# every backend exits without secret pre-flight because dev uses inline
+# defaults (e.g. JWT_SECRET in compose env, no DEK file required since
+# dev mbs runs against deploy/secrets/dev/mbs-dek.bin which the helper
+# script regenerates if absent).
+#
+# Use these targets for local development:
+#   make deploy-dev-up      # bring up the stack with all 12 services
+#   make deploy-dev-logs    # follow logs across services
+#   make deploy-dev-down    # tear it down
+#
+# Vite frontend hot-reload runs separately on host port 5173 (started by
+# the web service inside compose).
+
+COMPOSE_DEV = docker-compose -f docker-compose.dev.yml
+
+deploy-dev-up:
+	$(COMPOSE_DEV) up -d
+	@echo ""
+	@echo "Dev stack starting. Watch with: make deploy-dev-logs"
+	@echo "Verify health: make deploy-dev-ps"
+	@echo "Frontend (Vite hot-reload): http://localhost:5173"
+	@echo "Gateway REST:                http://localhost:8081"
+	@echo "Gateway gRPC:                localhost:8080"
+	@echo "MBS gRPC:                    localhost:8082"
+
+deploy-dev-down:
+	$(COMPOSE_DEV) down
+
+deploy-dev-logs:
+	$(COMPOSE_DEV) logs -f --tail=200
+
+deploy-dev-ps:
+	$(COMPOSE_DEV) ps
+
+deploy-dev-restart:
+	$(COMPOSE_DEV) restart $(SERVICE)

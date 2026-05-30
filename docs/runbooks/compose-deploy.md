@@ -444,15 +444,102 @@ plaintext. **Back it up before you tear anything down.** See
 
 ---
 
-## What's not yet here (and why)
+## 6. Putting the stack behind a reverse proxy
 
-- **A real `/readyz` on every service** — chunk 4.
-- **Reverse-proxy fronting (Caddy/nginx)** — chunk 5.
-- **Backup + restore procedure** — chunk 5
-  (`docs/runbooks/backup-restore.md`).
-- **Image registry / `docker push`** — out of Stage F scope.
-- **Kubernetes manifests** — Stage G.
+By default the compose stack binds `gateway:8081` (REST/WS) and the web container on `127.0.0.1:80`. To expose these publicly with TLS, put **Caddy** or **nginx** in front of the stack on the same host. Both options share the same URL surface — `/api/*` and `/ws` go to gateway, everything else hits the web SPA. METRICS_PORT endpoints (`/metrics`, `/readyz`, `/livez`) are NEVER reachable through the proxy (chunk-4 invariant).
 
-The Stage F master plan
-(`.hermes/plans/2026-05-29_stage-f-deploy-hardening-master.md`)
-tracks all of these.
+### 6.1 Option A — Caddy (default; auto-TLS)
+
+```sh
+# Install Caddy on Debian/Ubuntu
+sudo apt install -y caddy
+
+# Install the Hermes Caddyfile
+sudo cp deploy/caddy/Caddyfile.example /etc/caddy/Caddyfile
+
+# Set env vars (the systemd unit reads /etc/default/caddy by default)
+sudo tee -a /etc/default/caddy >/dev/null <<'EOF'
+HERMES_DOMAIN=hermes.example.com
+HERMES_ACME_EMAIL=ops@example.com
+EOF
+
+# Reload
+sudo systemctl reload caddy
+
+# Verify
+sudo journalctl -u caddy --since '1 minute ago' | grep -E '(certificate obtained|http2|serving)'
+```
+
+Acceptance:
+```sh
+curl -sS https://hermes.example.com/api/healthz   # 200
+curl -sS https://hermes.example.com/             # SPA HTML
+curl -sS https://hermes.example.com/metrics      # 404 (correctly NOT proxied)
+```
+
+### 6.2 Option B — nginx + certbot
+
+```sh
+sudo apt install -y nginx certbot python3-certbot-nginx
+
+# Replace HERMES_DOMAIN in the example, then install
+sed 's/HERMES_DOMAIN/hermes.example.com/g' deploy/nginx/hermes.conf.example | \
+    sudo tee /etc/nginx/sites-available/hermes.conf >/dev/null
+sudo ln -sf /etc/nginx/sites-available/hermes.conf /etc/nginx/sites-enabled/
+
+# Issue cert via certbot — adds the ssl_certificate paths and a HTTP redirect
+sudo certbot --nginx -d hermes.example.com --non-interactive --agree-tos -m ops@example.com
+
+# Verify nginx config, reload
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Acceptance: same three curls as §6.1.
+
+### 6.3 What this gives you
+
+| Endpoint | Public surface | Backend |
+|---|---|---|
+| `https://<domain>/` | TLS-terminated SPA | `web:80` (in-compose nginx) |
+| `https://<domain>/api/*` | REST API | `gateway:8081` |
+| `https://<domain>/ws` | WebSocket upgrade | `gateway:8081` |
+| `https://<domain>/metrics` | 404 (intentional) | not proxied |
+| `https://<domain>/readyz` | 404 (intentional) | not proxied |
+
+### 6.4 Common gotchas
+
+- **Caddy ACME rate limit during smoke test** — uncomment the staging ACME directive in `Caddyfile.example` to avoid Let's Encrypt's 5 certs/domain/week production cap.
+- **nginx OSS lacks active health checks** — the upstream block uses passive `max_fails=3 fail_timeout=10s`. For active probing of gateway's `/readyz`, you need nginx Plus's `health_check uri=/readyz port=9100`.
+- **WebSocket disconnects after ~60s** — you didn't add `proxy_read_timeout 7d` to `/ws` in nginx (or `read_timeout 0` in Caddy). The example configs both have this baked in.
+- **`X-Forwarded-For` doesn't reach gateway logs** — the example nginx config sets it; Caddy sets it automatically. Verify by tailing `docker logs hermes-gateway-1` while curl'ing from a different IP.
+
+---
+
+## 7. Tear-down
+
+```sh
+make deploy-prod-down               # stop + remove containers, KEEP volumes
+docker-compose -f docker-compose.prod.yml down -v   # also drop volumes (destructive)
+```
+
+The DEK lives in `deploy/secrets/prod/mbs-dek.bin` on the host filesystem. Loss of that file → loss of every encrypted blob's plaintext. **Back it up before you tear anything down.** See `docs/runbooks/backup-restore.md` §3 and `docs/runbooks/secret-management.md` §5.
+
+---
+
+## 8. What's NOT in this runbook
+
+The Stage F master plan covers the full scope. What's deferred to **Stage G or later**:
+
+- **Image registry / `docker push`** — single-host VPS deployment uses local images.
+- **Kubernetes manifests** — out of Stage F.
+- **Cron-driven backups** — manual procedure documented in `backup-restore.md`; automation is operator's call.
+- **Prometheus / Grafana** — services expose `/metrics` per chunk 4, but federation + dashboards are Stage G.
+- **Log aggregation (Loki / Vector)** — services log to stdout; Docker captures via the json-file driver. Centralisation is Stage G.
+- **WAL archiving / PITR** — `pg_dump` is sufficient for single-host operations; WAL archiving is Stage G+.
+
+Cross-references for everything that IS in scope:
+- Backup + restore procedures: `docs/runbooks/backup-restore.md`
+- First-deploy walkthrough: `docs/runbooks/mbs-bootstrap.md`
+- Secret rotation: `docs/runbooks/secret-management.md`
+- Env reference: `docs/runbooks/env-reference.md`
+- Reverse proxy configs: `deploy/caddy/Caddyfile.example`, `deploy/nginx/hermes.conf.example`

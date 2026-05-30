@@ -1,0 +1,143 @@
+# /etc/nginx/sites-available/hermes.conf
+#
+# Hermes reverse proxy reference — nginx alternate to deploy/caddy/Caddyfile.example.
+# Use this if you already run nginx on your VPS or prefer manual TLS via
+# certbot. The Caddyfile is simpler (auto-TLS, single binary); pick whichever
+# fits your existing ops posture.
+#
+# Setup:
+#   1. apt install nginx certbot python3-certbot-nginx
+#   2. Replace HERMES_DOMAIN below with your real hostname (3 occurrences).
+#   3. certbot --nginx -d HERMES_DOMAIN
+#      (certbot will edit the file in-place; verify the cert paths match
+#      the ssl_certificate lines below).
+#   4. cp deploy/nginx/hermes.conf.example /etc/nginx/sites-available/hermes.conf
+#      ln -s /etc/nginx/sites-available/hermes.conf /etc/nginx/sites-enabled/
+#      nginx -t && systemctl reload nginx
+#
+# What this config does:
+#   - Terminates TLS via Let's Encrypt certs at /etc/letsencrypt/live/HERMES_DOMAIN/.
+#   - Routes /api/* and /ws to gateway:8081 (loopback).
+#   - Falls through to the web SPA for everything else.
+#   - Adds HSTS, nosniff, frame-deny, strict referrer policy.
+#   - Forwards X-Forwarded-For / X-Real-IP for gateway logging.
+#   - Long /ws read timeout so WebSockets survive idle periods.
+#
+# What this config does NOT do (vs Caddyfile):
+#   - Active upstream health checks. nginx OSS only does passive (fail after
+#     N timeouts). nginx Plus has `health_check` directive — replace
+#     `max_fails` block below with `health_check uri=/readyz port=9100` if
+#     you're on Plus.
+#   - Auto-renew. certbot's package handles cron-driven renewal; verify with
+#     `systemctl status certbot.timer`.
+#   - gRPC-Web (off by default; same as Caddy config).
+
+# ── Upstreams ────────────────────────────────────────────────────────────
+upstream hermes_gateway_rest {
+    # Passive health check: after 3 failures in 10s, nginx marks the
+    # upstream down and avoids it for 10s. Not as responsive as Caddy's
+    # active /readyz probe — see file header.
+    server 127.0.0.1:8081 max_fails=3 fail_timeout=10s;
+
+    # If you scale gateway horizontally (Stage G+), add more `server`
+    # lines and nginx will round-robin between them.
+    keepalive 32;
+}
+
+upstream hermes_web {
+    server 127.0.0.1:80 max_fails=3 fail_timeout=10s;
+    keepalive 16;
+}
+
+# ── WebSocket connection upgrade map ─────────────────────────────────────
+# Required to make `Connection: upgrade` work behind `proxy_http_version 1.1`.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+# ── Main server block ───────────────────────────────────────────────────
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name HERMES_DOMAIN;
+
+    # TLS certs — certbot's default location. Adjust if you use a different
+    # ACME client (dehydrated, acme.sh, etc.).
+    ssl_certificate     /etc/letsencrypt/live/HERMES_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/HERMES_DOMAIN/privkey.pem;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    # ── Security headers ───────────────────────────────────────────────
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # ── /api/* — REST adapter ──────────────────────────────────────────
+    location /api/ {
+        proxy_pass http://hermes_gateway_rest;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection        "";   # keepalive upstream
+
+        proxy_read_timeout  60s;
+        proxy_send_timeout  60s;
+        proxy_connect_timeout 5s;
+    }
+
+    # ── /ws — WebSocket upgrade ────────────────────────────────────────
+    # Long-lived connections; read/send timeouts deliberately huge so
+    # the proxy doesn't tear down idle WebSockets. Tune down for
+    # aggressive idle eviction.
+    location /ws {
+        proxy_pass http://hermes_gateway_rest;
+        proxy_http_version 1.1;
+
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        $connection_upgrade;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_read_timeout  7d;
+        proxy_send_timeout  7d;
+        proxy_connect_timeout 5s;
+    }
+
+    # ── Default — web SPA static files ────────────────────────────────
+    # ANY path that doesn't match /api/* or /ws falls through here.
+    # The web container returns 404 for unknown paths — /metrics,
+    # /readyz, /livez are NOT publicly reachable.
+    location / {
+        proxy_pass http://hermes_web;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection        "";
+    }
+
+    # ── Logging ────────────────────────────────────────────────────────
+    access_log /var/log/nginx/hermes.access.log;
+    error_log  /var/log/nginx/hermes.error.log warn;
+}
+
+# ── HTTP → HTTPS redirect ───────────────────────────────────────────────
+server {
+    listen 80;
+    server_name HERMES_DOMAIN;
+    return 301 https://$host$request_uri;
+}

@@ -1,0 +1,131 @@
+# Caddyfile — Hermes reverse proxy reference
+#
+# Copy this file to /etc/caddy/Caddyfile (Debian/Ubuntu Caddy package) or
+# wherever your Caddy install reads its config from, then set the
+# HERMES_DOMAIN and HERMES_ACME_EMAIL env vars (the systemd unit reads from
+# /etc/default/caddy by default; you can also use --envfile .env.prod on a
+# manual invocation).
+#
+# Pairs with docker-compose.prod.yml — gateway is on 127.0.0.1:8081 (REST/WS)
+# and the in-compose web container is on 127.0.0.1:80. Both are loopback
+# bindings; Caddy is what makes the stack publicly reachable.
+#
+# What this config does:
+#  - Terminates TLS via Let's Encrypt ACME (HTTP-01 challenge by default).
+#  - Routes /api/* and /ws to gateway:8081.
+#  - Falls through to the web SPA for everything else.
+#  - Health-checks gateway via /readyz on METRICS_PORT 9100 (chunk 4).
+#  - NEVER exposes /metrics, /readyz, /livez to the public surface — those
+#    paths fall through to the web container which returns 404.
+#  - Adds HSTS, nosniff, frame-deny, and a strict referrer policy.
+#
+# What this config does NOT do:
+#  - HSTS preload (operators opt in once they're sure).
+#  - gRPC proxying (most users hit REST; uncomment the grpc handle below
+#    if you need gRPC-Web).
+#  - WAF rules (Stage G).
+#  - Custom error pages (operator extends).
+{
+	# ACME email — recommended so Let's Encrypt can email you about
+	# expiry / abuse / policy changes. Optional; you can omit if you
+	# accept silent ACME.
+	email {$HERMES_ACME_EMAIL}
+
+	# Uncomment to use Let's Encrypt staging during initial smoke testing.
+	# Production has tight rate limits (5 certs per domain per week); staging
+	# is unlimited but issues untrusted certs. SWITCH BACK before going live.
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+{$HERMES_DOMAIN} {
+	encode zstd gzip
+
+	# ── /api/* — REST adapter on gateway:8081 ────────────────────────────
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8081 {
+			# Chunk-4 readiness probe on METRICS_PORT 9100. When gateway
+			# flips to 503 (NATS down, DB down, shutdown drain), Caddy
+			# marks the upstream unhealthy and stops routing.
+			health_uri /readyz
+			health_port 9100
+			health_interval 10s
+			health_timeout 5s
+
+			transport http {
+				read_timeout 60s
+				write_timeout 60s
+			}
+		}
+	}
+
+	# ── /ws — WebSocket upgrade (long-lived) ─────────────────────────────
+	handle /ws {
+		reverse_proxy 127.0.0.1:8081 {
+			health_uri /readyz
+			health_port 9100
+			health_interval 10s
+			health_timeout 5s
+
+			transport http {
+				# WebSockets are long-lived; disable read timeout so idle
+				# connections aren't torn down by the proxy. Operators on
+				# high-churn deployments can tune this down (e.g. 30m) if
+				# they prefer aggressive idle eviction.
+				read_timeout 0
+			}
+		}
+	}
+
+	# ── Optional: gRPC-Web on /grpc.HermesGateway/* ──────────────────────
+	# Uncomment if you want to expose the raw gRPC-Web surface publicly.
+	# Most users hit REST (/api/*), so this stays off by default.
+	#
+	# handle /grpc.HermesGateway/* {
+	#     reverse_proxy h2c://127.0.0.1:8080 {
+	#         health_uri /readyz
+	#         health_port 9100
+	#     }
+	# }
+
+	# ── Default — web SPA static files ───────────────────────────────────
+	# ANY path that doesn't match /api/*, /ws (or the optional /grpc.*)
+	# falls through here. The web container returns 404 for unknown paths,
+	# which is why /metrics, /readyz, /livez are NOT publicly reachable —
+	# they're intra-network only and never proxied.
+	handle {
+		reverse_proxy 127.0.0.1:80 {
+			health_uri /healthz
+			health_interval 10s
+		}
+	}
+
+	# ── Security headers (baseline) ──────────────────────────────────────
+	header {
+		# HSTS — 1 year, no preload. Operators opt in to preload lists.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Caddy advertises itself by default; uncomment if you want to
+		# strip that signal. (Won't fool anyone but operators sometimes
+		# want it.)
+		# -Server
+	}
+
+	# ── Logging ──────────────────────────────────────────────────────────
+	log {
+		output stdout
+		format json
+		level INFO
+	}
+}
+
+# ── HTTP → HTTPS redirect ────────────────────────────────────────────────
+# Caddy does this automatically when ACME is enabled; explicit block here
+# documents the behaviour for operators reading the config top-to-bottom.
+# If you uncomment this, Caddy may complain about double-binding :80 — only
+# one of these blocks should be active.
+#
+# http://{$HERMES_DOMAIN} {
+#     redir https://{host}{uri} permanent
+# }
