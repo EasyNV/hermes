@@ -97,6 +97,9 @@ func newRunner(t *testing.T, client loginClient, inputs <-chan handler.DriverInp
 		log:          zerolog.Nop(),
 		awaitTimeout: 200 * time.Millisecond,
 		userInput:    map[string]string{},
+		// No-op human delay so the suite stays instant. The real
+		// jittered sleep is covered by its own dedicated test.
+		humanDelay: func(ctx context.Context) bool { return ctx.Err() == nil },
 	}
 	return r, updates
 }
@@ -263,7 +266,117 @@ func TestLoginLoop_TOTPAutoFill(t *testing.T) {
 	}
 }
 
-// TestLoginLoop_MFAMethodAutoPick pins the method-chooser auto-pick: when
+// TestLoginLoop_HumanCadenceDelayFires pins that the human-cadence pause
+// is invoked exactly once before an auto-filled TOTP code is submitted —
+// the anti-fingerprint "fishing for the authenticator app" beat. We
+// inject a recorder hook (so the suite stays instant) and assert it ran
+// before the second DoLoginSteps call (the one carrying totp_code).
+func TestLoginLoop_HumanCadenceDelayFires(t *testing.T) {
+	const totpSecret = "JBSWY3DPEHPK3PXP"
+	client := &fakeLoginClient{
+		script: []scriptedTransition{
+			{
+				step: &bridgev2.LoginStep{
+					Type:   bridgev2.LoginStepTypeUserInput,
+					StepID: "two_step_verification",
+					UserInputParams: &bridgev2.LoginUserInputParams{
+						Fields: []bridgev2.LoginInputDataField{
+							{ID: "totp_code", Name: "TOTP Code", Type: bridgev2.LoginInputFieldType2FACode},
+						},
+					},
+				},
+			},
+			{step: nil, cookies: successCookies()},
+		},
+		finalPayload: successPayload(),
+		identity:     successIdentity,
+	}
+
+	inputs := make(chan handler.DriverInput)
+	r, updates := newRunner(t, client, inputs)
+	r.req.TOTPSecret = totpSecret
+
+	var delayCalls int
+	r.humanDelay = func(ctx context.Context) bool {
+		delayCalls++
+		return ctx.Err() == nil
+	}
+
+	go r.run()
+
+	ev := drainUpdates(t, updates, 500*time.Millisecond)
+	if len(ev) == 0 || ev[len(ev)-1].Kind != handler.UpdateKindSuccess {
+		t.Fatalf("terminal not Success: %+v", ev)
+	}
+	// The delay must fire exactly once — only the single auto-filled
+	// totp_code submission is gated; nothing else.
+	if delayCalls != 1 {
+		t.Errorf("humanDelay calls = %d, want 1", delayCalls)
+	}
+	// And the gated submission must still carry a valid code.
+	want, _ := totp.GenerateCode(totpSecret, time.Now())
+	captured := client.inputsSnapshot()
+	if len(captured) < 2 {
+		t.Fatalf("expected 2 DoLoginSteps calls, got %d", len(captured))
+	}
+	if got := captured[1]["totp_code"]; got != want {
+		t.Errorf("totp_code submitted = %q, want %q", got, want)
+	}
+}
+
+// TestLoginLoop_HumanCadenceCancelAborts pins that a ctx cancellation
+// during the human-cadence sleep aborts the submit cleanly: no totp_code
+// is sent and the loop terminates without a Success. Models the operator
+// cancelling (or the driver ctx dying) while we're mid-"fishing" pause.
+func TestLoginLoop_HumanCadenceCancelAborts(t *testing.T) {
+	const totpSecret = "JBSWY3DPEHPK3PXP"
+	client := &fakeLoginClient{
+		script: []scriptedTransition{
+			{
+				step: &bridgev2.LoginStep{
+					Type:   bridgev2.LoginStepTypeUserInput,
+					StepID: "two_step_verification",
+					UserInputParams: &bridgev2.LoginUserInputParams{
+						Fields: []bridgev2.LoginInputDataField{
+							{ID: "totp_code", Name: "TOTP Code", Type: bridgev2.LoginInputFieldType2FACode},
+						},
+					},
+				},
+			},
+			{step: nil, cookies: successCookies()},
+		},
+		finalPayload: successPayload(),
+		identity:     successIdentity,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	inputs := make(chan handler.DriverInput)
+	r, updates := newRunner(t, client, inputs)
+	r.ctx = ctx
+	r.req.TOTPSecret = totpSecret
+	// Delay hook cancels mid-sleep then reports ctx dead → loop must bail.
+	r.humanDelay = func(ctx context.Context) bool {
+		cancel()
+		return ctx.Err() == nil
+	}
+
+	go r.run()
+
+	ev := drainUpdates(t, updates, 500*time.Millisecond)
+	// No Success — the submit was aborted before the second call.
+	for _, u := range ev {
+		if u.Kind == handler.UpdateKindSuccess {
+			t.Errorf("expected no Success after mid-sleep cancel; got %+v", ev)
+		}
+	}
+	// And no totp_code was ever submitted.
+	captured := client.inputsSnapshot()
+	if len(captured) >= 2 {
+		if _, sent := captured[1]["totp_code"]; sent {
+			t.Errorf("totp_code submitted despite mid-sleep cancel: %+v", captured)
+		}
+	}
+}
 // a TOTP secret is supplied, the loop must pre-seed userInput["mfatype"]
 // = "Authentication app" BEFORE the first DoLoginSteps call, so the
 // mautrix-meta connector resolves the mfa_type chooser step internally

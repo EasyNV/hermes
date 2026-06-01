@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -82,6 +83,26 @@ const inputChannelBuffer = 4
 // server. 3s matches the POC default.
 const displayWaitInterval = 3 * time.Second
 
+// Human-cadence inter-step delay window. Between automated login-step
+// transitions we sleep a uniformly random interval in this range so the
+// request cadence resembles a human reading the 2FA screen and fishing
+// for their authenticator app — rather than firing the method-pick and
+// code-submit back-to-back with ~0ms gap, which is a robotic,
+// fingerprintable tell to Meta's risk engine.
+//
+// Scope: applied ONLY before an automated DoLoginSteps call (auto-filled
+// TOTP / pre-seeded mfatype). Manual prompts already carry genuine human
+// latency and DisplayAndWait carries displayWaitInterval, so neither is
+// double-delayed. The largest practical impact lands on the single
+// transition between credential submit and code submit — exactly the
+// "open authenticator, read code, type it" beat we want to emulate.
+//
+// jitter is uniform in [minHumanStepDelay, maxHumanStepDelay].
+const (
+	minHumanStepDelay = 2 * time.Second
+	maxHumanStepDelay = 6 * time.Second
+)
+
 // MFA method auto-pick constants. These mirror the mautrix-meta
 // MessengerLite connector contract in
 // re/mbs/mautrix-meta-patched/pkg/messagix/bloks/selenium.go:
@@ -136,6 +157,14 @@ type loginLoopRunner struct {
 	// Set lazily on first totp_code prompt. Empty string means "no
 	// secret supplied".
 	totpNormalized string
+
+	// humanDelay sleeps a human-cadence interval before an automated
+	// step transition, returning false if ctx was cancelled mid-sleep
+	// (so the loop can exit promptly). nil means "use the default
+	// jittered sleep" (production); tests inject a no-op or a recorder.
+	// Injected, not hardcoded, so the suite stays instant and one test
+	// can assert the delay actually fires.
+	humanDelay func(ctx context.Context) bool
 }
 
 // run drives the login state machine to terminal. Returns nothing; the
@@ -301,9 +330,27 @@ func (r *loginLoopRunner) collectField(step *bridgev2.LoginStep, field bridgev2.
 	// Auto-fill TOTP.
 	if field.ID == "totp_code" && r.req.TOTPSecret != "" {
 		if code, err := r.deriveTOTPCode(); err == nil {
-			r.userInput[field.ID] = code
-			r.log.Debug().Msg("loginLoop: TOTP auto-fill applied")
-			return true
+			// Human-cadence pause before submitting an auto-filled
+			// code: emulate a human reading the 2FA screen and
+			// fetching the code from their authenticator app. Without
+			// it the method-pick → code-submit cadence is ~0ms, a
+			// robotic, fingerprintable tell. Emit progress first so
+			// the UI shows activity during the wait rather than a
+			// frozen spinner. Derive the code AFTER the sleep so it's
+			// fresh against its 30s TOTP window (a 6s pre-sleep on a
+			// stale code could straddle a period boundary).
+			r.emitProgress(hermesv1.BridgeLoginStage_BRIDGE_STAGE_AWAITING_2FA, "retrieving authenticator code")
+			if !r.sleepHumanCadence() {
+				return false // ctx cancelled mid-sleep; outer maps to Canceled
+			}
+			code, err = r.deriveTOTPCode()
+			if err != nil {
+				r.log.Warn().Err(err).Msg("loginLoop: TOTP re-derivation after delay failed; falling through to prompt")
+			} else {
+				r.userInput[field.ID] = code
+				r.log.Debug().Msg("loginLoop: TOTP auto-fill applied")
+				return true
+			}
 		} else {
 			r.log.Warn().Err(err).Msg("loginLoop: TOTP derivation failed; falling through to prompt")
 		}
@@ -362,6 +409,39 @@ func (r *loginLoopRunner) deriveTOTPCode() (string, error) {
 		r.totpNormalized = norm
 	}
 	return totp.GenerateCode(r.totpNormalized, time.Now())
+}
+
+// sleepHumanCadence pauses for a human-realistic interval before an
+// automated step submission. Uses the injected humanDelay hook when set
+// (tests inject a no-op/recorder to stay instant), else the default
+// jittered sleep. Returns false if ctx was cancelled during the wait so
+// the caller can bail promptly without submitting.
+func (r *loginLoopRunner) sleepHumanCadence() bool {
+	if r.humanDelay != nil {
+		return r.humanDelay(r.ctx)
+	}
+	return defaultHumanDelay(r.ctx)
+}
+
+// defaultHumanDelay sleeps a uniform-random interval in
+// [minHumanStepDelay, maxHumanStepDelay], honoring ctx cancellation.
+// Returns false iff ctx fired before the timer elapsed.
+//
+// math/rand/v2 (not crypto/rand): this is timing jitter for traffic
+// shaping, not a security primitive — predictability of the exact delay
+// is irrelevant to the threat model, and rand/v2 is allocation-free and
+// already the house convention for jitter (see refresh/ticker.go).
+func defaultHumanDelay(ctx context.Context) bool {
+	span := int64(maxHumanStepDelay - minHumanStepDelay)
+	d := minHumanStepDelay + time.Duration(rand.Int64N(span+1))
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // handleSuccess wraps post-login work: build envelope, materialize

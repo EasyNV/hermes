@@ -71,6 +71,10 @@ export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLogin
   const [totpSecret, setTotpSecret] = useState('')
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' })
   const wsRef = useRef<WebSocket | null>(null)
+  // Guards the success side-effect so onSuccess + auto-close fire exactly
+  // once per login, even if the effect re-runs (e.g. onSuccess identity
+  // churn or a re-render while phase is still 'success'). Reset on close.
+  const successFiredRef = useRef(false)
 
   // Cleanup helper — close socket, no state change.
   const closeSocket = () => {
@@ -88,6 +92,7 @@ export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLogin
   useEffect(() => {
     if (!open) {
       closeSocket()
+      successFiredRef.current = false
       // Don't reset email (user might retry with same one); DO zero
       // the secrets.
       setPassword('')
@@ -105,9 +110,12 @@ export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLogin
     }
   }, [])
 
-  // On success: notify parent + auto-close.
+  // On success: notify parent + auto-close. Guarded so it fires once
+  // even if this effect re-runs while phase is still 'success' (the
+  // onSuccess callback identity can churn on parent re-render).
   useEffect(() => {
-    if (phase.kind === 'success') {
+    if (phase.kind === 'success' && !successFiredRef.current) {
+      successFiredRef.current = true
       onSuccess({ uid: phase.uid, displayName: phase.displayName, pageCount: phase.pageCount })
       const t = setTimeout(() => onOpenChange(false), 1500)
       return () => clearTimeout(t)
@@ -158,6 +166,8 @@ export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLogin
 
   const handleStart = () => {
     if (!email || !password) return
+
+    successFiredRef.current = false
 
     const token = localStorage.getItem('access_token')
     if (!token) {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
@@ -163,19 +163,21 @@ export default function MbsSessions() {
   })
 
   // ── Manual status refetch on demand (used after bridge success) ─
-  const refreshSession = async (uid: string) => {
+  const refreshSession = useCallback(async (uid: string) => {
     const { session } = await getMbsSessionStatus(uid)
     useMbsStore.getState().upsertOne(session)
-  }
+  }, [])
 
-  const handleBridgeSuccess = ({ uid }: { uid: string }) => {
+  const handleBridgeSuccess = useCallback(({ uid }: { uid: string }) => {
     // Pull a fresh status so the row reflects state, podId, etc.
     refreshSession(uid).catch(() => {
       // Refetch fallback if status RPC is flaky.
       queryClient.invalidateQueries({ queryKey: ['mbs', 'sessions'] })
     })
-    toast.success(`Logged in as ${uid}`)
-  }
+    // Stable toast id: dedupes if the success effect ever re-fires for
+    // the same uid (sonner replaces same-id toasts instead of stacking).
+    toast.success(`Logged in as ${uid}`, { id: `mbs-login-${uid}` })
+  }, [queryClient, refreshSession])
 
   // Reset to page 1 whenever filter changes.
   const onFilterChange = (v: string) => {
