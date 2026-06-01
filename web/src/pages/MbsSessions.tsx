@@ -93,7 +93,10 @@ export default function MbsSessions() {
   const queryClient = useQueryClient()
 
   const [page, setPage] = useState(1)
-  const [stateFilter, setStateFilter] = useState<string>('ALL')
+  // Default to ACTIVE — the common operator view. Burned/suspended sessions
+  // are noise unless explicitly filtered for. 'ALL' is still available in the
+  // dropdown.
+  const [stateFilter, setStateFilter] = useState<string>(MbsSessionState.ACTIVE)
   const [bridgeOpen, setBridgeOpen] = useState(false)
   const [confirmBurn, setConfirmBurn] = useState<{ open: boolean; uid: string }>({
     open: false,
@@ -156,10 +159,16 @@ export default function MbsSessions() {
   })
 
   // ── Assets drawer fetch ───────────────────────────────────────
+  // staleTime:0 + refetchOnMount guarantees a fresh fetch every time the
+  // drawer expands. Without this, an empty result cached before assets were
+  // discovered (e.g. drawer opened seconds after login) sticks around and
+  // shows a false "No assets attached" until a hard refresh.
   const assetsQuery = useQuery({
     queryKey: ['mbs', 'assets', expandedUid],
     queryFn: () => listMbsSessionAssets(expandedUid),
     enabled: !!expandedUid,
+    staleTime: 0,
+    refetchOnMount: 'always',
   })
 
   // ── Manual status refetch on demand (used after bridge success) ─
@@ -186,10 +195,17 @@ export default function MbsSessions() {
     setExpandedUid('')
   }
 
-  // Memoize visible sessions (page slice handled by backend; storeSessions
-  // is the whole store — for chunk 5 we trust the backend page response
-  // even when serving store data).
-  const visibleSessions = useMemo(() => sessions, [sessions])
+  // Memoize visible sessions. The backend already filters by stateFilter, but
+  // the table renders from the Zustand store (storeSessions), which WS
+  // lifecycle frames mutate via upsertOne — and those frames can carry ANY
+  // state (e.g. a burn arriving while you're viewing "Active"). Without a
+  // client-side guard, a non-matching session would leak into a filtered view.
+  // Re-apply the filter here so store/WS updates stay consistent with the
+  // selected filter. 'ALL' shows everything.
+  const visibleSessions = useMemo(() => {
+    if (stateFilter === 'ALL') return sessions
+    return sessions.filter((s) => s.state === stateFilter)
+  }, [sessions, stateFilter])
 
   return (
     <div className="space-y-6">
@@ -409,6 +425,17 @@ export default function MbsSessions() {
                                   </li>
                                 ))}
                               </ul>
+                            </div>
+                          ) : assetsQuery.isError ? (
+                            <div className="flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400">
+                              <span>Couldn't load assets.</span>
+                              <button
+                                type="button"
+                                className="underline underline-offset-2 hover:text-amber-700 dark:hover:text-amber-300"
+                                onClick={() => assetsQuery.refetch()}
+                              >
+                                Retry
+                              </button>
                             </div>
                           ) : (
                             <p className="text-xs text-muted-foreground">
