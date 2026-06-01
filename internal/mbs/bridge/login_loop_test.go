@@ -263,6 +263,78 @@ func TestLoginLoop_TOTPAutoFill(t *testing.T) {
 	}
 }
 
+// TestLoginLoop_MFAMethodAutoPick pins the method-chooser auto-pick: when
+// a TOTP secret is supplied, the loop must pre-seed userInput["mfatype"]
+// = "Authentication app" BEFORE the first DoLoginSteps call, so the
+// mautrix-meta connector resolves the mfa_type chooser step internally
+// and never surfaces it as a prompt. This is the companion to
+// TOTPAutoFill — chooser auto-pick + code auto-fill = fully unattended
+// 2FA. Values must byte-match the connector contract constants.
+func TestLoginLoop_MFAMethodAutoPick(t *testing.T) {
+	const totpSecret = "JBSWY3DPEHPK3PXP"
+	client := &fakeLoginClient{
+		// The connector consumes mfatype from userInput and resolves
+		// the chooser without emitting it; our fake just terminates on
+		// the first call to assert the seed was present up-front.
+		script: []scriptedTransition{
+			{step: nil, cookies: successCookies()},
+		},
+		finalPayload: successPayload(),
+		identity:     successIdentity,
+	}
+
+	inputs := make(chan handler.DriverInput)
+	r, updates := newRunner(t, client, inputs)
+	r.req.TOTPSecret = totpSecret
+	go r.run()
+
+	ev := drainUpdates(t, updates, 500*time.Millisecond)
+	if len(ev) == 0 || ev[len(ev)-1].Kind != handler.UpdateKindSuccess {
+		t.Fatalf("terminal not Success: %+v", ev)
+	}
+
+	captured := client.inputsSnapshot()
+	if len(captured) < 1 {
+		t.Fatalf("expected >=1 DoLoginSteps call, got %d", len(captured))
+	}
+	// The FIRST call must already carry the auto-picked method.
+	if got := captured[0][mfaTypeFieldID]; got != mfaMethodAuthenticatorApp {
+		t.Errorf("first-call %s = %q, want %q", mfaTypeFieldID, got, mfaMethodAuthenticatorApp)
+	}
+}
+
+// TestLoginLoop_MFAMethodNotPickedWithoutSecret pins the negative: with
+// NO TOTP secret, we must NOT seed mfatype — the user picks the method
+// manually (the chooser prompt surfaces). Auto-picking authenticator-app
+// when the operator has no secret would dead-end the flow on a code step
+// they can't satisfy.
+func TestLoginLoop_MFAMethodNotPickedWithoutSecret(t *testing.T) {
+	client := &fakeLoginClient{
+		script: []scriptedTransition{
+			{step: nil, cookies: successCookies()},
+		},
+		finalPayload: successPayload(),
+		identity:     successIdentity,
+	}
+
+	inputs := make(chan handler.DriverInput)
+	r, updates := newRunner(t, client, inputs) // req has no TOTPSecret
+	go r.run()
+
+	ev := drainUpdates(t, updates, 500*time.Millisecond)
+	if len(ev) == 0 || ev[len(ev)-1].Kind != handler.UpdateKindSuccess {
+		t.Fatalf("terminal not Success: %+v", ev)
+	}
+
+	captured := client.inputsSnapshot()
+	if len(captured) < 1 {
+		t.Fatalf("expected >=1 DoLoginSteps call, got %d", len(captured))
+	}
+	if got, ok := captured[0][mfaTypeFieldID]; ok {
+		t.Errorf("%s should be unset without a TOTP secret, got %q", mfaTypeFieldID, got)
+	}
+}
+
 func TestLoginLoop_PromptThenSubmit(t *testing.T) {
 	client := &fakeLoginClient{
 		script: []scriptedTransition{

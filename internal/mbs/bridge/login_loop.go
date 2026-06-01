@@ -82,6 +82,23 @@ const inputChannelBuffer = 4
 // server. 3s matches the POC default.
 const displayWaitInterval = 3 * time.Second
 
+// MFA method auto-pick constants. These mirror the mautrix-meta
+// MessengerLite connector contract in
+// re/mbs/mautrix-meta-patched/pkg/messagix/bloks/selenium.go:
+//   - The method-chooser step id and select-field id are fixed strings.
+//   - mfaMethodAuthenticatorApp MUST byte-match the human-readable option
+//     the connector matches against (knownMethods["Authentication app"]).
+//     It is NOT a slug, enum, or index — Meta's Bloks UI is matched on the
+//     displayed label text.
+// If mautrix-meta upstream renames the step/field/option, the auto-pick
+// silently no-ops (the value just won't match) and the chooser prompt
+// surfaces to the UI as before — fail-open, not fail-closed.
+const (
+	mfaTypeStepID             = "fi.mau.meta.messengerlite.mfa_type"
+	mfaTypeFieldID            = "mfatype"
+	mfaMethodAuthenticatorApp = "Authentication app"
+)
+
 // loginLoopRunner is the per-attempt state machine. One instance per
 // MautrixDriver.Run call; not reusable.
 //
@@ -140,6 +157,28 @@ func (r *loginLoopRunner) run() {
 	r.userInput = map[string]string{
 		"username": r.req.Email,
 		"password": r.req.Password,
+	}
+
+	// Auto-pick the MFA method when we hold a TOTP secret. Meta's
+	// MessengerLite flow surfaces a method-chooser step
+	// (step_id=fi.mau.meta.messengerlite.mfa_type, field id "mfatype",
+	// type select) before it accepts a code. The mautrix-meta connector
+	// reads userInput["mfatype"]: if it's already set to a valid option
+	// it taps that method internally and NEVER emits the prompt — so
+	// pre-seeding here makes 2FA fully unattended (chooser auto-resolves,
+	// then the totp_code step auto-fills from the secret in collectField).
+	//
+	// We pick the authenticator-app option unconditionally when a secret
+	// is present: holding a base32 TOTP secret is the unambiguous signal
+	// that the authenticator app is the right channel. The value MUST
+	// match the human-readable option string the connector matches on
+	// (bloks/selenium.go knownMethods) — it is NOT a slug or index.
+	if r.req.TOTPSecret != "" {
+		r.userInput[mfaTypeFieldID] = mfaMethodAuthenticatorApp
+		r.log.Info().
+			Str("step_id", mfaTypeStepID).
+			Str(mfaTypeFieldID, mfaMethodAuthenticatorApp).
+			Msg("loginLoop: TOTP secret present — auto-selecting MFA method")
 	}
 
 	r.emitProgress(hermesv1.BridgeLoginStage_BRIDGE_STAGE_CALLING_CAA, "starting login")
@@ -409,6 +448,24 @@ func (r *loginLoopRunner) emitProgress(stage hermesv1.BridgeLoginStage, detail s
 func (r *loginLoopRunner) emitPrompt(step *bridgev2.LoginStep, fields []bridgev2.LoginInputDataField) {
 	mapped := make([]handler.DriverPromptField, 0, len(fields))
 	for _, f := range fields {
+		// Option B prompt observability: dump the full mautrix field
+		// metadata before we flatten it. emitPrompt currently forwards
+		// only id/name/type downstream — Options/Description/DefaultValue
+		// are dropped on the floor (see follow-up note). Logging them at
+		// debug level means every bridge prompt is inspectable from the
+		// mbs logs without a code change, so an unexpected step (new Meta
+		// flow, renamed field, select with choices we don't render) is
+		// diagnosable on the spot.
+		r.log.Debug().
+			Str("step_id", step.StepID).
+			Str("field_id", f.ID).
+			Str("field_name", f.Name).
+			Str("field_type", string(f.Type)).
+			Strs("field_options", f.Options).
+			Str("field_default", f.DefaultValue).
+			Str("field_description", f.Description).
+			Msg("loginLoop: emitting bridge prompt field")
+
 		mapped = append(mapped, handler.DriverPromptField{
 			ID:   f.ID,
 			Name: f.Name,
