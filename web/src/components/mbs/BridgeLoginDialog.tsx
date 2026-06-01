@@ -16,7 +16,6 @@ import type {
   MbsBridgeClientFrame,
   MbsBridgeServerFrame,
 } from '@/api/mbs'
-import type { MbsSessionState } from '@/api/types'
 
 // ─────────────────────────────────────────────────────────────────────
 // BridgeLoginDialog (Stage E2 chunk 5)
@@ -26,7 +25,7 @@ import type { MbsSessionState } from '@/api/types'
 // validation server-side).
 //
 // State machine:
-//   idle       -> form (identifier + password)
+//   idle       -> form (email + password + optional 2FA secret)
 //   connecting -> WS opened, awaiting first server frame
 //   progress   -> server emitting progress frames; show stage text
 //   prompt     -> server requested input (OTP/checkpoint/recovery)
@@ -40,26 +39,36 @@ import type { MbsSessionState } from '@/api/types'
 //   - Password is held in state and zeroed on success / unmount.
 // ─────────────────────────────────────────────────────────────────────
 
+type PromptField = { id: string; name: string; type: string }
+
 type Phase =
   | { kind: 'idle' }
   | { kind: 'connecting' }
   | { kind: 'progress'; stage: string; detail: string }
-  | { kind: 'prompt'; stepId: string; promptKind: string; prompt: string; value: string }
-  | { kind: 'success'; uid: string; fbid: string; state: MbsSessionState }
+  | {
+      kind: 'prompt'
+      stepId: string
+      instructions: string
+      fields: PromptField[]
+      // values keyed by field id
+      values: Record<string, string>
+    }
+  | { kind: 'success'; uid: string; displayName: string; pageCount: number }
   | { kind: 'failure'; code: string; message: string }
   | { kind: 'error'; code: string; message: string }
 
 interface BridgeLoginDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  onSuccess: (s: { uid: string; fbid: string; state: MbsSessionState }) => void
+  onSuccess: (s: { uid: string; displayName: string; pageCount: number }) => void
 }
 
 export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLoginDialogProps) {
   const tenantId = useAuthStore((s) => s.tenant?.id) ?? ''
 
-  const [identifier, setIdentifier] = useState('')
+  const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [totpSecret, setTotpSecret] = useState('')
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' })
   const wsRef = useRef<WebSocket | null>(null)
 
@@ -79,9 +88,10 @@ export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLogin
   useEffect(() => {
     if (!open) {
       closeSocket()
-      // Don't reset identifier (user might retry with same one); DO
-      // zero password.
+      // Don't reset email (user might retry with same one); DO zero
+      // the secrets.
       setPassword('')
+      setTotpSecret('')
       setPhase({ kind: 'idle' })
     }
   }, [open])
@@ -91,13 +101,14 @@ export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLogin
     return () => {
       closeSocket()
       setPassword('')
+      setTotpSecret('')
     }
   }, [])
 
   // On success: notify parent + auto-close.
   useEffect(() => {
     if (phase.kind === 'success') {
-      onSuccess({ uid: phase.uid, fbid: phase.fbid, state: phase.state })
+      onSuccess({ uid: phase.uid, displayName: phase.displayName, pageCount: phase.pageCount })
       const t = setTimeout(() => onOpenChange(false), 1500)
       return () => clearTimeout(t)
     }
@@ -111,28 +122,30 @@ export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLogin
 
   const handleServerFrame = (frame: MbsBridgeServerFrame) => {
     switch (frame.type) {
-      case 'prompt':
+      case 'bridge_login_prompt': {
+        const fields = frame.payload.fields ?? []
         setPhase({
           kind: 'prompt',
           stepId: frame.payload.stepId,
-          promptKind: frame.payload.kind,
-          prompt: frame.payload.prompt,
-          value: '',
+          instructions: frame.payload.instructions,
+          fields,
+          values: Object.fromEntries(fields.map((f) => [f.id, ''])),
         })
         break
-      case 'progress':
+      }
+      case 'bridge_login_progress':
         setPhase({ kind: 'progress', stage: frame.payload.stage, detail: frame.payload.detail })
         break
-      case 'success':
+      case 'bridge_login_success':
         setPhase({
           kind: 'success',
           uid: frame.payload.uid,
-          fbid: frame.payload.fbid,
-          state: frame.payload.state,
+          displayName: frame.payload.displayName ?? '',
+          pageCount: frame.payload.pageCount ?? 0,
         })
         closeSocket()
         break
-      case 'failure':
+      case 'bridge_login_failure':
         setPhase({ kind: 'failure', code: frame.payload.code, message: frame.payload.message })
         closeSocket()
         break
@@ -144,7 +157,7 @@ export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLogin
   }
 
   const handleStart = () => {
-    if (!identifier || !password) return
+    if (!email || !password) return
 
     const token = localStorage.getItem('access_token')
     if (!token) {
@@ -165,7 +178,15 @@ export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLogin
     ws.onopen = () => {
       sendFrame({
         type: 'start',
-        payload: { tenantId, identifier, password },
+        payload: {
+          tenantId,
+          email,
+          password,
+          // Only send the secret if the operator provided one — an
+          // empty string would make hermes-mbs try to derive a code
+          // from a zero-length secret.
+          ...(totpSecret.trim() ? { totpSecret: totpSecret.trim() } : {}),
+        },
       })
     }
 
@@ -198,8 +219,14 @@ export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLogin
 
   const handlePromptSubmit = () => {
     if (phase.kind !== 'prompt') return
-    if (!phase.value) return
-    sendFrame({ type: 'input', payload: { stepId: phase.stepId, value: phase.value } })
+    // Submit one input frame per field. The gateway forwards each as a
+    // BridgeLoginInput{field_id, value}; hermes-mbs matches field_id
+    // against the live bridge prompt.
+    const filled = phase.fields.filter((f) => phase.values[f.id]?.length)
+    if (filled.length === 0) return
+    for (const f of filled) {
+      sendFrame({ type: 'input', payload: { fieldId: f.id, value: phase.values[f.id] } })
+    }
     setPhase({ kind: 'progress', stage: 'Submitting…', detail: '' })
   }
 
@@ -235,13 +262,13 @@ export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLogin
         <div className="grid gap-4 py-4">
           {/* Credentials form (always visible, disabled when busy) */}
           <div className="grid gap-2">
-            <Label htmlFor="bridge-identifier">Email or phone</Label>
+            <Label htmlFor="bridge-email">Email or phone</Label>
             <Input
-              id="bridge-identifier"
+              id="bridge-email"
               autoComplete="username"
               placeholder="user@example.com"
-              value={identifier}
-              onChange={(e) => setIdentifier(e.target.value)}
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
               disabled={isBusy || phase.kind === 'success'}
             />
           </div>
@@ -255,6 +282,25 @@ export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLogin
               onChange={(e) => setPassword(e.target.value)}
               disabled={isBusy || phase.kind === 'success'}
             />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="bridge-totp">
+              2FA secret <span className="text-muted-foreground">(optional)</span>
+            </Label>
+            <Input
+              id="bridge-totp"
+              type="password"
+              autoComplete="off"
+              placeholder="base32 TOTP secret (e.g. JNLA 4HU6 …)"
+              value={totpSecret}
+              onChange={(e) => setTotpSecret(e.target.value)}
+              disabled={isBusy || phase.kind === 'success'}
+            />
+            <p className="text-xs text-muted-foreground">
+              If this account has two-factor authentication, paste the base32 secret here and
+              codes will be generated automatically. Leave blank to enter codes manually when
+              prompted.
+            </p>
           </div>
 
           {/* Progress / prompt / terminal state panel */}
@@ -278,30 +324,36 @@ export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLogin
           )}
 
           {phase.kind === 'prompt' && (
-            <div className="grid gap-2 rounded-md border border-blue-200 bg-blue-50 p-3 dark:border-blue-900 dark:bg-blue-950/40">
-              <Label htmlFor="bridge-prompt" className="text-xs uppercase tracking-wide">
-                {phase.promptKind === 'otp_2fa'
-                  ? 'Two-factor code'
-                  : phase.promptKind === 'checkpoint'
-                  ? 'Security checkpoint'
-                  : phase.promptKind === 'recovery'
-                  ? 'Account recovery'
-                  : 'Required input'}
-              </Label>
-              <p className="text-sm">{phase.prompt}</p>
-              <div className="flex gap-2">
-                <Input
-                  id="bridge-prompt"
-                  autoFocus
-                  value={phase.value}
-                  onChange={(e) =>
-                    setPhase({ ...phase, value: e.target.value })
-                  }
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handlePromptSubmit()
-                  }}
-                />
-                <Button onClick={handlePromptSubmit} disabled={!phase.value}>
+            <div className="grid gap-3 rounded-md border border-blue-200 bg-blue-50 p-3 dark:border-blue-900 dark:bg-blue-950/40">
+              {phase.instructions && <p className="text-sm">{phase.instructions}</p>}
+              {phase.fields.map((f, idx) => (
+                <div key={f.id} className="grid gap-1">
+                  <Label htmlFor={`bridge-field-${f.id}`} className="text-xs uppercase tracking-wide">
+                    {f.name || f.id}
+                  </Label>
+                  <Input
+                    id={`bridge-field-${f.id}`}
+                    autoFocus={idx === 0}
+                    type={f.type === 'password' ? 'password' : 'text'}
+                    inputMode={f.type === 'code' ? 'numeric' : undefined}
+                    value={phase.values[f.id] ?? ''}
+                    onChange={(e) =>
+                      setPhase({
+                        ...phase,
+                        values: { ...phase.values, [f.id]: e.target.value },
+                      })
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handlePromptSubmit()
+                    }}
+                  />
+                </div>
+              ))}
+              <div className="flex justify-end">
+                <Button
+                  onClick={handlePromptSubmit}
+                  disabled={!phase.fields.some((f) => phase.values[f.id]?.length)}
+                >
                   Submit
                 </Button>
               </div>
@@ -347,7 +399,7 @@ export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLogin
             Cancel
           </Button>
           {phase.kind === 'idle' && (
-            <Button onClick={handleStart} disabled={!identifier || !password}>
+            <Button onClick={handleStart} disabled={!email || !password}>
               Login
             </Button>
           )}

@@ -91,25 +91,67 @@ export function sendMbsMessage(
 // advisory; the backend overwrites it.
 // ─────────────────────────────────────────────────────────────────────
 
+// Client → gateway frames. Field names MUST match the gateway WS bridge
+// struct tags in internal/gateway/rest/mbs_bridge_ws.go, which in turn
+// mirror the proto (proto/hermes/v1/mbs.proto BridgeLoginStart /
+// BridgeLoginInput). The gateway force-overwrites tenantId from the JWT;
+// we still send it for symmetry.
 export type MbsBridgeClientFrame =
   | {
       type: 'start'
-      payload: { tenantId: string; identifier: string; password: string }
+      payload: {
+        tenantId: string
+        email: string
+        password: string
+        // base32 TOTP secret. When set, hermes-mbs derives 2FA codes
+        // server-side and auto-fills the two_step_verification prompt
+        // without surfacing it to the UI.
+        totpSecret?: string
+        // Force a fresh device_id — use when re-bridging an account
+        // whose device_id may have been burned by Meta's risk engine.
+        forceNewDeviceId?: boolean
+        // Persist totpSecret encrypted for future unattended re-bridge.
+        persistTotpSecret?: boolean
+      }
     }
-  | { type: 'input'; payload: { stepId: string; value: string } }
+  | { type: 'input'; payload: { fieldId: string; value: string } }
   | { type: 'cancel' }
 
-export type MbsBridgePromptKind = 'otp_2fa' | 'checkpoint' | 'recovery'
+// A single field the server asks us to fill during a prompt (e.g. a
+// 2FA code box, a captcha response). Mirrors proto BridgeLoginField.
+export interface MbsBridgeField {
+  id: string
+  name: string
+  type: string // "text" | "code" | "password"
+}
 
+// Server → client frames. The gateway tags every outbound frame with a
+// "bridge_login_" prefix (see buildOutboundFrame); the plain "error"
+// frame is the only un-prefixed one. Payload shapes mirror the proto
+// BridgeLoginUpdate variants exactly (success is protojson-serialized
+// with camelCase field names via EmitDefaultValues).
 export type MbsBridgeServerFrame =
   | {
-      type: 'prompt'
-      payload: { stepId: string; kind: MbsBridgePromptKind; prompt: string }
+      type: 'bridge_login_prompt'
+      payload: { stepId: string; instructions: string; fields: MbsBridgeField[] }
     }
-  | { type: 'progress'; payload: { stage: string; detail: string } }
+  | { type: 'bridge_login_progress'; payload: { stage: string; detail: string } }
   | {
-      type: 'success'
-      payload: { uid: string; fbid: string; state: MbsSessionState }
+      type: 'bridge_login_success'
+      payload: {
+        uid: string
+        displayName?: string
+        pageCount?: number
+        primaryPageId?: string
+        primaryPageName?: string
+        primaryWabaId?: string
+        primaryWecMailboxId?: string
+        primaryWecPhoneNumber?: string
+        assets?: unknown[]
+      }
     }
-  | { type: 'failure'; payload: { code: string; message: string } }
+  | {
+      type: 'bridge_login_failure'
+      payload: { code: string; message: string; retryable?: boolean }
+    }
   | { type: 'error'; payload: { code: string; message: string } }

@@ -168,7 +168,7 @@ export default function MbsSessions() {
     useMbsStore.getState().upsertOne(session)
   }
 
-  const handleBridgeSuccess = ({ uid }: { uid: string; fbid: string }) => {
+  const handleBridgeSuccess = ({ uid }: { uid: string }) => {
     // Pull a fresh status so the row reflects state, podId, etc.
     refreshSession(uid).catch(() => {
       // Refetch fallback if status RPC is flaky.
