@@ -40,7 +40,7 @@ const (
 // Outstanding goroutines drain naturally — they have their own
 // reconnectPerUIDLimit clamps.
 func reconnectPodSessions(ctx context.Context, st store.Store, mgr session.Manager, podID string, log zerolog.Logger) {
-	rows, err := st.ListSessionsByPod(ctx, podID, "active")
+	rows, err := st.ListReconnectableSessions(ctx, podID)
 	if err != nil {
 		log.Error().Err(err).Str("pod_id", podID).Msg("reconnect: list sessions failed")
 		return

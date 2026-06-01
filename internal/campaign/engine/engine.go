@@ -45,6 +45,15 @@ type engineStore interface {
 	ReapStuckQueuedMbs(ctx context.Context, olderThan time.Duration) ([]handler.ReapedContact, error)
 	IncrementFailedCount(ctx context.Context, campaignID string) error
 	GetWorkspaceTenantID(ctx context.Context, workspaceID string) (string, error)
+
+	// G3: conditional completion — flips running→completed and reports whether
+	// THIS call performed the transition, so the completion status event is
+	// published exactly once even under redelivered/raced terminal results.
+	CompleteCampaignIfRunning(ctx context.Context, id string) (transitioned bool, err error)
+
+	// G2: disable a burned MBS uid as a sender across all campaigns. Returns
+	// rows transitioned; idempotent (only touches status='active').
+	MarkMbsSenderBurned(ctx context.Context, uid int64) (int64, error)
 }
 
 type runningCampaign struct {

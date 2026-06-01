@@ -69,6 +69,12 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to start mbs result consumer")
 	}
 
+	// G2 parity: consume MBS session-burned events so a session that dies
+	// mid-campaign is proactively disabled as a sender across all campaigns.
+	if err := startMbsBurnedConsumer(js, eng, log); err != nil {
+		log.Fatal().Err(err).Msg("failed to start mbs burned-session consumer")
+	}
+
 	// close-the-loop chunk: stuck-queued reaper. Times out contacts whose
 	// result event never arrived so a campaign can't hang in 'running'.
 	reaperCtx, reaperCancel := context.WithCancel(context.Background())

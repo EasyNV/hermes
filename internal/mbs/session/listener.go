@@ -41,22 +41,26 @@ const snapshotPollTimeout = 10 * time.Second
 // Subscriber count — N Listen RPCs = 1 NATS publish per delta.
 // Panics in onDelta are recovered + logged; the listener keeps running.
 type listener struct {
-	uid      int64
-	tenantID string
-	client   clientI
-	bc       *broadcaster
-	onDelta  DeltaHook // nil-safe; called exactly once per delta if set
-	log      zerolog.Logger
+	uid       int64
+	tenantID  string
+	pageID    string // stamped onto each delta in emit (from session creds)
+	mailboxID string // stamped onto each delta in emit (from session creds)
+	client    clientI
+	bc        *broadcaster
+	onDelta   DeltaHook // nil-safe; called exactly once per delta if set
+	log       zerolog.Logger
 }
 
-func newListener(uid int64, tenantID string, c clientI, bc *broadcaster, onDelta DeltaHook, log zerolog.Logger) *listener {
+func newListener(uid int64, tenantID, pageID, mailboxID string, c clientI, bc *broadcaster, onDelta DeltaHook, log zerolog.Logger) *listener {
 	return &listener{
-		uid:      uid,
-		tenantID: tenantID,
-		client:   c,
-		bc:       bc,
-		onDelta:  onDelta,
-		log:      log.With().Int64("uid", uid).Logger(),
+		uid:       uid,
+		tenantID:  tenantID,
+		pageID:    pageID,
+		mailboxID: mailboxID,
+		client:    c,
+		bc:        bc,
+		onDelta:   onDelta,
+		log:       log.With().Int64("uid", uid).Logger(),
 	}
 }
 
@@ -100,6 +104,8 @@ func (l *listener) emit(deltas []*InboundDelta) {
 			continue
 		}
 		d.TenantID = l.tenantID
+		d.PageID = l.pageID
+		d.MailboxID = l.mailboxID
 		l.fireHook(d)
 		l.bc.dispatch(d)
 	}

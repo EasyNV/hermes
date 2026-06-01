@@ -190,6 +190,30 @@ func (s *PgStore) ListSessionsByPod(ctx context.Context, podID, stateFilter stri
 	return scanSessions(rows)
 }
 
+// ListReconnectableSessions returns active sessions this pod may reclaim on
+// startup: those it already owns (pod_id = podID) PLUS orphans whose pod_id was
+// released to '' on a prior graceful shutdown. Without the orphan clause, a pod
+// can never re-adopt its own sessions after a restart (graceful shutdown sets
+// pod_id='' via ReleaseSession), so the listener never resumes and inbound
+// polling stops — the exact bug behind "reply never reached the inbox".
+//
+// Safe in multi-pod: ClaimSession's CTE refuses to steal a session owned by a
+// different LIVE pod (claims only when pod_id='' OR pod_id=self). A session
+// another pod grabbed first will fail the claim with ErrClaimConflict and be
+// skipped. We only widen the *candidate* set here; the atomic claim is still
+// the authority.
+func (s *PgStore) ListReconnectableSessions(ctx context.Context, podID string) ([]*SessionRow, error) {
+	q := `SELECT ` + sessionCols + ` FROM mbs_sessions
+	      WHERE state = 'active' AND (pod_id = '' OR pod_id = $1)
+	      ORDER BY uid`
+	rows, err := s.pool.Query(ctx, q, podID)
+	if err != nil {
+		return nil, fmt.Errorf("list reconnectable sessions: %w", err)
+	}
+	defer rows.Close()
+	return scanSessions(rows)
+}
+
 // ListSessionsNeedingRefresh returns active sessions owned by podID
 // with stale LastRefreshedAt (or NULL). Limit caps the batch size so
 // the refresh ticker stays bounded.

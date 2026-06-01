@@ -149,6 +149,26 @@ func (s *Store) ListSessionsByPod(ctx context.Context, podID, stateFilter string
 	return out, nil
 }
 
+// ListReconnectableSessions mirrors PgStore: active sessions this pod owns OR
+// orphans (pod_id="").
+func (s *Store) ListReconnectableSessions(ctx context.Context, podID string) ([]*store.SessionRow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []*store.SessionRow
+	for _, r := range s.sessions {
+		if r.State != "active" {
+			continue
+		}
+		if r.PodID != "" && r.PodID != podID {
+			continue
+		}
+		cp := *r
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UID < out[j].UID })
+	return out, nil
+}
+
 func (s *Store) ListSessionsNeedingRefresh(ctx context.Context, before time.Time, podID string, limit int) ([]*store.SessionRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

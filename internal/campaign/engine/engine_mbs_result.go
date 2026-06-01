@@ -112,20 +112,23 @@ func (e *Engine) maybeCompleteCampaign(ctx context.Context, campaignID, workspac
 		return // still in flight
 	}
 
-	// All terminal. Flip to completed. UpdateCampaignStatus returns the row;
-	// if it was already 'completed' the publish below is skipped to avoid a
-	// duplicate completion event on a redelivered/raced result.
-	row, err := e.store.UpdateCampaignStatus(ctx, campaignID, "completed", false, true)
+	// All terminal. Flip to completed, but only publish the completion event if
+	// THIS call actually performed the running→completed transition. A
+	// redelivered/raced terminal result (or a result/reaper race) must not
+	// re-publish. CompleteCampaignIfRunning's UPDATE is guarded on
+	// status<>'completed', so the second caller gets transitioned=false.
+	transitioned, err := e.store.CompleteCampaignIfRunning(ctx, campaignID)
 	if err != nil {
 		e.log.Error().Err(err).Str("campaign_id", campaignID).Msg("mbs: failed to mark campaign completed")
 		return
 	}
+	if !transitioned {
+		return // already completed — no duplicate completion event
+	}
 	e.publishStatusEvent(tenantID, workspaceID, campaignID,
 		hermesv1.CampaignStatus_CAMPAIGN_STATUS_RUNNING,
 		hermesv1.CampaignStatus_CAMPAIGN_STATUS_COMPLETED, "completed")
-	if row != nil {
-		e.log.Info().Str("campaign_id", campaignID).Msg("mbs: campaign completed (all results in)")
-	}
+	e.log.Info().Str("campaign_id", campaignID).Msg("mbs: campaign completed (all results in)")
 }
 
 // ReapStuckQueued is invoked on a ticker by hermes-campaign. It transitions

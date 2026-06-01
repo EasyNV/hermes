@@ -54,6 +54,15 @@ type fakeMbsStore struct {
 	// when true, UpdateContactSentFromResult returns 0 rows affected
 	// (simulates a duplicate/redelivered result that already transitioned).
 	sentFromResultZeroRows bool
+	// G3: completion-transition tracking. completeCalls counts every
+	// CompleteCampaignIfRunning call; completedAlready flips true after the
+	// first successful transition so a second call reports transitioned=false
+	// (mirrors the WHERE status<>'completed' guard).
+	completeCalls    int
+	completedAlready bool
+	// G2: burned-sender tracking.
+	burnedUIDs   []int64
+	burnedReturn int64
 	mu sync.Mutex
 }
 
@@ -92,6 +101,25 @@ func (f *fakeMbsStore) UpdateCampaignStatus(_ context.Context, _, status string,
 	defer f.mu.Unlock()
 	f.statusLog = append(f.statusLog, status)
 	return f.campaign, nil
+}
+
+func (f *fakeMbsStore) CompleteCampaignIfRunning(_ context.Context, _ string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.completeCalls++
+	if f.completedAlready {
+		return false, nil // already terminal — no transition
+	}
+	f.completedAlready = true
+	f.statusLog = append(f.statusLog, "completed")
+	return true, nil
+}
+
+func (f *fakeMbsStore) MarkMbsSenderBurned(_ context.Context, uid int64) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.burnedUIDs = append(f.burnedUIDs, uid)
+	return f.burnedReturn, nil
 }
 
 func (f *fakeMbsStore) GetActiveCampaignMbsSessions(_ context.Context, _ string) ([]*handler.CampaignMbsSessionRow, error) {

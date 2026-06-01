@@ -99,6 +99,8 @@ type Connected struct {
 type InboundDelta struct {
 	UID           int64
 	TenantID      string         // filled by listener from manager's session row
+	PageID        string         // filled by listener from session creds (primary asset)
+	MailboxID     string         // filled by listener from session creds (WEC mailbox)
 	ThreadID      string         // OTID (19-digit) from FB payload
 	MID           string         // server-assigned, "mid.$cAAA..."
 	SenderPhone   string         // chunk 3: empty (filled by handler)

@@ -81,6 +81,7 @@ type Store interface {
 	ClaimSession(ctx context.Context, uid int64, podID string) (claimed bool, ownerPodID string, err error)
 	ReleaseSession(ctx context.Context, uid int64, podID string) error
 	ListSessionsByPod(ctx context.Context, podID, stateFilter string) ([]*SessionRow, error)
+	ListReconnectableSessions(ctx context.Context, podID string) ([]*SessionRow, error)
 
 	// ─── Assets ─────────────────────────────────────────────────────
 	UpsertAssets(ctx context.Context, uid int64, assets []*AssetRow) error

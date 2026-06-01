@@ -55,6 +55,8 @@ type mockStore struct {
 	getCampaignFn                func(ctx context.Context, id string) (*CampaignRow, error)
 	listCampaignsFn              func(ctx context.Context, workspaceID, status string, page, pageSize int32) ([]*CampaignRow, int64, error)
 	updateCampaignStatusFn       func(ctx context.Context, id, status string, setStarted, setCompleted bool) (*CampaignRow, error)
+	completeCampaignIfRunningFn  func(ctx context.Context, id string) (bool, error)
+	markMbsSenderBurnedFn        func(ctx context.Context, uid int64) (int64, error)
 	addCampaignNumbersFn         func(ctx context.Context, campaignID string, waNumberIDs []string) error
 	removeCampaignNumbersFn      func(ctx context.Context, campaignID string, waNumberIDs []string) error
 	listCampaignNumbersFn        func(ctx context.Context, campaignID string, page, pageSize int32) ([]*CampaignNumberRow, int64, error)
@@ -155,6 +157,20 @@ func (m *mockStore) UpdateCampaignStatus(ctx context.Context, id, st string, set
 		return m.updateCampaignStatusFn(ctx, id, st, setStarted, setCompleted)
 	}
 	return nil, nil
+}
+
+func (m *mockStore) CompleteCampaignIfRunning(ctx context.Context, id string) (bool, error) {
+	if m.completeCampaignIfRunningFn != nil {
+		return m.completeCampaignIfRunningFn(ctx, id)
+	}
+	return true, nil
+}
+
+func (m *mockStore) MarkMbsSenderBurned(ctx context.Context, uid int64) (int64, error) {
+	if m.markMbsSenderBurnedFn != nil {
+		return m.markMbsSenderBurnedFn(ctx, uid)
+	}
+	return 0, nil
 }
 
 func (m *mockStore) AddCampaignNumbers(ctx context.Context, campaignID string, waNumberIDs []string) error {

@@ -162,11 +162,33 @@ func main() {
 	pub := handler.NewNatsEventPublisher(js, log)
 
 	// ── 5. Session manager
+	//
+	// OnDelta wires the per-uid listener's inbound deltas to the NATS
+	// inbound publisher. Without this hook the listener drops every
+	// delta (fireHook → onDelta==nil → return) and inbound messages
+	// never reach the inbox. The hook MUST NOT block: the listener
+	// invokes it inline before broadcast. PublishInboundMessage is a
+	// fire-and-forget NATS publish (fast); panics are recovered by the
+	// listener's fireHook guard.
+	//
+	// Text-only gate: InboundDelta also carries receipt/presence deltas
+	// (empty Text). The inbound *message* pipeline only wants messages,
+	// so non-message deltas are skipped here. (MBS read/delivered status
+	// is a separate, not-yet-built concern.)
 	mgr := session.NewManager(session.Opts{
 		Store:  st,
 		DEK:    dek,
 		PodID:  cfg.PodID,
 		Logger: log,
+		OnDelta: func(d *session.InboundDelta) {
+			if d == nil || d.Text == "" {
+				return
+			}
+			pub.PublishInboundMessage(
+				d.UID, d.TenantID, d.PageID, d.MailboxID, d.ThreadID,
+				d.MID, d.SenderPhone, d.Text, d.MetaTimestamp,
+			)
+		},
 	})
 	log.Info().Msg("session manager ready")
 

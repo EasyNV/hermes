@@ -64,6 +64,12 @@ func TestListener_OnDeltaFiresOncePerDelta_RegardlessOfSubscribers(t *testing.T)
 		if d.TenantID != "tenant-X" {
 			t.Errorf("hook: TenantID should be filled from session row, got %q", d.TenantID)
 		}
+		if d.PageID != "page-X" {
+			t.Errorf("hook: PageID should be stamped by listener, got %q", d.PageID)
+		}
+		if d.MailboxID != "mbox-X" {
+			t.Errorf("hook: MailboxID should be stamped by listener, got %q", d.MailboxID)
+		}
 		if _, dup := hookSeen.LoadOrStore(d.MID, struct{}{}); dup {
 			t.Errorf("hook: same MID fired twice: %s", d.MID)
 		}
@@ -88,7 +94,7 @@ func TestListener_OnDeltaFiresOncePerDelta_RegardlessOfSubscribers(t *testing.T)
 
 	// Build a listener directly with the hook + tenant.
 	fc := newFakeClient()
-	l := newListener(123, "tenant-X", fc, bc, hook, zerolog.Nop())
+	l := newListener(123, "tenant-X", "page-X", "mbox-X", fc, bc, hook, zerolog.Nop())
 
 	lctx, lcancel := context.WithCancel(context.Background())
 	defer lcancel()
@@ -159,7 +165,7 @@ func TestListener_OnDeltaNil_NoFiring(t *testing.T) {
 	defer unsub()
 
 	fc := newFakeClient()
-	l := newListener(7, "tenant-X", fc, bc, nil, zerolog.Nop())
+	l := newListener(7, "tenant-X", "", "", fc, bc, nil, zerolog.Nop())
 
 	d := &InboundDelta{UID: 7, MID: "mid.$x", Text: "x"}
 	l.emit([]*InboundDelta{d})
@@ -196,7 +202,7 @@ func TestListener_OnDeltaPanic_Recovers(t *testing.T) {
 	ch, unsub := bc.subscribe()
 	defer unsub()
 	fc := newFakeClient()
-	l := newListener(7, "tenant-Y", fc, bc, hook, zerolog.Nop())
+	l := newListener(7, "tenant-Y", "", "", fc, bc, hook, zerolog.Nop())
 
 	// Mix a poisonous delta with healthy ones. Listener must not
 	// crash; downstream subscriber must still receive ALL deltas
@@ -297,7 +303,7 @@ func TestManager_OnDelta_PluggedThroughOpts(t *testing.T) {
 	ms := m.sessions[uid]
 	m.sessionsMu.RUnlock()
 
-	probe := newListener(uid, row.TenantID, ff.get(uid), ms.bc, m.onDelta, zerolog.Nop())
+	probe := newListener(uid, row.TenantID, "", "", ff.get(uid), ms.bc, m.onDelta, zerolog.Nop())
 	probe.emit([]*InboundDelta{{UID: uid, MID: "mid.$opts", Text: "wired"}})
 
 	// Cleanup.

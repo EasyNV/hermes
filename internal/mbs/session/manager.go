@@ -240,7 +240,7 @@ func (m *manager) connect(ctx context.Context, ms *muxedSession) (*Connected, er
 	ms.listenerCtx = lctx
 	ms.listenerCancel = lcancel
 	ms.client = c // retained for Disconnect → Close
-	go newListener(uid, row.TenantID, c, ms.bc, m.onDelta, m.log).run(lctx)
+	go newListener(uid, row.TenantID, creds.PageID, creds.WECMailboxID, c, ms.bc, m.onDelta, m.log).run(lctx)
 
 	cn := &Connected{
 		UID:          uid,

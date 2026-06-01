@@ -132,6 +132,9 @@ type Store interface {
 	GetCampaign(ctx context.Context, id string) (*CampaignRow, error)
 	ListCampaigns(ctx context.Context, workspaceID, status string, page, pageSize int32) ([]*CampaignRow, int64, error)
 	UpdateCampaignStatus(ctx context.Context, id, status string, setStarted, setCompleted bool) (*CampaignRow, error)
+	// CompleteCampaignIfRunning flips running→completed iff not already
+	// completed, reporting whether this call transitioned it (G3).
+	CompleteCampaignIfRunning(ctx context.Context, id string) (bool, error)
 
 	// Campaign Numbers
 	AddCampaignNumbers(ctx context.Context, campaignID string, waNumberIDs []string) error
@@ -468,6 +471,23 @@ func (s *PgStore) UpdateCampaignStatus(ctx context.Context, id, status string, s
 	return c, nil
 }
 
+// CompleteCampaignIfRunning flips a campaign to 'completed' only if it is not
+// already completed, and reports whether THIS call performed the transition
+// (RowsAffected == 1). Used by the MBS result/reaper completion path to publish
+// the completion status event exactly once, even when a redelivered or raced
+// terminal result triggers a second completion check. Unlike UpdateCampaignStatus
+// (an unconditional UPDATE ... RETURNING that always reports a row), this gives
+// the caller a real "did I transition it" signal.
+func (s *PgStore) CompleteCampaignIfRunning(ctx context.Context, id string) (bool, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE campaigns SET status='completed', completed_at=now()
+		 WHERE id=$1 AND status <> 'completed'`, id)
+	if err != nil {
+		return false, fmt.Errorf("complete campaign if running: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // ---------------------------------------------------------------------------
 // Campaign Numbers
 // ---------------------------------------------------------------------------
@@ -641,6 +661,25 @@ func (s *PgStore) UpdateCampaignMbsSessionStatus(ctx context.Context, campaignID
 		"UPDATE campaign_senders SET status=$1 WHERE campaign_id=$2 AND sender_kind='mbs' AND sender_id=$3",
 		status, campaignID, fmt.Sprintf("%d", uid))
 	return err
+}
+
+// MarkMbsSenderBurned flips every ACTIVE campaign_senders row for this MBS uid
+// to 'burned', across ALL campaigns (a session burn is session-wide, not
+// campaign-scoped). Returns the number of rows transitioned. Guarded on
+// status='active' so a redelivered burn event is idempotent (affects 0 rows the
+// second time). Driven by the hermes.mbs.session.burned.* consumer (G2): the
+// state-gated selection JOIN already prevents picking a burned sender, but this
+// keeps the campaign_senders table — and the idx_campaign_senders_active partial
+// index, dashboards, and queries — consistent with reality.
+func (s *PgStore) MarkMbsSenderBurned(ctx context.Context, uid int64) (int64, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE campaign_senders SET status='burned'
+		 WHERE sender_kind='mbs' AND sender_id=$1 AND status='active'`,
+		fmt.Sprintf("%d", uid))
+	if err != nil {
+		return 0, fmt.Errorf("mark mbs sender burned: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (s *PgStore) IncrementMbsSessionSentCount(ctx context.Context, campaignID string, uid int64) error {
