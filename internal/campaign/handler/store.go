@@ -105,6 +105,14 @@ type PendingContactRow struct {
 	CustomFields map[string]string
 }
 
+// ReapedContact identifies one contact the stuck-queued reaper transitioned to
+// 'failed'. The reaper returns these so the caller can bump failed_count and
+// re-check completion for each affected campaign.
+type ReapedContact struct {
+	CampaignID string
+	ContactID  string
+}
+
 // ---------------------------------------------------------------------------
 // Store interface
 // ---------------------------------------------------------------------------
@@ -148,6 +156,12 @@ type Store interface {
 	UpdateContactSent(ctx context.Context, campaignID, contactID, waNumberID string) error
 	// UpdateContactSentMbs is the MBS-channel sibling. Added chunk 9.
 	UpdateContactSentMbs(ctx context.Context, campaignID, contactID string, uid int64) error
+	// close-the-loop chunk: queued-state lifecycle + result write-backs.
+	UpdateContactQueuedMbs(ctx context.Context, campaignID, contactID string, uid int64) error
+	UpdateContactSentFromResult(ctx context.Context, campaignID, contactID string) (int64, error)
+	UpdateContactFailedFromResult(ctx context.Context, campaignID, contactID, errMsg string) (int64, error)
+	CountInflightContacts(ctx context.Context, campaignID string) (pending int, queued int, err error)
+	ReapStuckQueuedMbs(ctx context.Context, olderThan time.Duration) ([]ReapedContact, error)
 	SkipPendingContacts(ctx context.Context, campaignID string) (int32, error)
 
 	// Campaign stats
@@ -583,8 +597,21 @@ func (s *PgStore) RemoveCampaignMbsSessions(ctx context.Context, campaignID stri
 }
 
 func (s *PgStore) GetActiveCampaignMbsSessions(ctx context.Context, campaignID string) ([]*CampaignMbsSessionRow, error) {
+	// Bug-1 fix (close-the-loop): gate on the LIVE session state, not just
+	// the campaign_senders row. A sender row stays status='active' even after
+	// the underlying MBS session is burned (ban, creds-expiry), so filtering
+	// on campaign_senders alone served banned accounts to the rotator. The
+	// JOIN against mbs_sessions.state='active' is the actual liveness check.
+	// Both tables live in the same `hermes` DB, so the cross-table JOIN is
+	// valid from the campaign service's pool.
 	rows, err := s.pool.Query(ctx,
-		"SELECT campaign_id, sender_id, status, sent_count, failed_count FROM campaign_senders WHERE campaign_id=$1 AND sender_kind='mbs' AND status='active'",
+		`SELECT cs.campaign_id, cs.sender_id, cs.status, cs.sent_count, cs.failed_count
+		   FROM campaign_senders cs
+		   JOIN mbs_sessions ms ON ms.uid = cs.sender_id::bigint
+		  WHERE cs.campaign_id = $1
+		    AND cs.sender_kind = 'mbs'
+		    AND cs.status = 'active'
+		    AND ms.state = 'active'`,
 		campaignID)
 	if err != nil {
 		return nil, err
@@ -750,6 +777,89 @@ func (s *PgStore) UpdateContactSentMbs(ctx context.Context, campaignID, contactI
 			"WHERE campaign_id=$2 AND contact_id=$3",
 		uid, campaignID, contactID)
 	return err
+}
+
+// UpdateContactQueuedMbs marks a contact 'queued' on dispatch (close-the-loop
+// chunk). Guarded on status='pending' so a redelivered task or a resumed
+// campaign is idempotent — only a genuinely-pending contact transitions. Sets
+// sent_at=now() as the dispatch timestamp (the stuck-queued reaper keys off
+// it). Returns nil even on 0 rows affected: a contact that's already past
+// pending (queued/sent/failed) is not an error, just a no-op.
+func (s *PgStore) UpdateContactQueuedMbs(ctx context.Context, campaignID, contactID string, uid int64) error {
+	_, err := s.pool.Exec(ctx,
+		"UPDATE campaign_contacts SET status='queued', mbs_session_uid=$1, wa_number_id=NULL, sent_at=now() "+
+			"WHERE campaign_id=$2 AND contact_id=$3 AND status='pending'",
+		uid, campaignID, contactID)
+	return err
+}
+
+// UpdateContactSentFromResult transitions a contact queued->sent on a positive
+// MbsOutboundEvent. Guarded on status='queued' for idempotency: duplicate or
+// redelivered result events (and the NAK-storm's repeated ok=false events) hit
+// 0 rows and the caller skips the counter bump. Returns rows affected so the
+// result consumer only increments counters on the genuine first transition.
+func (s *PgStore) UpdateContactSentFromResult(ctx context.Context, campaignID, contactID string) (int64, error) {
+	tag, err := s.pool.Exec(ctx,
+		"UPDATE campaign_contacts SET status='sent', sent_at=now() "+
+			"WHERE campaign_id=$1 AND contact_id=$2 AND status='queued'",
+		campaignID, contactID)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// UpdateContactFailedFromResult transitions a contact queued->failed on a
+// negative MbsOutboundEvent (or the reaper). Same status='queued' idempotency
+// guard. Stores the error string for operator triage.
+func (s *PgStore) UpdateContactFailedFromResult(ctx context.Context, campaignID, contactID, errMsg string) (int64, error) {
+	tag, err := s.pool.Exec(ctx,
+		"UPDATE campaign_contacts SET status='failed', failed_at=now(), error=$1 "+
+			"WHERE campaign_id=$2 AND contact_id=$3 AND status='queued'",
+		errMsg, campaignID, contactID)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// CountInflightContacts returns how many contacts are still pending or queued
+// for a campaign. Completion = both zero. Backed by idx_campaign_contacts_inflight.
+func (s *PgStore) CountInflightContacts(ctx context.Context, campaignID string) (pending int, queued int, err error) {
+	err = s.pool.QueryRow(ctx,
+		"SELECT "+
+			"COUNT(*) FILTER (WHERE status='pending'), "+
+			"COUNT(*) FILTER (WHERE status='queued') "+
+			"FROM campaign_contacts WHERE campaign_id=$1",
+		campaignID).Scan(&pending, &queued)
+	return pending, queued, err
+}
+
+// ReapStuckQueuedMbs marks 'failed' any contact stuck in 'queued' longer than
+// olderThan (keyed off sent_at = dispatch time). Guards against a result event
+// that never arrives (poison-Ack'd task, mbs crash mid-send) leaving a campaign
+// hung. Returns the (campaign_id, contact_id) pairs reaped so the caller can
+// increment failed_count and re-check completion per affected campaign.
+func (s *PgStore) ReapStuckQueuedMbs(ctx context.Context, olderThan time.Duration) ([]ReapedContact, error) {
+	cutoff := time.Now().Add(-olderThan)
+	rows, err := s.pool.Query(ctx,
+		"UPDATE campaign_contacts SET status='failed', failed_at=now(), error='send result timeout' "+
+			"WHERE status='queued' AND sent_at < $1 "+
+			"RETURNING campaign_id, contact_id",
+		cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var reaped []ReapedContact
+	for rows.Next() {
+		var rc ReapedContact
+		if err := rows.Scan(&rc.CampaignID, &rc.ContactID); err != nil {
+			return nil, err
+		}
+		reaped = append(reaped, rc)
+	}
+	return reaped, rows.Err()
 }
 
 func (s *PgStore) SkipPendingContacts(ctx context.Context, campaignID string) (int32, error) {

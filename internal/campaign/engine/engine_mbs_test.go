@@ -6,6 +6,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"google.golang.org/protobuf/proto"
@@ -33,6 +34,26 @@ type fakeMbsStore struct {
 		CampaignID string
 		UID        int64
 	}
+	// close-the-loop tracking.
+	queuedLog []struct {
+		ContactID string
+		UID       int64
+	}
+	sentFromResultLog   []string // contactIDs
+	failedFromResultLog []struct {
+		ContactID string
+		Err       string
+	}
+	sentCount       int
+	failedCount     int
+	statusLog       []string // campaign statuses set, in order
+	inflightPending int
+	inflightQueued  int
+	reapReturn      []handler.ReapedContact
+	workspaceTenant string
+	// when true, UpdateContactSentFromResult returns 0 rows affected
+	// (simulates a duplicate/redelivered result that already transitioned).
+	sentFromResultZeroRows bool
 	mu sync.Mutex
 }
 
@@ -57,11 +78,19 @@ func (f *fakeMbsStore) GetPendingContacts(_ context.Context, _ string, _ int32) 
 	return nil, nil
 }
 func (f *fakeMbsStore) UpdateContactSent(_ context.Context, _, _, _ string) error { return nil }
-func (f *fakeMbsStore) IncrementSentCount(_ context.Context, _ string) error      { return nil }
+func (f *fakeMbsStore) IncrementSentCount(_ context.Context, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sentCount++
+	return nil
+}
 func (f *fakeMbsStore) IncrementNumberSentCount(_ context.Context, _, _ string) error {
 	return nil
 }
-func (f *fakeMbsStore) UpdateCampaignStatus(_ context.Context, _, _ string, _, _ bool) (*handler.CampaignRow, error) {
+func (f *fakeMbsStore) UpdateCampaignStatus(_ context.Context, _, status string, _, _ bool) (*handler.CampaignRow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.statusLog = append(f.statusLog, status)
 	return f.campaign, nil
 }
 
@@ -85,6 +114,54 @@ func (f *fakeMbsStore) IncrementMbsSessionSentCount(_ context.Context, campaignI
 		UID        int64
 	}{campaignID, uid})
 	return nil
+}
+
+// close-the-loop fakes.
+func (f *fakeMbsStore) UpdateContactQueuedMbs(_ context.Context, _, contactID string, uid int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.queuedLog = append(f.queuedLog, struct {
+		ContactID string
+		UID       int64
+	}{contactID, uid})
+	return nil
+}
+func (f *fakeMbsStore) UpdateContactSentFromResult(_ context.Context, _, contactID string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sentFromResultLog = append(f.sentFromResultLog, contactID)
+	if f.sentFromResultZeroRows {
+		return 0, nil // duplicate/redelivered — already transitioned
+	}
+	return 1, nil // genuine transition by default
+}
+func (f *fakeMbsStore) UpdateContactFailedFromResult(_ context.Context, _, contactID, errMsg string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failedFromResultLog = append(f.failedFromResultLog, struct {
+		ContactID string
+		Err       string
+	}{contactID, errMsg})
+	return 1, nil
+}
+func (f *fakeMbsStore) CountInflightContacts(_ context.Context, _ string) (int, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inflightPending, f.inflightQueued, nil
+}
+func (f *fakeMbsStore) ReapStuckQueuedMbs(_ context.Context, _ time.Duration) ([]handler.ReapedContact, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.reapReturn, nil
+}
+func (f *fakeMbsStore) IncrementFailedCount(_ context.Context, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failedCount++
+	return nil
+}
+func (f *fakeMbsStore) GetWorkspaceTenantID(_ context.Context, _ string) (string, error) {
+	return f.workspaceTenant, nil
 }
 
 // fakeJS captures publishes for assertion. Implements the methods
@@ -147,20 +224,30 @@ func TestDispatchMbsLoop_TaskShapeAndDBUpdates(t *testing.T) {
 	eng := newTestEngine(store)
 	eng.dispatchMbsLoop(context.Background(), campaign, tmpl, "tenant-A", "ws-1")
 
-	// Assert: UpdateContactSentMbs called once with correct uid + contact.
-	if len(store.contactSentLog) != 1 {
-		t.Fatalf("expected 1 UpdateContactSentMbs call, got %d", len(store.contactSentLog))
+	// close-the-loop: dispatch now marks 'queued' (NOT 'sent') and does
+	// NOT bump counters — those move to the result consumer.
+	if len(store.queuedLog) != 1 {
+		t.Fatalf("expected 1 UpdateContactQueuedMbs call, got %d", len(store.queuedLog))
 	}
-	if store.contactSentLog[0].ContactID != "c-1" || store.contactSentLog[0].UID != 61590134170831 {
-		t.Errorf("contactSentLog[0] = %+v, want {c-1, 61590134170831}", store.contactSentLog[0])
+	if store.queuedLog[0].ContactID != "c-1" || store.queuedLog[0].UID != 61590134170831 {
+		t.Errorf("queuedLog[0] = %+v, want {c-1, 61590134170831}", store.queuedLog[0])
 	}
-
-	// Assert: IncrementMbsSessionSentCount called once.
-	if len(store.mbsIncLog) != 1 {
-		t.Fatalf("expected 1 IncrementMbsSessionSentCount call, got %d", len(store.mbsIncLog))
+	// No eager 'sent' write, no eager counter bumps from the dispatch path.
+	if len(store.contactSentLog) != 0 {
+		t.Errorf("dispatch must NOT mark sent (open-loop bug); got %d", len(store.contactSentLog))
 	}
-	if store.mbsIncLog[0].UID != 61590134170831 {
-		t.Errorf("mbsIncLog[0].UID = %d, want 61590134170831", store.mbsIncLog[0].UID)
+	if len(store.mbsIncLog) != 0 {
+		t.Errorf("dispatch must NOT bump session sent count; got %d", len(store.mbsIncLog))
+	}
+	if store.sentCount != 0 {
+		t.Errorf("dispatch must NOT bump campaign sent count; got %d", store.sentCount)
+	}
+	// Dispatch must NOT mark the campaign completed — completion is the
+	// result consumer's job now.
+	for _, s := range store.statusLog {
+		if s == "completed" {
+			t.Errorf("dispatch must NOT mark campaign completed; statusLog=%v", store.statusLog)
+		}
 	}
 }
 
@@ -181,8 +268,19 @@ func TestDispatchMbsLoop_NoActiveSessions(t *testing.T) {
 	eng := newTestEngine(store)
 	eng.dispatchMbsLoop(context.Background(), campaign, tmpl, "tenant-A", "ws-1")
 
-	if len(store.contactSentLog) != 0 {
-		t.Errorf("expected no sends when no active sessions, got %d", len(store.contactSentLog))
+	if len(store.queuedLog) != 0 {
+		t.Errorf("expected no queued contacts when no active sessions, got %d", len(store.queuedLog))
+	}
+	// Bug-1 follow-through: no active senders pauses the campaign (visible),
+	// not a silent return.
+	paused := false
+	for _, s := range store.statusLog {
+		if s == "paused" {
+			paused = true
+		}
+	}
+	if !paused {
+		t.Errorf("expected campaign paused when no active senders; statusLog=%v", store.statusLog)
 	}
 }
 
@@ -205,8 +303,8 @@ func TestDispatchMbsLoop_CapExhausted(t *testing.T) {
 	eng := newTestEngine(store)
 	eng.dispatchMbsLoop(context.Background(), campaign, tmpl, "tenant-A", "ws-1")
 
-	if len(store.contactSentLog) != 0 {
-		t.Errorf("expected no sends when sender at cap, got %d", len(store.contactSentLog))
+	if len(store.queuedLog) != 0 {
+		t.Errorf("expected no queued contacts when sender at cap, got %d", len(store.queuedLog))
 	}
 }
 

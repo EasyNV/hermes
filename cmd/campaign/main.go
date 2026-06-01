@@ -62,6 +62,18 @@ func main() {
 	if err := startInboundConsumer(js, store, log); err != nil {
 		log.Fatal().Err(err).Msg("failed to start inbound consumer")
 	}
+	// close-the-loop chunk: consume MBS send results so the engine learns
+	// whether each send actually landed (was open-loop before). HERMES_MBS is
+	// owned by hermes-mbs, so the subscribe retries until that stream exists.
+	if err := startMbsResultConsumer(js, eng, log); err != nil {
+		log.Fatal().Err(err).Msg("failed to start mbs result consumer")
+	}
+
+	// close-the-loop chunk: stuck-queued reaper. Times out contacts whose
+	// result event never arrived so a campaign can't hang in 'running'.
+	reaperCtx, reaperCancel := context.WithCancel(context.Background())
+	defer reaperCancel()
+	go runStuckQueuedReaper(reaperCtx, eng, log)
 
 	// ── Diagnostic HTTP server (Stage F chunk 4).
 	diagSrv := observability.NewHTTPServer(observability.Options{

@@ -9,6 +9,8 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	hermesv1 "github.com/hermes-waba/hermes/gen/go/hermes/v1"
@@ -146,16 +148,62 @@ func makeSendHandler(source string, h *handler.Handler, log zerolog.Logger) nats
 		ctx = handler.WithTenantForTest(ctx, tenant)
 
 		if _, err := h.SendMessage(ctx, req); err != nil {
+			// Bug-3 fix (close-the-loop): classify before redelivering. The
+			// handler ALREADY published an MbsOutboundEvent(ok=false) for this
+			// attempt (rpc_send_message.go step 5), so the campaign engine
+			// learns of the failure regardless of Ack/Nak/Term — redelivery is
+			// purely about whether a RETRY could plausibly succeed.
+			//
+			//   Permanent (banned session, bad creds, validation, tenant
+			//   mismatch, not-found) → Term(): no point hammering a banned
+			//   account 5×. This kills the NAK storm + OPSEC fingerprint.
+			//   Transient (network, timeout, MQTToT close, 5xx) → Nak():
+			//   bounded by MaxDeliver=5.
+			if permanentSendErr(err) {
+				log.Warn().Err(err).
+					Str("source", source).
+					Str("tenant", tenant).
+					Int64("uid", task.Uid).
+					Str("campaign_id", task.CampaignId).
+					Msg("send consumer: permanent SendMessage failure — Term (no redelivery)")
+				_ = msg.Term()
+				return
+			}
 			log.Warn().Err(err).
 				Str("source", source).
 				Str("tenant", tenant).
 				Int64("uid", task.Uid).
 				Str("campaign_id", task.CampaignId).
-				Msg("send consumer: SendMessage failed — NAK for redelivery")
+				Msg("send consumer: transient SendMessage failure — NAK for redelivery")
 			_ = msg.Nak()
 			return
 		}
 		_ = msg.Ack()
+	}
+}
+
+// permanentSendErr classifies a SendMessage error as permanent (no retry can
+// help) vs transient (worth a bounded redelivery). Keys off the gRPC status
+// code set by the handler's mapSendErr/mapStoreErr/mapClientErr:
+//
+//   - InvalidArgument, NotFound, PermissionDenied, Unauthenticated,
+//     FailedPrecondition, Unimplemented → permanent. A banned/burned session
+//     surfaces as FailedPrecondition/PermissionDenied (OAuthException 190/464);
+//     a deleted session as NotFound; a malformed task as InvalidArgument.
+//   - Unavailable, DeadlineExceeded, Internal, Aborted, ResourceExhausted, and
+//     unknown/non-status errors → transient (default to retry; the bounded
+//     MaxDeliver cap + reaper prevent runaway).
+func permanentSendErr(err error) bool {
+	switch status.Code(err) {
+	case codes.InvalidArgument,
+		codes.NotFound,
+		codes.PermissionDenied,
+		codes.Unauthenticated,
+		codes.FailedPrecondition,
+		codes.Unimplemented:
+		return true
+	default:
+		return false
 	}
 }
 

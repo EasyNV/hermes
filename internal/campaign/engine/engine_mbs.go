@@ -60,14 +60,14 @@ func (e *Engine) dispatchMbsLoop(ctx context.Context, campaign *handler.Campaign
 		}
 
 		if len(contacts) == 0 {
-			// All contacts processed — mark completed.
-			if _, err := e.store.UpdateCampaignStatus(ctx, campaignID, "completed", false, true); err != nil {
-				e.log.Error().Err(err).Str("campaign_id", campaignID).Msg("mbs: failed to mark campaign completed")
-			}
-			e.publishStatusEvent(tenantID, workspaceID, campaignID,
-				hermesv1.CampaignStatus_CAMPAIGN_STATUS_RUNNING,
-				hermesv1.CampaignStatus_CAMPAIGN_STATUS_COMPLETED, "completed")
-			e.log.Info().Str("campaign_id", campaignID).Int32("dispatched", dispatched).Msg("mbs: campaign completed")
+			// Dispatch done: all contacts drained from 'pending' to 'queued'.
+			// Bug-2 fix: do NOT mark the campaign 'completed' here. Completion
+			// now means "no pending AND no queued" and is owned by the result
+			// consumer (HandleMbsResult), which re-checks after each terminal
+			// write-back. The safety reaper guarantees 'queued' always drains,
+			// so the campaign can't hang in 'running' forever.
+			e.log.Info().Str("campaign_id", campaignID).Int32("dispatched", dispatched).
+				Msg("mbs: dispatch complete, awaiting send results")
 			return
 		}
 
@@ -96,7 +96,18 @@ func (e *Engine) dispatchMbsLoop(ctx context.Context, campaign *handler.Campaign
 
 			uid, ok := rotator.Next(infos, campaign.DailyCapPerNum)
 			if !ok {
-				e.log.Warn().Str("campaign_id", campaignID).Msg("mbs: all sessions exhausted, stopping dispatch")
+				// No live sender available (all burned/exhausted). Bug-1
+				// follow-through: pause the campaign with an operator-visible
+				// reason instead of silently returning and leaving contacts
+				// stuck 'pending' forever. Resumable once a healthy sender is
+				// added — contacts are untouched (still 'pending').
+				e.log.Warn().Str("campaign_id", campaignID).Msg("mbs: no active sessions, pausing campaign")
+				if _, err := e.store.UpdateCampaignStatus(ctx, campaignID, "paused", false, false); err != nil {
+					e.log.Error().Err(err).Str("campaign_id", campaignID).Msg("mbs: failed to pause campaign")
+				}
+				e.publishStatusEvent(tenantID, workspaceID, campaignID,
+					hermesv1.CampaignStatus_CAMPAIGN_STATUS_RUNNING,
+					hermesv1.CampaignStatus_CAMPAIGN_STATUS_PAUSED, "no active MBS senders")
 				return
 			}
 
@@ -152,11 +163,25 @@ func (e *Engine) dispatchMbsLoop(ctx context.Context, campaign *handler.Campaign
 				}
 			}
 
-			// Update DB state (best-effort, mirrors WA behavior — errors
-			// logged by the store layer, don't halt the loop).
-			_ = e.store.UpdateContactSentMbs(ctx, campaignID, contact.ContactID, uid)
-			_ = e.store.IncrementSentCount(ctx, campaignID)
-			_ = e.store.IncrementMbsSessionSentCount(ctx, campaignID, uid)
+			// Bug-2 fix (close-the-loop): mark 'queued', NOT 'sent'. The
+			// contact only becomes 'sent' (or 'failed') when the result
+			// consumer receives the MbsOutboundEvent for this send. Counters
+			// (campaigns.sent_count, campaign_senders.sent_count) likewise
+			// move to the result consumer — incrementing them here would be
+			// the same fire-and-forget lie we're fixing. The 'queued' write
+			// is what keeps GetPendingContacts from re-pulling this contact
+			// (no double-send). Guard is status='pending' inside the store
+			// method for idempotency on redelivery/resume.
+			//
+			// sent_at is set to now() here as the dispatch timestamp; the
+			// stuck-queued reaper keys off it. (Semantic overload of sent_at
+			// as "last state change / dispatched_at" — documented in plan S7.)
+			if err := e.store.UpdateContactQueuedMbs(ctx, campaignID, contact.ContactID, uid); err != nil {
+				e.log.Error().Err(err).
+					Str("contact_id", contact.ContactID).
+					Int64("uid", uid).
+					Msg("mbs: failed to mark contact queued")
+			}
 
 			dispatched++
 

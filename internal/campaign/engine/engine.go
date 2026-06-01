@@ -35,6 +35,16 @@ type engineStore interface {
 	GetActiveCampaignMbsSessions(ctx context.Context, campaignID string) ([]*handler.CampaignMbsSessionRow, error)
 	UpdateContactSentMbs(ctx context.Context, campaignID, contactID string, uid int64) error
 	IncrementMbsSessionSentCount(ctx context.Context, campaignID string, uid int64) error
+
+	// close-the-loop chunk: queued lifecycle, result write-backs, completion
+	// check, and the stuck-queued reaper.
+	UpdateContactQueuedMbs(ctx context.Context, campaignID, contactID string, uid int64) error
+	UpdateContactSentFromResult(ctx context.Context, campaignID, contactID string) (int64, error)
+	UpdateContactFailedFromResult(ctx context.Context, campaignID, contactID, errMsg string) (int64, error)
+	CountInflightContacts(ctx context.Context, campaignID string) (pending int, queued int, err error)
+	ReapStuckQueuedMbs(ctx context.Context, olderThan time.Duration) ([]handler.ReapedContact, error)
+	IncrementFailedCount(ctx context.Context, campaignID string) error
+	GetWorkspaceTenantID(ctx context.Context, workspaceID string) (string, error)
 }
 
 type runningCampaign struct {

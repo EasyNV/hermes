@@ -266,6 +266,24 @@ func (m *mockStore) UpdateContactSentMbs(ctx context.Context, campaignID, contac
 	return nil
 }
 
+// close-the-loop chunk: no-op stubs for interface satisfaction. Engine-side
+// behavior is covered by the engine package's fakeMbsStore.
+func (m *mockStore) UpdateContactQueuedMbs(ctx context.Context, campaignID, contactID string, uid int64) error {
+	return nil
+}
+func (m *mockStore) UpdateContactSentFromResult(ctx context.Context, campaignID, contactID string) (int64, error) {
+	return 0, nil
+}
+func (m *mockStore) UpdateContactFailedFromResult(ctx context.Context, campaignID, contactID, errMsg string) (int64, error) {
+	return 0, nil
+}
+func (m *mockStore) CountInflightContacts(ctx context.Context, campaignID string) (int, int, error) {
+	return 0, 0, nil
+}
+func (m *mockStore) ReapStuckQueuedMbs(ctx context.Context, olderThan time.Duration) ([]ReapedContact, error) {
+	return nil, nil
+}
+
 func (m *mockStore) SkipPendingContacts(ctx context.Context, campaignID string) (int32, error) {
 	if m.skipPendingContactsFn != nil {
 		return m.skipPendingContactsFn(ctx, campaignID)
