@@ -28,6 +28,7 @@ type fakeClient struct {
 	lsCalls      atomic.Int64
 	closeCalls   atomic.Int64
 	pollCalls    atomic.Int64
+	dead         atomic.Bool // when true, Closed() returns true (simulates dead socket)
 	connectErr   error // injects warmup + lightspeed failure
 	warmupBlocks chan struct{}
 }
@@ -68,6 +69,7 @@ func (f *fakeClient) SnapshotPoll(ctx context.Context, db string) (*fb.LsResp, e
 
 func (f *fakeClient) InboxChan() <-chan *client.InboxItem { return f.inbox }
 func (f *fakeClient) RawClient() *client.Client           { return nil } // tests don't drive Send through fake
+func (f *fakeClient) Closed() bool                        { return f.dead.Load() }
 
 // ─────────────────────────────────────────────────────────────────────
 // Test helpers
@@ -200,6 +202,84 @@ func TestManager_GetOrConnect_CachedReturns(t *testing.T) {
 	}
 	if ff.count() != 1 {
 		t.Errorf("expected 1 client.New, got %d", ff.count())
+	}
+}
+
+// TestManager_GetOrConnect_ReconnectsDeadClient is the self-heal
+// regression: a cached client whose socket died (Closed()==true) must be
+// dropped and re-dialed, NOT handed back to loop forever on broken pipe.
+func TestManager_GetOrConnect_ReconnectsDeadClient(t *testing.T) {
+	const uid = int64(61590134170831)
+	m, st, ff, _ := setupManager(t, uid)
+
+	// Subscribe BEFORE connecting — this subscriber must survive the
+	// reconnect (broadcaster is not torn down on dead-client drop).
+	deltas, unsub := m.Subscribe(uid)
+	defer unsub()
+
+	first, err := m.GetOrConnect(context.Background(), uid)
+	if err != nil {
+		t.Fatalf("first GetOrConnect: %v", err)
+	}
+	oldClient := ff.get(uid)
+	if oldClient == nil {
+		t.Fatal("expected a fake client after first connect")
+	}
+
+	// Kill the socket. Next GetOrConnect must detect it and re-dial.
+	oldClient.dead.Store(true)
+
+	second, err := m.GetOrConnect(context.Background(), uid)
+	if err != nil {
+		t.Fatalf("reconnect GetOrConnect: %v", err)
+	}
+
+	// 1. A genuinely new Connected (not the dead cached one).
+	if second == first {
+		t.Error("expected a fresh Connected after reconnect, got the dead cached pointer")
+	}
+	// 2. Old dead client was Closed (listener torn down, socket released).
+	if oldClient.closeCalls.Load() != 1 {
+		t.Errorf("dead client should be Closed exactly once, got %d", oldClient.closeCalls.Load())
+	}
+	// 3. A fresh client was built and fully re-CONNECTed.
+	newClient := ff.get(uid)
+	if newClient == oldClient {
+		t.Fatal("factory should have produced a new client on reconnect")
+	}
+	if newClient.warmupCalls.Load() != 1 || newClient.lsCalls.Load() != 1 {
+		t.Errorf("new client should warmup+ls once each, got warmup=%d ls=%d",
+			newClient.warmupCalls.Load(), newClient.lsCalls.Load())
+	}
+	// 4. pod_id claim retained (re-claimed idempotently, never released).
+	row, _ := st.GetSession(context.Background(), uid)
+	if row.PodID != "hermes-mbs-test" {
+		t.Errorf("pod_id should stay claimed across reconnect, got %q", row.PodID)
+	}
+	// 5. The pre-existing subscriber survived: dropDeadLocked must NOT
+	//    close the broadcaster (only Disconnect does). A closed broadcaster
+	//    closes subscriber channels (ok=false); a surviving one stays
+	//    open-and-empty. Also assert the subscriber is still registered.
+	select {
+	case _, ok := <-deltas:
+		if !ok {
+			t.Error("subscriber channel was closed by reconnect (broadcaster torn down)")
+		}
+	default:
+		// open and empty — broadcaster survived, correct
+	}
+	if n := m.getOrCreateMux(uid).bc.subscriberCount(); n != 1 {
+		t.Errorf("expected subscriber to survive reconnect, subscriberCount=%d", n)
+	}
+
+	// 6. Healthy reconnect is stable: a follow-up call returns the cached
+	//    new client without re-dialing again.
+	third, err := m.GetOrConnect(context.Background(), uid)
+	if err != nil {
+		t.Fatalf("third GetOrConnect: %v", err)
+	}
+	if third != second {
+		t.Error("expected cached new Connected on third call, got a re-dial")
 	}
 }
 

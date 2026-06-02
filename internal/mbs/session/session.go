@@ -145,6 +145,11 @@ type clientI interface {
 	SnapshotPoll(ctx context.Context, db string) (*fb.LsResp, error)
 	InboxChan() <-chan *client.InboxItem
 
+	// Closed reports whether the underlying connection is dead (socket
+	// dropped, broken pipe, or Close called). The Manager checks this
+	// before reusing a cached client and re-dials when it returns true.
+	Closed() bool
+
 	// RawClient returns the underlying *client.Client for callers that
 	// need to invoke methods outside the clientI surface (Send, Reply,
 	// SetTyping, MarkRead). Tests with fakeClient return nil — handlers

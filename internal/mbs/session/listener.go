@@ -50,6 +50,7 @@ type listener struct {
 	client    clientI
 	bc        *broadcaster
 	onDelta   DeltaHook // nil-safe; called exactly once per delta if set
+	onDead    func()    // nil-safe; called at most once when the client dies, to trigger reconnect
 	log       zerolog.Logger
 }
 
@@ -93,8 +94,36 @@ func (l *listener) run(ctx context.Context) {
 
 		case <-pollTicker.C:
 			l.poll(ctx)
+			// Self-heal the inbound path: if the poll just revealed a
+			// dead connection (broken pipe / reset), the client will
+			// never recover on its own — SnapshotPoll loops forever on
+			// the same dead socket. A pure-inbound session with no
+			// outbound sends would spin here indefinitely. Trigger an
+			// async reconnect (which re-dials and spawns a fresh
+			// listener) and exit this stale loop.
+			if l.client.Closed() {
+				l.log.Warn().Msg("listener: client connection dead, triggering reconnect")
+				l.fireOnDead()
+				return
+			}
 		}
 	}
+}
+
+// fireOnDead invokes the onDead reconnect trigger under a panic guard,
+// nil-safe. The trigger MUST be async (the listener goroutine is exiting;
+// a synchronous GetOrConnect here would deadlock on the manager dropping
+// THIS listener under ms.mu).
+func (l *listener) fireOnDead() {
+	if l.onDead == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			l.log.Error().Interface("panic", r).Msg("listener: onDead hook panicked")
+		}
+	}()
+	l.onDead()
 }
 
 // emit publishes one batch of deltas: tag tenant, fire the hook (panic-

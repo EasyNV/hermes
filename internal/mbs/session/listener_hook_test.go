@@ -320,6 +320,46 @@ func TestManager_OnDelta_PluggedThroughOpts(t *testing.T) {
 	}
 }
 
+// TestListener_PollDetectsDeadClient_FiresOnDead proves the inbound
+// self-heal: when the client dies (Closed()==true), the listener's poll
+// loop detects it, fires onDead (the reconnect trigger), and exits its
+// stale loop instead of spinning on broken-pipe forever.
+func TestListener_PollDetectsDeadClient_FiresOnDead(t *testing.T) {
+	t.Parallel()
+
+	bc := newBroadcaster()
+	_, unsub := bc.subscribe()
+	defer unsub()
+
+	fc := newFakeClient()
+	l := newListener(9, "tenant-Z", "", "", fc, bc, nil, zerolog.Nop())
+
+	var onDeadFired atomic.Int64
+	done := make(chan struct{})
+	l.onDead = func() { onDeadFired.Add(1) }
+
+	// Kill the client BEFORE running — the first poll tick detects it.
+	fc.dead.Store(true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		l.run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// run() returned on its own — exactly what we want.
+	case <-time.After(15 * time.Second): // poll interval is 10s
+		t.Fatal("listener did not exit after detecting dead client")
+	}
+
+	if got := onDeadFired.Load(); got != 1 {
+		t.Errorf("onDead should fire exactly once on dead client, got %d", got)
+	}
+}
+
 // Suppress unused import warnings if tests change.
 var _ = client.InboxItem{}
 var _ = auth.Creds{}

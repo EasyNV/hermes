@@ -110,9 +110,22 @@ func (m *manager) GetOrConnect(ctx context.Context, uid int64) (*Connected, erro
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
-	// Fast path: already connected.
+	// Fast path: already connected AND the connection is still alive.
+	// A cached client whose socket has died (broken pipe / reset / silent
+	// half-open drop detected on the next write) must NOT be handed back —
+	// every send/poll on it loops forever on "broken pipe". Drop the
+	// corpse and fall through to a fresh connect. The pod_id claim is kept
+	// (ClaimSession re-claims idempotently on the same pod); the
+	// broadcaster + subscribers survive so in-flight Listen RPCs reattach
+	// to the new client's listener transparently.
 	if ms.connected != nil {
-		return ms.connected, nil
+		if ms.client != nil && ms.client.Closed() {
+			m.log.Warn().Int64("uid", uid).Msg("session: cached client dead, reconnecting")
+			m.dropDeadLocked(ms)
+			// fall through to slow path
+		} else {
+			return ms.connected, nil
+		}
 	}
 
 	// Slow path: do the full connect flow. Errors leave ms.connected
@@ -149,6 +162,60 @@ func (m *manager) getOrCreateMux(uid int64) *muxedSession {
 	m.sessions[uid] = ms
 	return ms
 }
+
+// dropDeadLocked tears down a cached-but-dead client so GetOrConnect can
+// re-dial. Caller MUST hold ms.mu. Unlike Disconnect it deliberately
+// does NOT release the pod_id claim (the immediate reconnect re-claims it
+// idempotently on the same pod) and does NOT close the broadcaster (Listen
+// subscribers stay attached and reattach to the fresh listener). It cancels
+// the old listener goroutine and Closes the old client.
+//
+// Safe to Close synchronously under ms.mu: this is only called when
+// Closed()==true, so the client's read loop has already exited (or is
+// about to — Close's conn.Close() unblocks a parked ReadFrame), and the
+// production client has no OnError callback that could re-enter the lock.
+func (m *manager) dropDeadLocked(ms *muxedSession) {
+	c := ms.client
+	if ms.listenerCancel != nil {
+		ms.listenerCancel()
+		ms.listenerCancel = nil
+		ms.listenerCtx = nil
+	}
+	ms.connected = nil
+	ms.client = nil
+	if c != nil {
+		_ = c.Close()
+	}
+	if m.metrics != nil {
+		m.metrics.ConnectedSessions.Dec()
+	}
+}
+
+// reconnectAsync re-establishes a session whose connection died, off the
+// listener goroutine. Spawned as a detached goroutine because the calling
+// listener is exiting and GetOrConnect's dead-client drop cancels THAT
+// listener under ms.mu — calling it inline would deadlock.
+//
+// GetOrConnect's fast path sees Closed()==true, calls dropDeadLocked, and
+// re-dials. Guard against shutdown/drain so a bounce doesn't fight the
+// graceful-shutdown path. Best-effort: a failed re-dial logs and relies on
+// the next listener tick (the fresh listener fires onDead again) or a send.
+func (m *manager) reconnectAsync(uid int64) {
+	go func() {
+		if m.shutdown.Load() || m.drained.Load() {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), reconnectPerUIDLimit)
+		defer cancel()
+		if _, err := m.GetOrConnect(ctx, uid); err != nil {
+			m.log.Warn().Err(err).Int64("uid", uid).Msg("session: async reconnect failed")
+		}
+	}()
+}
+
+// reconnectPerUIDLimit caps one async reconnect attempt's warmup +
+// Lightspeed CONNECT path. Matches cmd/mbs startup reconnect tunable.
+const reconnectPerUIDLimit = 30 * time.Second
 
 // connect runs the full claim → decrypt → connect sequence. Holds
 // ms.mu (caller's responsibility).
@@ -235,12 +302,17 @@ func (m *manager) connect(ctx context.Context, ms *muxedSession) (*Connected, er
 	// 7. Record successful CONNECT.
 	m.recordConnack(uid, "active", int16Ptr(0))
 
-	// 8. Spawn listener goroutine.
+	// 8. Spawn listener goroutine. onDead self-heals the inbound path:
+	// when the listener's poll detects a dead socket, it triggers an
+	// async reconnect (drop dead client + re-dial + fresh listener) so a
+	// pure-inbound session recovers without waiting for an outbound send.
 	lctx, lcancel := context.WithCancel(context.Background())
 	ms.listenerCtx = lctx
 	ms.listenerCancel = lcancel
 	ms.client = c // retained for Disconnect → Close
-	go newListener(uid, row.TenantID, creds.PageID, creds.WECMailboxID, c, ms.bc, m.onDelta, m.log).run(lctx)
+	lis := newListener(uid, row.TenantID, creds.PageID, creds.WECMailboxID, c, ms.bc, m.onDelta, m.log)
+	lis.onDead = func() { m.reconnectAsync(uid) }
+	go lis.run(lctx)
 
 	cn := &Connected{
 		UID:          uid,
