@@ -147,7 +147,7 @@ type Store interface {
 	// inbound consumer (E3.3), send routing (E3.4), and outbound
 	// status reconciliation (E3.4). All additive — WA paths untouched.
 	FindOrCreateMbsConversation(ctx context.Context, workspaceID, contactID, mbsSessionUID, mbsThreadID, mbsPageID string) (*ConversationRow, bool, error)
-	CreateMbsMessage(ctx context.Context, conversationID, direction, body, mbsMID string) (*MessageRow, error)
+	CreateMbsMessage(ctx context.Context, conversationID, direction, body, mbsMID string) (*MessageRow, bool, error)
 	GetMessageByMbsMID(ctx context.Context, mbsMID string) (*MessageRow, error)
 	UpdateMbsMessageStatus(ctx context.Context, mbsMID, newStatus string) error
 
@@ -704,8 +704,7 @@ func (s *PgStore) FindOrCreateMbsConversation(
 		   status, last_message_at)
 		VALUES ($1, $2, 'mbs', $3, $4, $5, 'unassigned', now())
 		ON CONFLICT (workspace_id, mbs_session_uid, mbs_thread_id) WHERE channel = 'mbs'
-		DO UPDATE SET last_message_at = now(),
-		              mbs_page_id = COALESCE(NULLIF(EXCLUDED.mbs_page_id, ''), conversations.mbs_page_id)
+		DO UPDATE SET mbs_page_id = COALESCE(NULLIF(EXCLUDED.mbs_page_id, ''), conversations.mbs_page_id)
 		RETURNING id, workspace_id, contact_id,
 		          COALESCE(wa_number_id::text, ''), assigned_to,
 		          status, last_message_at, campaign_id,
@@ -735,7 +734,7 @@ func (s *PgStore) FindOrCreateMbsConversation(
 func (s *PgStore) CreateMbsMessage(
 	ctx context.Context,
 	conversationID, direction, body, mbsMID string,
-) (*MessageRow, error) {
+) (*MessageRow, bool, error) {
 	// MID is required for inbound (Meta already assigned it) but optional
 	// for outbound — outbound rows are created locally before NATS round-trip;
 	// the chunk-4 outbound consumer patches mbs_mid in via SetMbsMID once
@@ -743,7 +742,7 @@ func (s *PgStore) CreateMbsMessage(
 	// uq_messages_mbs_mid (WHERE mbs_mid != '') skips empty-MID rows so
 	// they can never trigger the ON CONFLICT path.
 	if direction == "inbound" && mbsMID == "" {
-		return nil, fmt.Errorf("CreateMbsMessage: mbsMID required for inbound")
+		return nil, false, fmt.Errorf("CreateMbsMessage: mbsMID required for inbound")
 	}
 	var bodyPtr *string
 	if body != "" {
@@ -757,7 +756,14 @@ func (s *PgStore) CreateMbsMessage(
 	// The partial unique index uq_messages_mbs_mid lives on (mbs_mid) WHERE mbs_mid != ''
 	// so we can target it with ON CONFLICT (mbs_mid) WHERE mbs_mid != ''.
 	// If a row already exists, INSERT returns no rows and we SELECT the existing one.
+	//
+	// was_inserted distinguishes a fresh insert from a re-poll/redelivery
+	// hitting an existing row: the ins branch tags TRUE, the fallback SELECT
+	// tags FALSE. Callers gate side-effects (last_message_at bump, inbound
+	// notification) on this so the 10s snapshot re-poll doesn't re-stamp
+	// every conversation to "now" or re-notify on already-seen messages.
 	m := &MessageRow{}
+	var wasInserted bool
 	err := s.pool.QueryRow(ctx, `
 		WITH ins AS (
 		  INSERT INTO messages
@@ -769,23 +775,24 @@ func (s *PgStore) CreateMbsMessage(
 		            template_id, resolved_vars_json, wa_message_id, status, created_at,
 		            COALESCE(mbs_mid, '') AS mbs_mid
 		)
-		SELECT * FROM ins
+		SELECT *, TRUE AS was_inserted FROM ins
 		UNION ALL
 		SELECT id, conversation_id, direction, content_type, body, media_url,
 		       template_id, resolved_vars_json, wa_message_id, status, created_at,
-		       COALESCE(mbs_mid, '')
+		       COALESCE(mbs_mid, ''), FALSE AS was_inserted
 		FROM messages WHERE mbs_mid = $4 AND mbs_mid != ''
+		  AND NOT EXISTS (SELECT 1 FROM ins)
 		LIMIT 1`,
 		conversationID, direction, bodyPtr, mbsMID, initial,
 	).Scan(
 		&m.ID, &m.ConversationID, &m.Direction, &m.ContentType, &m.Body, &m.MediaURL,
 		&m.TemplateID, &m.ResolvedVarsJSON, &m.WaMessageID, &m.Status, &m.CreatedAt,
-		&m.MbsMID,
+		&m.MbsMID, &wasInserted,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("creating mbs message: %w", err)
+		return nil, false, fmt.Errorf("creating mbs message: %w", err)
 	}
-	return m, nil
+	return m, wasInserted, nil
 }
 
 // GetMessageByMbsMID looks up a message by its Meta MID. Skips rows

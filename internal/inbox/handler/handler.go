@@ -667,7 +667,7 @@ func (h *Handler) sendMessageMbs(
 	// Write the local row first (status=pending, mid=""). The chunk-4
 	// outbound consumer will SetMbsMID + UpdateMbsMessageStatus when the
 	// real send response lands.
-	msg, err := h.store.CreateMbsMessage(ctx, conv.ID, "outbound", req.Body, "")
+	msg, _, err := h.store.CreateMbsMessage(ctx, conv.ID, "outbound", req.Body, "")
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "creating mbs message: %v", err)
 	}

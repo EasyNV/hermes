@@ -551,23 +551,38 @@ func processMbsInbound(
 		}
 	}
 
-	// 5. Store the message.
-	if _, err = store.CreateMbsMessage(ctx, conv.ID, "inbound", event.Text, event.Mid); err != nil {
+	// 5. Store the message. wasInserted is false on a re-poll/redelivery
+	// hitting the existing row (mbs_mid conflict) — the snapshot is re-read
+	// every 10s, so without this guard every cycle would re-stamp
+	// last_message_at to "now" (collapsing all cards to the same time) and
+	// re-fire the unassigned notification for messages already seen.
+	msgRow, wasInserted, err := store.CreateMbsMessage(ctx, conv.ID, "inbound", event.Text, event.Mid)
+	if err != nil {
 		log.Error().Err(err).
 			Str("conv_id", conv.ID).
 			Str("mid", event.Mid).
 			Msg("MBS inbound: failed to store message")
 		return false
 	}
+	if !wasInserted {
+		// Already-seen message re-surfaced by the poll. Idempotent ACK:
+		// nothing to update, nothing to notify.
+		log.Debug().
+			Str("conv_id", conv.ID).
+			Str("mid", event.Mid).
+			Msg("MBS inbound: message already stored (re-poll), skipping side-effects")
+		return true
+	}
+	_ = msgRow
 
-	// 6. Update last_message_at + preview.
+	// 6. Update last_message_at + preview (new message only).
 	preview := event.Text
 	if len(preview) > 100 {
 		preview = preview[:100]
 	}
 	_ = store.UpdateLastMessage(ctx, conv.ID, preview)
 
-	// 7. Notify on unassigned.
+	// 7. Notify on unassigned (new message only).
 	if conv.Status == "unassigned" && js != nil {
 		publishNotification(js, log, tenantID, workspaceID, contact, event.Text)
 	}

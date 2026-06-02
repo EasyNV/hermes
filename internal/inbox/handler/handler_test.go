@@ -53,7 +53,7 @@ type mockStore struct {
 	listAllowlistFn            func(ctx context.Context, workspaceID string, page, pageSize int32) ([]AllowlistEntry, int64, error)
 	// E3 chunk 2: MBS channel parallels.
 	findOrCreateMbsConversationFn func(ctx context.Context, workspaceID, contactID, mbsSessionUID, mbsThreadID, mbsPageID string) (*ConversationRow, bool, error)
-	createMbsMessageFn            func(ctx context.Context, conversationID, direction, body, mbsMID string) (*MessageRow, error)
+	createMbsMessageFn            func(ctx context.Context, conversationID, direction, body, mbsMID string) (*MessageRow, bool, error)
 	getMessageByMbsMIDFn          func(ctx context.Context, mbsMID string) (*MessageRow, error)
 	updateMbsMessageStatusFn      func(ctx context.Context, mbsMID, newStatus string) error
 	setMbsMIDFn                   func(ctx context.Context, messageID, mbsMID string) error
@@ -292,7 +292,7 @@ func (m *mockStore) FindOrCreateMbsConversation(ctx context.Context, workspaceID
 	}, true, nil
 }
 
-func (m *mockStore) CreateMbsMessage(ctx context.Context, conversationID, direction, body, mbsMID string) (*MessageRow, error) {
+func (m *mockStore) CreateMbsMessage(ctx context.Context, conversationID, direction, body, mbsMID string) (*MessageRow, bool, error) {
 	if m.createMbsMessageFn != nil {
 		return m.createMbsMessageFn(ctx, conversationID, direction, body, mbsMID)
 	}
@@ -313,7 +313,7 @@ func (m *mockStore) CreateMbsMessage(ctx context.Context, conversationID, direct
 		MbsMID:         mbsMID,
 		Status:         initial,
 		CreatedAt:      time.Now(),
-	}, nil
+	}, true, nil
 }
 
 func (m *mockStore) GetMessageByMbsMID(ctx context.Context, mbsMID string) (*MessageRow, error) {

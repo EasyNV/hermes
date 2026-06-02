@@ -113,14 +113,14 @@ func TestSendMessage_MbsChannel_PublishesToMbsManualSubject(t *testing.T) {
 			}
 			return "ws-1", "tenant-1", nil
 		},
-		createMbsMessageFn: func(_ context.Context, convID, direction, body, mid string) (*MessageRow, error) {
+		createMbsMessageFn: func(_ context.Context, convID, direction, body, mid string) (*MessageRow, bool, error) {
 			if direction != "outbound" {
 				t.Errorf("direction: got %q, want outbound", direction)
 			}
 			if mid != "" {
 				t.Errorf("mid should be empty on outbound create; got %q", mid)
 			}
-			return &MessageRow{ID: "msg-uuid-1", ConversationID: convID, Direction: direction, MbsMID: ""}, nil
+			return &MessageRow{ID: "msg-uuid-1", ConversationID: convID, Direction: direction, MbsMID: ""}, true, nil
 		},
 	}
 

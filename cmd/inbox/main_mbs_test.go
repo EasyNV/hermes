@@ -24,7 +24,7 @@ type fakeStore struct {
 	findContactByPhone      func(ctx context.Context, phone string) (*handler.ContactRow, string, error)
 	autoCreateContact       func(ctx context.Context, tenantID, phone, name string) (*handler.ContactRow, error)
 	findOrCreateMbsConv     func(ctx context.Context, ws, contact, sessUID, threadID, pageID string) (*handler.ConversationRow, bool, error)
-	createMbsMessage        func(ctx context.Context, convID, direction, body, mid string) (*handler.MessageRow, error)
+	createMbsMessage        func(ctx context.Context, convID, direction, body, mid string) (*handler.MessageRow, bool, error)
 	reopenConversation      func(ctx context.Context, id string) error
 	updateLastMessage       func(ctx context.Context, convID, preview string) error
 
@@ -88,7 +88,7 @@ func (f *fakeStore) FindOrCreateMbsConversation(ctx context.Context, ws, contact
 	return &handler.ConversationRow{ID: "conv-1", Status: "unassigned"}, true, nil
 }
 
-func (f *fakeStore) CreateMbsMessage(ctx context.Context, convID, direction, body, mid string) (*handler.MessageRow, error) {
+func (f *fakeStore) CreateMbsMessage(ctx context.Context, convID, direction, body, mid string) (*handler.MessageRow, bool, error) {
 	f.createdMsg.conversationID = convID
 	f.createdMsg.direction = direction
 	f.createdMsg.body = body
@@ -96,7 +96,7 @@ func (f *fakeStore) CreateMbsMessage(ctx context.Context, convID, direction, bod
 	if f.createMbsMessage != nil {
 		return f.createMbsMessage(ctx, convID, direction, body, mid)
 	}
-	return &handler.MessageRow{ID: "msg-1", ConversationID: convID, Direction: direction, MbsMID: mid}, nil
+	return &handler.MessageRow{ID: "msg-1", ConversationID: convID, Direction: direction, MbsMID: mid}, true, nil
 }
 
 func (f *fakeStore) ReopenConversation(ctx context.Context, id string) error {
@@ -273,6 +273,35 @@ func TestProcessMbsInbound_HappyPath_RealPhone(t *testing.T) {
 	}
 }
 
+// Re-poll idempotency: the db130 snapshot is re-read every 10s, so the same
+// MID re-surfaces constantly. CreateMbsMessage reports wasInserted=false on
+// the conflict; the handler must ACK but SKIP UpdateLastMessage (which sets
+// last_message_at=now()) and the notification. Without this guard every poll
+// re-stamps the card to "now", collapsing all conversations to the same
+// timestamp. Regression for the "all cards show deploy-time" bug.
+func TestProcessMbsInbound_RePoll_SkipsSideEffects(t *testing.T) {
+	fs := &fakeStore{
+		getWorkspaceIDForMbsUid: func(_ context.Context, _ int64) (string, string, error) {
+			return "ws-1", "tenant-1", nil
+		},
+		// Simulate the message already existing: wasInserted=false.
+		createMbsMessage: func(_ context.Context, convID, direction, _, mid string) (*handler.MessageRow, bool, error) {
+			return &handler.MessageRow{ID: "msg-1", ConversationID: convID, Direction: direction, MbsMID: mid}, false, nil
+		},
+	}
+	ev := mkInboundEvent(999, "tenant-1", "thread-A", "mid.AAA", "6281234567890", "hello")
+
+	if ok := processMbsInbound(context.Background(), fs, nil, silentLogger(), ev); !ok {
+		t.Fatal("expected ack on re-poll, got nak")
+	}
+	if fs.lastMessageConv != "" {
+		t.Errorf("UpdateLastMessage must NOT be called on re-poll; got conv %q", fs.lastMessageConv)
+	}
+	if fs.lastMessageText != "" {
+		t.Errorf("UpdateLastMessage must NOT be called on re-poll; got preview %q", fs.lastMessageText)
+	}
+}
+
 // Enrichment: inbound with EMPTY sender_phone but a known thread_id should
 // reverse-resolve the real customer phone from mbs_phone_threads, so the
 // contact uses the real phone (unifying with outbound) instead of the
@@ -406,8 +435,8 @@ func TestProcessMbsInbound_CreateMessageError_Nak(t *testing.T) {
 		getWorkspaceIDForMbsUid: func(_ context.Context, _ int64) (string, string, error) {
 			return "ws-1", "tenant-1", nil
 		},
-		createMbsMessage: func(_ context.Context, _, _, _, _ string) (*handler.MessageRow, error) {
-			return nil, errors.New("simulated DB outage")
+		createMbsMessage: func(_ context.Context, _, _, _, _ string) (*handler.MessageRow, bool, error) {
+			return nil, false, errors.New("simulated DB outage")
 		},
 	}
 	ev := mkInboundEvent(5, "tenant-1", "thread-E", "mid.E1", "62800", "boom")
