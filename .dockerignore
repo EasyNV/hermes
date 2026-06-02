@@ -5,44 +5,23 @@
 # parsed as the literal path `re/mbs/mautrix-meta/ # foo`. Comments must
 # be on their own line.
 #
-# go.mod replace directives REQUIRE these paths in the context:
-#   replace mbs-native             => ./re/mbs/mbs-native
-#   replace go.mau.fi/mautrix-meta => ./re/mbs/mautrix-meta-patched
+# go.mod replace directives REQUIRE these submodule paths in the context:
+#   replace mbs-native             => ./third_party/mbs-native
+#   replace go.mau.fi/mautrix-meta => ./third_party/mautrix-meta-patched
+#   replace .../utls               => ./third_party/mbs-native/third_party/utls
+# (mbs-native + mautrix-meta-patched are private git submodules.)
 #
 # `gen/` (proto-generated Go + TS stubs) IS gitignored at repo level but
 # MUST stay in the build context. Operator contract: run `make proto-gen`
 # before `make docker-build-*`. The Makefile target enforces this.
 
-# ── Heavy re/mbs subdirectories (RE artefacts, not the build) ───────────
-re/mbs/android-mbs/
-re/mbs/ghidra/
-re/mbs/ipa/
-re/mbs/captures/
-re/mbs/mautrix-meta/
-re/mbs/mbs-send/
-re/mbs/mbs-bridge-login/
-re/mbs/mbs-client/
-re/mbs/tweak/
-re/mbs/frida-scripts/
-re/mbs/frida-server-android/
-re/mbs/frida-interception-and-unpinning/
-re/mbs/scripts/
-re/mbs/tools/
-re/mbs/docs/
-re/mbs/__pycache__/
-re/mbs/*.zip
-re/mbs/*.har
-re/mbs/*.mitm
-re/mbs/*.pcap
-re/mbs/*.ipa
-re/mbs/*.apk
-re/mbs/*.dump
-re/mbs/*.py
-re/mbs/*.md
-re/mbs/*.bak.*
-re/mbs/c8750f0d.0
+# ── re/ : RE scratch tree, no longer part of the build ──────────────────
+# mbs-native + mautrix-meta were promoted to third_party/ submodules. The
+# rest of re/ (mbs-client, mbs-send, frida, ghidra, captures, …) is never
+# built — exclude it wholesale from the image context.
+re/
 
-# ── mbs-native: trim test-only fixtures but keep //go:embed paths ───────
+# ── third_party/mbs-native: trim test-only fixtures but keep //go:embed paths ──
 #
 # DO NOT use a blanket `**/testdata/` glob — production code embeds
 # from `auth/testdata/` (deletepregent_reg_info_template.json,
@@ -51,13 +30,12 @@ re/mbs/c8750f0d.0
 #
 # Strategy: keep auth/testdata/ in context; exclude top-level testdata
 # (only used by _test.go) and the heavy third_party + web fixtures.
-re/mbs/mbs-native/h2dump/
-re/mbs/mbs-native/probe-connack/
-re/mbs/mbs-native/testdata/
-re/mbs/mbs-native/web/testdata/
-re/mbs/mbs-native/third_party/utls/testdata/
-re/mbs/mbs-native/graphql/testdata/
-re/mbs/mbs-native/auth/testdata/gold_responses/
+third_party/mbs-native/h2dump/
+third_party/mbs-native/probe-connack/
+third_party/mbs-native/testdata/
+third_party/mbs-native/web/testdata/
+third_party/mbs-native/third_party/utls/testdata/
+third_party/mbs-native/graphql/testdata/
 
 # ── Test sources (not needed by production builds) ──────────────────────
 #

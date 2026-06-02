@@ -1,0 +1,6 @@
+[submodule "third_party/mbs-native"]
+	path = third_party/mbs-native
+	url = git@github.com:EasyNV/hermes-mbs-native.git
+[submodule "third_party/mautrix-meta-patched"]
+	path = third_party/mautrix-meta-patched
+	url = git@github.com:EasyNV/hermes-mautrix-meta.git

@@ -70,18 +70,20 @@ require (
 )
 
 // Stage E: hermes-mbs depends on the mbs-native client library and the
-// patched mautrix-meta fork. Both live in this monorepo under re/mbs/.
-replace mbs-native => ./re/mbs/mbs-native
+// patched mautrix-meta fork. Both are now private git submodules under
+// third_party/ (repos EasyNV/hermes-mbs-native + EasyNV/hermes-mautrix-meta).
+// Clone hermes with --recurse-submodules (or run git submodule update --init).
+replace mbs-native => ./third_party/mbs-native
 
-replace go.mau.fi/mautrix-meta => ./re/mbs/mautrix-meta-patched
+replace go.mau.fi/mautrix-meta => ./third_party/mautrix-meta-patched
 
 // Stage F follow-up (2026-05-30): mbs-native/transport advertises Meta's
 // proprietary 0xfb1a TLS-version codepoint in supported_versions for JA4
 // fidelity. Upstream refraction-networking/utls rejects 0xfb1a when the
 // server picks it back, with "tls: server selected unsupported protocol
-// version fb1a". Our vendored fork at re/mbs/mbs-native/third_party/utls
+// version fb1a". Our vendored fork at third_party/mbs-native/third_party/utls
 // patches pickTLSVersion to alias 0xfb1a → VersionTLS13. The replace
 // MUST live in the main module's go.mod — replace directives inside a
-// replaced module (re/mbs/mbs-native/go.mod) are ignored by the build.
+// replaced module (mbs-native/go.mod) are ignored by the build.
 // See docs/research/mbs-fb1a-utls-fork-future-work.md.
-replace github.com/refraction-networking/utls => ./re/mbs/mbs-native/third_party/utls
+replace github.com/refraction-networking/utls => ./third_party/mbs-native/third_party/utls

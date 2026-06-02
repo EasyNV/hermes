@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Dockerfile — production multi-stage build for all Go services.
 #
 # Parallel to Dockerfile.dev (which stays in place for the dev hot-reload loop).
@@ -39,11 +40,17 @@ WORKDIR /src
 # replace targets resolve. Other services don't import them, but copying these
 # files costs almost nothing and keeps the cache key identical across services.
 COPY go.mod go.sum ./
-COPY re/mbs/mautrix-meta-patched/go.mod re/mbs/mautrix-meta-patched/go.sum re/mbs/mautrix-meta-patched/
-COPY re/mbs/mbs-native/go.mod re/mbs/mbs-native/go.sum re/mbs/mbs-native/
-COPY re/mbs/mbs-native/third_party/utls/go.mod re/mbs/mbs-native/third_party/utls/go.sum re/mbs/mbs-native/third_party/utls/
+COPY third_party/mautrix-meta-patched/go.mod third_party/mautrix-meta-patched/go.sum third_party/mautrix-meta-patched/
+COPY third_party/mbs-native/go.mod third_party/mbs-native/go.sum third_party/mbs-native/
+COPY third_party/mbs-native/third_party/utls/go.mod third_party/mbs-native/third_party/utls/go.sum third_party/mbs-native/third_party/utls/
 
-RUN go mod download
+# Cache mounts persist the module + build cache across builds so a go.sum delta
+# (e.g. moving the replace targets to third_party/) does NOT force a cold re-fetch
+# of the entire transitive .mod graph. First build is cold (~minutes); subsequent
+# builds reuse the host-side BuildKit cache.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go mod download
 
 # ── Source layer (invalidates on any code change) ───────────────────────────
 COPY . .
@@ -58,7 +65,9 @@ ARG VERSION=dev
 
 RUN test -n "${SERVICE}" || (echo "ERROR: --build-arg SERVICE=<name> is required" >&2; exit 1)
 
-RUN CGO_ENABLED=0 GOOS=linux go build \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build \
         -trimpath \
         -ldflags="-s -w -X main.version=${VERSION}" \
         -o /out/app \
