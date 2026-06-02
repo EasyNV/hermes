@@ -441,6 +441,7 @@ func (h *Handler) persistBridgeSuccess(
 		UID:                  uid,
 		TenantID:             tenantID,
 		DisplayName:          success.DisplayName,
+		LoginEmail:           start.Email, // operator's login identifier; display-only
 		State:                "active",
 		PodID:                h.podID,
 		EncryptedAccessToken: encAT,

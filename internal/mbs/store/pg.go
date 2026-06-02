@@ -47,7 +47,7 @@ func (s *PgStore) ExistsSession(ctx context.Context, uid int64) (bool, error) {
 }
 
 const sessionCols = `
-    uid, tenant_id, display_name, state, pod_id,
+    uid, tenant_id, display_name, login_email, state, pod_id,
     access_token, secret, session_key, cookies, totp_secret_enc,
     machine_id, device_id, family_device_id,
     app_version, build_number, device_model, android_ver,
@@ -63,7 +63,7 @@ const sessionCols = `
 func (s *PgStore) CreateSession(ctx context.Context, r *SessionRow) error {
 	_, err := s.pool.Exec(ctx, `
         INSERT INTO mbs_sessions (
-            uid, tenant_id, display_name, state, pod_id,
+            uid, tenant_id, display_name, login_email, state, pod_id,
             access_token, secret, session_key, cookies, totp_secret_enc,
             machine_id, device_id, family_device_id,
             app_version, build_number, device_model, android_ver,
@@ -75,15 +75,15 @@ func (s *PgStore) CreateSession(ctx context.Context, r *SessionRow) error {
         ) VALUES (
             $1, $2, $3, $4, $5,
             $6, $7, $8, $9, $10,
-            $11, $12, $13,
-            $14, $15, $16, $17,
-            $18, $19, $20, $21, $22,
-            $23, $24, $25,
-            $26,
-            $27, $28, $29, $30,
-            $31, $32
+            $11, $12, $13, $14,
+            $15, $16, $17, $18,
+            $19, $20, $21, $22, $23,
+            $24, $25, $26,
+            $27,
+            $28, $29, $30, $31,
+            $32, $33
         )`,
-		r.UID, r.TenantID, r.DisplayName, r.State, r.PodID,
+		r.UID, r.TenantID, r.DisplayName, r.LoginEmail, r.State, r.PodID,
 		r.EncryptedAccessToken, r.EncryptedSecret, r.EncryptedSessionKey,
 		r.EncryptedCookies, r.EncryptedTOTPSecret,
 		r.MachineID, r.DeviceID, r.FamilyDeviceID,
@@ -703,7 +703,7 @@ func (s *PgStore) UpsertPhoneThread(ctx context.Context, row *PhoneThreadRow) er
 func scanSession(row pgx.Row) (*SessionRow, error) {
 	r := &SessionRow{}
 	err := row.Scan(
-		&r.UID, &r.TenantID, &r.DisplayName, &r.State, &r.PodID,
+		&r.UID, &r.TenantID, &r.DisplayName, &r.LoginEmail, &r.State, &r.PodID,
 		&r.EncryptedAccessToken, &r.EncryptedSecret, &r.EncryptedSessionKey,
 		&r.EncryptedCookies, &r.EncryptedTOTPSecret,
 		&r.MachineID, &r.DeviceID, &r.FamilyDeviceID,
@@ -729,7 +729,7 @@ func scanSessions(rows pgx.Rows) ([]*SessionRow, error) {
 	for rows.Next() {
 		r := &SessionRow{}
 		err := rows.Scan(
-			&r.UID, &r.TenantID, &r.DisplayName, &r.State, &r.PodID,
+			&r.UID, &r.TenantID, &r.DisplayName, &r.LoginEmail, &r.State, &r.PodID,
 			&r.EncryptedAccessToken, &r.EncryptedSecret, &r.EncryptedSessionKey,
 			&r.EncryptedCookies, &r.EncryptedTOTPSecret,
 			&r.MachineID, &r.DeviceID, &r.FamilyDeviceID,

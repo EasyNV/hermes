@@ -74,9 +74,19 @@ func writeMbsError(w http.ResponseWriter, statusCode int, code, message string) 
 // tenantId is optional from the client — chunk-1's forceTenantFromJWT
 // fills it from the JWT when empty and rejects mismatches.
 func (a *Adapter) listMbsSessions(w http.ResponseWriter, r *http.Request) {
+	// Accept both `state` (what the chunk-4 frontend client serializes via
+	// listMbsSessions params) and `stateFilter` (the original contract name).
+	// They were out of sync: the client sent `state`, the handler only read
+	// `stateFilter`, so the server-side filter was silently dropped and the
+	// campaign picker received burned/suspended sessions. `state` wins when
+	// both are present; empty/unknown → UNSPECIFIED → "no filter".
+	rawState := r.URL.Query().Get("state")
+	if rawState == "" {
+		rawState = r.URL.Query().Get("stateFilter")
+	}
 	req := &hermesv1.ListMbsSessionsRequest{
 		TenantId:    r.URL.Query().Get("tenantId"),
-		StateFilter: parseStateFilter(r.URL.Query().Get("stateFilter")),
+		StateFilter: parseStateFilter(rawState),
 		Page:        pagination(r),
 	}
 	resp, err := a.mbs.ListMbsSessions(r.Context(), req)

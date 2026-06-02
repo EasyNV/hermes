@@ -79,6 +79,7 @@ func sessionRowToProto(row *store.SessionRow, primary *store.AssetRow) *hermesv1
 		Uid:         row.UID,
 		TenantId:    row.TenantID,
 		DisplayName: row.DisplayName,
+		LoginEmail:  row.LoginEmail,
 		State:       dbStateToProto(row.State),
 		DeviceId:    row.DeviceID,
 		AppVersion:  row.AppVersion,

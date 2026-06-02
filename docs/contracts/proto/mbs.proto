@@ -225,6 +225,11 @@ message MbsSessionInfo {
 
   google.protobuf.Timestamp created_at = 10;
   google.protobuf.Timestamp updated_at = 11;
+
+  // Email/identifier the operator bridged this account with. Cleartext,
+  // display-only — lets the UI show "which account" instead of a bare uid.
+  // Empty for sessions bridged before 2026-06-02 until backfilled.
+  string login_email = 12;
 }
 
 message MbsAsset {

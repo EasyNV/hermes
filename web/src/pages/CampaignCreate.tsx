@@ -435,15 +435,18 @@ function StepSelectNumbers({
 }
 
 // StepSelectMbsSessions — chunk 10. Renders only when form.channel === 'mbs'.
-// Filter rules (D3 = show-disabled-with-tooltip):
-//   - Sessions in non-ACTIVE state are hidden entirely (no point picking
-//     a session you can't dispatch from).
-//   - Sessions in ACTIVE state with a primary asset are SHOWN.
-//   - Sessions where primaryAsset.wecAccountRegistered === false are
-//     SHOWN DISABLED with an explanatory tooltip — the WEC roundtrip
-//     hasn't completed so send-to-phone won't work.
-//   - Sessions with no primary asset or empty wecPhoneNumber are SHOWN
-//     DISABLED with a "no WEC phone available" hint.
+// Pickability gate (corrected 2026-06-02): a session is dispatchable when the
+// send path's actual requirements are met. The MBS send path
+// (internal/mbs/session/lightspeed.go) needs ONLY waba_id + page_id +
+// wec_mailbox_id on the primary asset — it does NOT use wec_phone_number.
+// The old gate blocked on wecPhoneNumber/wecAccountRegistered, which wrongly
+// disabled healthy accounts (e.g. one that had already sent live) whose WEC
+// phone field happened to be empty. wec_phone_number is now display-only.
+// Filter rules:
+//   - Non-ACTIVE sessions are excluded (state filter + belt-and-suspenders
+//     client guard below) — you can't dispatch from a burned/suspended one.
+//   - ACTIVE + primary asset has waba_id & page_id & wec_mailbox_id → PICKABLE.
+//   - Otherwise SHOWN DISABLED with the specific missing-field reason.
 function StepSelectMbsSessions({
   tenantId,
   selectedUids,
@@ -473,8 +476,8 @@ function StepSelectMbsSessions({
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
-          Select Meta Business Suite sessions to send from. Sessions without a registered WEC
-          phone are shown disabled.
+          Select Meta Business Suite sessions to send from. Only active sessions
+          with a linked WEC mailbox can be selected.
         </p>
         <span className="text-sm font-medium text-muted-foreground whitespace-nowrap">
           {formatNumber(selectedUids.length)} selected
@@ -490,16 +493,25 @@ function StepSelectMbsSessions({
           {sessions.map((s: MbsSession) => {
             const asset = s.primaryAsset
             const wecPhone = asset?.wecPhoneNumber ?? ''
-            const wecRegistered = asset?.wecAccountRegistered ?? false
-            // Pickability gate: must have a wec phone AND be wec-registered.
-            const disabled = !wecPhone || !wecRegistered
-            const reason = !asset
-              ? 'No primary asset linked yet'
-              : !wecPhone
-                ? 'No WEC phone number on this session'
-                : !wecRegistered
-                  ? 'WEC account not registered — verification pending'
-                  : ''
+            const wecMailboxId = asset?.wecMailboxId ?? ''
+            const wabaId = asset?.wabaId ?? ''
+            const pageId = asset?.pageId ?? ''
+            const isActive = s.state === 'MBS_SESSION_STATE_ACTIVE'
+            // Pickability gate mirrors the send path's real requirements
+            // (lightspeed.go): waba_id + page_id + wec_mailbox_id, on an
+            // ACTIVE session. wec_phone_number is NOT required to dispatch.
+            const disabled = !isActive || !asset || !wecMailboxId || !wabaId || !pageId
+            const reason = !isActive
+              ? 'Session is not active — cannot dispatch'
+              : !asset
+                ? 'No primary asset linked yet'
+                : !wabaId
+                  ? 'No WABA linked to this session'
+                  : !pageId
+                    ? 'No page linked to this session'
+                    : !wecMailboxId
+                      ? 'No WEC mailbox on this session — cannot route sends'
+                      : ''
             const checked = selectedSet.has(s.uid)
             return (
               <Card
@@ -541,9 +553,10 @@ function StepSelectMbsSessions({
                       </p>
                       <div className="flex gap-3 mt-2 text-xs text-muted-foreground flex-wrap">
                         <span>UID: {s.uid}</span>
+                        {s.loginEmail && <span>Email: {s.loginEmail}</span>}
                         {asset?.businessName && <span>Biz: {asset.businessName}</span>}
-                        <span className={wecRegistered ? 'text-green-600' : 'text-amber-600'}>
-                          WEC: {wecRegistered ? '✓' : '✗'}
+                        <span className={wecMailboxId ? 'text-green-600' : 'text-amber-600'}>
+                          Mailbox: {wecMailboxId ? '✓' : '✗'}
                         </span>
                       </div>
                       {disabled && reason && (

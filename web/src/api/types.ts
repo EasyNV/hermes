@@ -333,6 +333,10 @@ export interface MbsSession {
   cookieExpiresAt: string
   burnedAt: string         // empty unless state === BURNED
   burnedReason: string
+  // Email/identifier the operator bridged this account with. Display-only —
+  // lets the operator tell which Meta account a session row corresponds to.
+  // Empty for sessions bridged before 2026-06-02 until backfilled.
+  loginEmail?: string
   // Primary asset embedded inline by listMbsSessions / getMbsSessionStatus.
   // Added Stage F follow-up chunk 8 (2026-05-30) — campaign picker reads
   // wecPhoneNumber + wecAccountRegistered to decide pickability.

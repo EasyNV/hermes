@@ -12,6 +12,7 @@ type SessionRow struct {
 	UID         int64
 	TenantID    string
 	DisplayName string
+	LoginEmail  string // email/identifier the operator bridged with; display-only
 	State       string // active | suspended | burned | bridging
 
 	// ─── pod_id ownership (CAS-claimed; '' = unclaimed) ─────────────

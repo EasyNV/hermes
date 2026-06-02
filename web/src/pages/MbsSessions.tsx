@@ -307,6 +307,11 @@ export default function MbsSessions() {
                         <div className="font-mono text-xs">
                           <div>{s.uid}</div>
                           <div className="text-muted-foreground">{s.fbid || '—'}</div>
+                          {s.loginEmail && (
+                            <div className="text-muted-foreground font-sans mt-0.5">
+                              {s.loginEmail}
+                            </div>
+                          )}
                         </div>
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">
