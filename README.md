@@ -29,6 +29,22 @@ Multi-tenant WhatsApp automation platform. Manages bulk campaigns with anti-ban 
 
 ## Quick Start
 
+This repo uses **git submodules** for the two private MBS forks under
+`third_party/` (`mbs-native`, `mautrix-meta-patched`). Clone with them:
+
+```bash
+# Fresh clone — pull submodules in one step
+git clone --recurse-submodules git@github.com:EasyNV/hermes.git
+
+# Already cloned without --recurse-submodules? Initialize them:
+git submodule update --init --recursive
+```
+
+Builds (`go build`, Docker) read the submodule source directly via on-disk
+`replace` directives — no GOPRIVATE or build-time auth needed. Updating a fork
+is: commit inside `third_party/<fork>`, push, then bump the pointer in this repo
+(`git add third_party/<fork> && git commit`).
+
 ```bash
 # Start everything (infrastructure + all services + frontend)
 docker compose -f docker-compose.dev.yml up --build
