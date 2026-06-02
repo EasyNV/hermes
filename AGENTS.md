@@ -10,30 +10,39 @@
 
 ## Architecture
 
-8 microservices communicating via **gRPC** (sync) and **NATS JetStream** (async events):
+9 backend microservices (plus the `mbs-import` operator tool and `hermes-web` frontend) communicating via **gRPC** (sync) and **NATS JetStream** (async events):
 
 ```
 hermes-web (React SPA)
     ↕ gRPC-Web + WebSocket
 hermes-gateway (API + Auth + WS hub)
     ↕ gRPC
-┌────────────┬────────────┬────────────┬────────────┬────────────┬────────────┐
-│ hermes-wa  │ hermes-    │ hermes-    │ hermes-    │ hermes-    │ hermes-    │
-│ (sessions) │ campaign   │ inbox      │ contacts   │ proxy      │ notify     │
-└────────────┴────────────┴────────────┴────────────┴────────────┴────────────┘
+┌──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐
+│ hermes-  │ hermes-  │ hermes-  │ hermes-  │ hermes-  │ hermes-  │ hermes-  │
+│ wa       │ mbs      │ campaign │ inbox    │ contacts │ proxy    │ notify   │
+└──────────┴──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘
     ↕ NATS JetStream (async events between services)
 ```
 
 | Service | Responsibility | Proto File |
 |---|---|---|
-| `hermes-gateway` | API gateway, JWT auth, RBAC, WebSocket hub | `gateway.proto` |
-| `hermes-wa` | WhatsApp session management, message send/receive | `wa.proto` |
-| `hermes-campaign` | Campaign orchestration, templates, throttling | `campaign.proto` |
-| `hermes-inbox` | Conversation management, agent inbox, canned responses | `inbox.proto` |
+| `hermes-gateway` | API gateway, JWT auth, RBAC, WebSocket hub, REST adapter | `gateway.proto` |
+| `hermes-wa` | WhatsApp session management (whatsmeow), message send/receive | `wa.proto` |
+| `hermes-mbs` | Meta Business Suite sessions, bridge login, assets, native send, inbound poll/listen | `mbs.proto` |
+| `hermes-campaign` | Campaign orchestration, templates, throttling (WA + MBS) | `campaign.proto` |
+| `hermes-inbox` | Conversation management, agent inbox, canned responses (WA + MBS) | `inbox.proto` |
 | `hermes-contacts` | Contact CRUD, CSV import, ban checking | `contacts.proto` |
 | `hermes-proxy` | Proxy pool management, health checks, assignment | `proxy.proto` |
 | `hermes-notify` | Notification config and webhook/push dispatch | `notify.proto` |
 | `hermes-web` | React frontend (SPA) | — |
+| `mbs-import` | One-shot operator import tool (not a long-running service) | — |
+
+**Private submodules under `third_party/`** (clone with `--recurse-submodules`):
+`mbs-native` (native MBS/BizApp client, consumed by `hermes-mbs`) and
+`mautrix-meta-patched` (patched `go.mau.fi/mautrix-meta` for the bridge-login
+path). Wired via on-disk `replace` directives in `go.mod`. To change a fork:
+commit inside the submodule, push, then bump the pointer in this repo. See the
+root `README.md` "Submodules / local replacements" section.
 
 ---
 

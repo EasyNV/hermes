@@ -230,7 +230,53 @@ MBS sends use `MbsSendMessageRequest`:
 
 Phone sends resolve to a thread through cache or live BizInbox WhatsApp customer mutation before native send.
 
-Inbound listening is exposed through `HermesMbs.Listen` and NATS message events.
+### MBS inbound listening and thread attribution
+
+Lightspeed is pull-not-push for message bodies: the broker only returns an
+`/ls_resp` envelope in response to an `/ls_req`. Each MBS session runs a per-uid
+listener goroutine (`internal/mbs/session/listener.go`) that calls
+`SnapshotPoll("130")` against Meta's message store on a fixed `10s` interval and
+drains new message deltas. This poll loop is the **single authoritative inbound
+source**. The client's server-push `Inbox` channel carries
+receipts/typing/presence but is intentionally inert for message bodies — it
+cannot key an inbound message to a thread and previously produced mis-keyed
+"snowflake" conversations that raced the poll path on the global `mbs_mid`
+unique index.
+
+End-to-end inbound latency is the `≤10s` poll interval plus Meta's own
+replication lag from its live inbox into the db130 sync store (the variable
+component, outside Hermes' control). The interval is a hardcoded constant flagged
+for promotion to config if traffic warrants.
+
+Attribution is performed in `third_party/mbs-native/fb` (`ParseSnapshot` /
+`ParseSnapshotWithSelf`) and consumed by `parseSnapshotPoll`:
+
+- **Self/outbound detection.** The admin's messaging FBID (`SelfFBID`) is derived
+  by intersecting participant sets across *valid* thread blocks; degenerate
+  replication fragments (`<2` participants) are excluded. Messages authored by
+  self are outbound and dropped, not re-ingested as inbound.
+- **Self-FBID hint cache.** The derived self-FBID is cached per session (atomic,
+  survives reconnects) and re-fed as a hint, so single-thread polls — where self
+  cannot be derived by intersection — still classify direction correctly.
+- **Per-thread attribution.** Each message is keyed to its thread via an exact
+  `customerFBID → customer_id` index (customer FBID = first participant scalar
+  after each thread's `entity_id` anchor; `entity_id` substrings inside media
+  URLs are excluded). First-match participant scanning previously scattered
+  messages across threads. Ambiguous senders are quarantined (not emitted)
+  rather than filed into the wrong thread; the next poll re-attempts.
+
+Inbound persistence is idempotent on the global `mbs_mid` unique index.
+`CreateMbsMessage` reports `wasInserted`; on a re-poll of an already-seen message
+the handler short-circuits before re-stamping `last_message_at` or re-firing a
+notification, so conversation ordering reflects real message time rather than the
+poll time. The conversation upsert (`FindOrCreateMbsConversation`) likewise does
+not bump `last_message_at` on conflict.
+
+Inbound is also fanned out live to the browser: `hermes-mbs` publishes
+`hermes.mbs.message.inbound.<tenant>` and the gateway WebSocket hub forwards it as
+an `mbs_new_message` event.
+
+Inbound listening is also exposed programmatically through `HermesMbs.Listen`.
 
 ## Campaign architecture
 
@@ -268,7 +314,27 @@ schema_migrations_notify
 
 Production compose uses file-backed secrets. The MBS data encryption key is mounted into the `mbs` container and used for encrypted bridge/session material. Losing the DEK makes encrypted MBS rows unrecoverable.
 
-## Deployment architecture
+### Inbox conversation keying (WA + MBS)
+
+The `inbox` service stores conversations and messages for both channels in a
+shared schema. MBS conversations are keyed on
+`(workspace_id, mbs_session_uid, mbs_thread_id)`; the resolver
+(`FindOrCreateMbsConversation`) upserts on that key so all replies in a Meta
+thread land in one conversation. Messages carry a global `mbs_mid` unique index
+for cross-channel idempotency.
+
+Nullable UUID columns (e.g. `wa_number_id`) must be cast to text before a string
+`COALESCE` fallback — `COALESCE(uuid_col, '')` makes Postgres coerce `''` to
+`uuid` at **plan time** and throws `invalid input syntax for type uuid: ""` for
+every row regardless of value. The correct form is `COALESCE(uuid_col::text,
+'')`. This pattern recurs across the conversation upsert/lookup *and* the
+list/detail read queries; fix all siblings together. A single unguarded
+occurrence in `ListConversations` 500s the entire conversation list (WA and MBS
+both), surfacing as a blank inbox rather than an obvious error.
+
+`RemoveSession` hard-deletes an MBS session and cascades
+(`mbs_session_assets`, `mbs_phone_threads` are `ON DELETE CASCADE`); `BurnSession`
+soft-disables and keeps the row for audit.
 
 ### Development compose
 
