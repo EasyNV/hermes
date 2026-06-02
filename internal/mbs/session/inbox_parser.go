@@ -96,11 +96,11 @@ func parseInboxItem(item *client.InboxItem, uid int64) []*InboundDelta {
 //
 // Deduplication remains the handler's job (idempotent CreateMbsMessage ON
 // CONFLICT mbs_mid), so the snapshot replaying old history is harmless.
-func parseSnapshotPoll(resp *fb.LsResp, uid int64) []*InboundDelta {
+func parseSnapshotPoll(resp *fb.LsResp, uid int64, hintSelf uint64) ([]*InboundDelta, uint64) {
 	if resp == nil || len(resp.Payload) == 0 {
-		return nil
+		return nil, hintSelf
 	}
-	ps := fb.ParseSnapshot(resp.Payload)
+	ps := fb.ParseSnapshotWithSelf(resp.Payload, hintSelf)
 	now := time.Now()
 	out := make([]*InboundDelta, 0, len(ps.Messages))
 	for _, m := range ps.Messages {
@@ -108,22 +108,29 @@ func parseSnapshotPoll(resp *fb.LsResp, uid int64) []*InboundDelta {
 		if m.MID == "" || m.Body == "" {
 			continue
 		}
-		// Drop our own outbound echoes. When SelfFBID is known (≥2 thread
-		// blocks → unambiguous intersection), a message authored by self is
-		// outbound and must not be published as inbound.
+		// Drop our own outbound echoes. SelfFBID is known when a
+		// multi-thread poll derived it OR a cached hint was supplied; a
+		// message authored by self is outbound and must not be published as
+		// inbound. (The outbound consumer owns those rows.)
 		if ps.SelfFBID != 0 && m.SenderFBID == ps.SelfFBID {
 			continue
 		}
-		// Join: resolve the author's FBID to its thread's customer_id.
+		// Authoritative join: resolve the author's FBID to its thread's
+		// customer_id via the exact customer-FBID index. A miss returns ""
+		// — the message is QUARANTINED (not emitted) rather than guessed
+		// into the wrong thread. This is deliberate: wrong-inbox leakage is
+		// worse than a brief delay, and the snapshot is re-polled every 10s
+		// so a quarantined message re-attempts once the index stabilises.
+		//
+		// Single-thread cold start (no self hint yet): the customer's FBID
+		// is parts[0] of the lone block (forward-window invariant), so
+		// customer messages still resolve; only self-echoes — which are not
+		// in the index — quarantine. That is the correct outcome; we do NOT
+		// fall back to "assign the lone thread to everything", which would
+		// re-ingest our own outbound as inbound.
 		threadID := ps.ThreadIDForSender(m.SenderFBID)
-		// Single-thread fallback: SelfFBID couldn't be derived (only one
-		// thread block). We can't positively distinguish self from customer
-		// by intersection. Assign the lone thread's customer_id so the
-		// message still lands; the handler's mbs_mid idempotency + the
-		// outbound consumer owning outbound rows guard against a self-echo
-		// being double-counted. (Documented gap G-A/single-thread.)
-		if threadID == "" && ps.SelfFBID == 0 && len(ps.Threads) == 1 {
-			threadID = ps.Threads[0].CustomerID
+		if threadID == "" {
+			continue
 		}
 		out = append(out, &InboundDelta{
 			UID:        uid,
@@ -135,5 +142,5 @@ func parseSnapshotPoll(resp *fb.LsResp, uid int64) []*InboundDelta {
 			Raw:        nil, // intentionally nil for poll batches
 		})
 	}
-	return out
+	return out, ps.SelfFBID
 }

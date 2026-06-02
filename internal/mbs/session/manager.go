@@ -30,6 +30,15 @@ type muxedSession struct {
 	listenerCancel context.CancelFunc   // nil until connected; guarded by mu
 
 	bc *broadcaster // shared across the uid's lifetime; lazily created on first Subscribe
+
+	// selfFBID caches the session's admin/self messaging FBID once any poll
+	// derives it (from a multi-thread snapshot). It survives listener
+	// restarts (reconnects) because muxedSession outlives the listener. A
+	// later single-thread poll — where self can't be derived by intersection
+	// — reads this hint so outbound-echo dropping and customer-index
+	// exclusion keep working. Atomic: the listener goroutine writes it; a
+	// freshly-spawned reconnect listener reads it. (Closes TR-G2.)
+	selfFBID atomic.Uint64
 }
 
 // manager is the concrete Manager implementation. Construct via NewManager.
@@ -310,7 +319,7 @@ func (m *manager) connect(ctx context.Context, ms *muxedSession) (*Connected, er
 	ms.listenerCtx = lctx
 	ms.listenerCancel = lcancel
 	ms.client = c // retained for Disconnect → Close
-	lis := newListener(uid, row.TenantID, creds.PageID, creds.WECMailboxID, c, ms.bc, m.onDelta, m.log)
+	lis := newListener(uid, row.TenantID, creds.PageID, creds.WECMailboxID, c, ms.bc, m.onDelta, &ms.selfFBID, m.log)
 	lis.onDead = func() { m.reconnectAsync(uid) }
 	go lis.run(lctx)
 

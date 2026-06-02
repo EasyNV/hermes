@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"mbs-native/client"
@@ -51,10 +52,16 @@ type listener struct {
 	bc        *broadcaster
 	onDelta   DeltaHook // nil-safe; called exactly once per delta if set
 	onDead    func()    // nil-safe; called at most once when the client dies, to trigger reconnect
-	log       zerolog.Logger
+	// selfFBID is a SHARED pointer to the muxedSession's self-FBID cache. The
+	// listener reads it as a hint for single-thread polls and writes back
+	// whenever a multi-thread poll derives a fresh value. Shared (not owned)
+	// so the cache survives this listener and feeds the next reconnect. May
+	// be nil in unit tests that don't exercise the cache.
+	selfFBID *atomic.Uint64
+	log      zerolog.Logger
 }
 
-func newListener(uid int64, tenantID, pageID, mailboxID string, c clientI, bc *broadcaster, onDelta DeltaHook, log zerolog.Logger) *listener {
+func newListener(uid int64, tenantID, pageID, mailboxID string, c clientI, bc *broadcaster, onDelta DeltaHook, selfFBID *atomic.Uint64, log zerolog.Logger) *listener {
 	return &listener{
 		uid:       uid,
 		tenantID:  tenantID,
@@ -63,6 +70,7 @@ func newListener(uid int64, tenantID, pageID, mailboxID string, c clientI, bc *b
 		client:    c,
 		bc:        bc,
 		onDelta:   onDelta,
+		selfFBID:  selfFBID,
 		log:       log.With().Int64("uid", uid).Logger(),
 	}
 }
@@ -179,7 +187,18 @@ func (l *listener) poll(parent context.Context) {
 		dumpPollPayloadOnce(l.uid, resp.Payload, l.log)
 		dumpThreadsSnapshotOnce(pollCtx, l, l.log)
 	}
-	deltas := parseSnapshotPoll(resp, l.uid)
+	// Read the cached self-FBID hint (0 if not yet learned) so a
+	// single-thread poll can still drop outbound echoes. parseSnapshotPoll
+	// returns the self-FBID it derived/used so we can refresh the cache for
+	// the next poll (and for a reconnect listener that reuses this cache).
+	var hint uint64
+	if l.selfFBID != nil {
+		hint = l.selfFBID.Load()
+	}
+	deltas, usedSelf := parseSnapshotPoll(resp, l.uid, hint)
+	if l.selfFBID != nil && usedSelf != 0 && usedSelf != hint {
+		l.selfFBID.Store(usedSelf)
+	}
 	l.emit(deltas)
 }
 

@@ -94,7 +94,7 @@ func TestListener_OnDeltaFiresOncePerDelta_RegardlessOfSubscribers(t *testing.T)
 
 	// Build a listener directly with the hook + tenant.
 	fc := newFakeClient()
-	l := newListener(123, "tenant-X", "page-X", "mbox-X", fc, bc, hook, zerolog.Nop())
+	l := newListener(123, "tenant-X", "page-X", "mbox-X", fc, bc, hook, nil, zerolog.Nop())
 
 	lctx, lcancel := context.WithCancel(context.Background())
 	defer lcancel()
@@ -165,7 +165,7 @@ func TestListener_OnDeltaNil_NoFiring(t *testing.T) {
 	defer unsub()
 
 	fc := newFakeClient()
-	l := newListener(7, "tenant-X", "", "", fc, bc, nil, zerolog.Nop())
+	l := newListener(7, "tenant-X", "", "", fc, bc, nil, nil, zerolog.Nop())
 
 	d := &InboundDelta{UID: 7, MID: "mid.$x", Text: "x"}
 	l.emit([]*InboundDelta{d})
@@ -202,7 +202,7 @@ func TestListener_OnDeltaPanic_Recovers(t *testing.T) {
 	ch, unsub := bc.subscribe()
 	defer unsub()
 	fc := newFakeClient()
-	l := newListener(7, "tenant-Y", "", "", fc, bc, hook, zerolog.Nop())
+	l := newListener(7, "tenant-Y", "", "", fc, bc, hook, nil, zerolog.Nop())
 
 	// Mix a poisonous delta with healthy ones. Listener must not
 	// crash; downstream subscriber must still receive ALL deltas
@@ -303,7 +303,7 @@ func TestManager_OnDelta_PluggedThroughOpts(t *testing.T) {
 	ms := m.sessions[uid]
 	m.sessionsMu.RUnlock()
 
-	probe := newListener(uid, row.TenantID, "", "", ff.get(uid), ms.bc, m.onDelta, zerolog.Nop())
+	probe := newListener(uid, row.TenantID, "", "", ff.get(uid), ms.bc, m.onDelta, nil, zerolog.Nop())
 	probe.emit([]*InboundDelta{{UID: uid, MID: "mid.$opts", Text: "wired"}})
 
 	// Cleanup.
@@ -332,7 +332,7 @@ func TestListener_PollDetectsDeadClient_FiresOnDead(t *testing.T) {
 	defer unsub()
 
 	fc := newFakeClient()
-	l := newListener(9, "tenant-Z", "", "", fc, bc, nil, zerolog.Nop())
+	l := newListener(9, "tenant-Z", "", "", fc, bc, nil, nil, zerolog.Nop())
 
 	var onDeadFired atomic.Int64
 	done := make(chan struct{})

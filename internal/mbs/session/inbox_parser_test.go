@@ -50,14 +50,14 @@ func TestParseInboxItem_MessageBearingItem_EmitsNothing(t *testing.T) {
 }
 
 func TestParseSnapshotPoll_NilResp(t *testing.T) {
-	got := parseSnapshotPoll(nil, 100)
+	got, _ := parseSnapshotPoll(nil, 100, 0)
 	if got != nil {
 		t.Errorf("nil resp should yield nil, got %+v", got)
 	}
 }
 
 func TestParseSnapshotPoll_EmptyPayload(t *testing.T) {
-	got := parseSnapshotPoll(&fb.LsResp{}, 100)
+	got, _ := parseSnapshotPoll(&fb.LsResp{}, 100, 0)
 	if got != nil {
 		t.Errorf("empty payload should yield nil, got %+v", got)
 	}
@@ -69,7 +69,7 @@ func TestParseSnapshotPoll_FiltersEmptyRecords(t *testing.T) {
 	// get empty noise records. Pin by passing payload that contains
 	// no `mid.$` markers; we return zero-length deltas.
 	resp := &fb.LsResp{Payload: []byte("opaque non-message bytes")}
-	got := parseSnapshotPoll(resp, 100)
+	got, _ := parseSnapshotPoll(resp, 100, 0)
 	if len(got) != 0 {
 		t.Errorf("non-message payload should yield zero deltas, got %d: %+v", len(got), got)
 	}

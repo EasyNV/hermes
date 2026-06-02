@@ -21,7 +21,7 @@ func TestParseSnapshotPoll_LiveFixture(t *testing.T) {
 		t.Skipf("live fixture unavailable: %v", err)
 	}
 
-	deltas := parseSnapshotPoll(&fb.LsResp{Payload: raw}, 61590752691262)
+	deltas, _ := parseSnapshotPoll(&fb.LsResp{Payload: raw}, 61590752691262, 0)
 
 	const customerThread = "1127921160404565"
 	const customerFBID uint64 = 2255842320809130
