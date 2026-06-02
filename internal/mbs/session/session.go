@@ -104,6 +104,7 @@ type InboundDelta struct {
 	ThreadID      string         // OTID (19-digit) from FB payload
 	MID           string         // server-assigned, "mid.$cAAA..."
 	SenderPhone   string         // chunk 3: empty (filled by handler)
+	SenderFBID    uint64         // messaging FBID of the author (snapshot poll path)
 	SenderName    string         // display name from FB payload
 	SenderURL     string         // fb://profile/<id>
 	Text          string         // message body; empty for non-message events

@@ -20,6 +20,7 @@ import (
 
 type fakeStore struct {
 	getWorkspaceIDForMbsUid func(ctx context.Context, uid int64) (string, string, error)
+	getPhoneByMbsThread     func(ctx context.Context, uid int64, threadID string) (string, error)
 	findContactByPhone      func(ctx context.Context, phone string) (*handler.ContactRow, string, error)
 	autoCreateContact       func(ctx context.Context, tenantID, phone, name string) (*handler.ContactRow, error)
 	findOrCreateMbsConv     func(ctx context.Context, ws, contact, sessUID, threadID, pageID string) (*handler.ConversationRow, bool, error)
@@ -49,6 +50,13 @@ func (f *fakeStore) GetWorkspaceIDForMbsUid(ctx context.Context, uid int64) (str
 		return f.getWorkspaceIDForMbsUid(ctx, uid)
 	}
 	return "", "", handler.ErrNotFound
+}
+
+func (f *fakeStore) GetPhoneByMbsThread(ctx context.Context, uid int64, threadID string) (string, error) {
+	if f.getPhoneByMbsThread != nil {
+		return f.getPhoneByMbsThread(ctx, uid, threadID)
+	}
+	return "", handler.ErrNotFound
 }
 
 func (f *fakeStore) FindContactByPhone(ctx context.Context, phone string) (*handler.ContactRow, string, error) {
@@ -262,6 +270,64 @@ func TestProcessMbsInbound_HappyPath_RealPhone(t *testing.T) {
 	}
 	if fs.lastMessageText != "hello" {
 		t.Errorf("preview: got %q, want %q", fs.lastMessageText, "hello")
+	}
+}
+
+// Enrichment: inbound with EMPTY sender_phone but a known thread_id should
+// reverse-resolve the real customer phone from mbs_phone_threads, so the
+// contact uses the real phone (unifying with outbound) instead of the
+// synthetic mbs:thread:<id> slug.
+func TestProcessMbsInbound_EnrichesPhoneFromThread(t *testing.T) {
+	fs := &fakeStore{
+		getWorkspaceIDForMbsUid: func(_ context.Context, _ int64) (string, string, error) {
+			return "ws-1", "tenant-1", nil
+		},
+		getPhoneByMbsThread: func(_ context.Context, uid int64, threadID string) (string, error) {
+			if uid != 999 || threadID != "1127921160404565" {
+				t.Errorf("reverse lookup args: uid=%d thread=%q", uid, threadID)
+			}
+			return "6281290928464", nil
+		},
+		// findContactByPhone default → ErrNotFound → AutoCreate captures phone.
+	}
+	// Empty sender_phone — the mbs publisher never fills it for inbound.
+	ev := mkInboundEvent(999, "tenant-1", "1127921160404565", "mid.ENR", "", "halo gan")
+
+	if ok := processMbsInbound(context.Background(), fs, nil, silentLogger(), ev); !ok {
+		t.Fatal("expected ack, got nak")
+	}
+
+	if fs.autoCreatedPhone != "6281290928464" {
+		t.Errorf("autoCreate phone: got %q, want real phone 6281290928464 (not slug)", fs.autoCreatedPhone)
+	}
+	if fs.autoCreatedName != "" {
+		t.Errorf("autoCreate name: got %q, want empty (real phone path)", fs.autoCreatedName)
+	}
+	if fs.convArgs.threadID != "1127921160404565" {
+		t.Errorf("conv thread_id: got %q, want customer_id", fs.convArgs.threadID)
+	}
+}
+
+// Enrichment miss: empty sender_phone AND no mbs_phone_threads row → fall
+// back to the synthetic slug (customer-first thread; phone fills later).
+func TestProcessMbsInbound_NoThreadMapping_FallsBackToSlug(t *testing.T) {
+	fs := &fakeStore{
+		getWorkspaceIDForMbsUid: func(_ context.Context, _ int64) (string, string, error) {
+			return "ws-1", "tenant-1", nil
+		},
+		// getPhoneByMbsThread default → ErrNotFound → slug fallback.
+	}
+	ev := mkInboundEvent(999, "tenant-1", "7467234173890026394", "mid.SLG", "", "hi")
+
+	if ok := processMbsInbound(context.Background(), fs, nil, silentLogger(), ev); !ok {
+		t.Fatal("expected ack, got nak")
+	}
+
+	if fs.autoCreatedPhone != "mbs:thread:7467234173890026394" {
+		t.Errorf("autoCreate lookup key: got %q, want synthetic slug", fs.autoCreatedPhone)
+	}
+	if fs.autoCreatedName == "" {
+		t.Error("expected a synthetic display name for slug contact")
 	}
 }
 

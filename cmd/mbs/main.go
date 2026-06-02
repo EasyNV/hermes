@@ -184,6 +184,16 @@ func main() {
 			if d == nil || d.Text == "" {
 				return
 			}
+			// Diagnostic: surface the resolved thread_id + author FBID so we
+			// can confirm the snapshot join (senderFBID → customer_id) at
+			// runtime. Debug-level — quiet in prod.
+			log.Debug().
+				Int64("uid", d.UID).
+				Str("mid", d.MID).
+				Str("thread_id", d.ThreadID).
+				Uint64("sender_fbid", d.SenderFBID).
+				Int("text_len", len(d.Text)).
+				Msg("mbs inbound delta → publishing")
 			pub.PublishInboundMessage(
 				d.UID, d.TenantID, d.PageID, d.MailboxID, d.ThreadID,
 				d.MID, d.SenderPhone, d.Text, d.MetaTimestamp,

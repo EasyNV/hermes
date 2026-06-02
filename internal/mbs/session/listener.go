@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"os"
+	"sync"
 	"time"
 
 	"mbs-native/client"
@@ -140,8 +142,67 @@ func (l *listener) poll(parent context.Context) {
 		l.log.Warn().Err(err).Msg("listener: snapshot poll failed")
 		return
 	}
+	// Diagnostic capture (env-gated, one-shot per process): dump the raw
+	// db130 (messages) payload AND a db205 (threads) snapshot so we can
+	// cross-reference and pin the real thread_key + customer identity.
+	// Removed once inbound thread-keying is settled.
+	if resp != nil && len(resp.Payload) > 0 {
+		dumpPollPayloadOnce(l.uid, resp.Payload, l.log)
+		dumpThreadsSnapshotOnce(pollCtx, l, l.log)
+	}
 	deltas := parseSnapshotPoll(resp, l.uid)
 	l.emit(deltas)
+}
+
+var (
+	pollDumpDone    sync.Once
+	threadsDumpDone sync.Once
+)
+
+// dumpThreadsSnapshotOnce fires a one-shot SnapshotPoll("205") (threads
+// DB) and writes its raw payload next to the db130 dump, suffixed
+// ".threads". Env-gated on MBS_POLL_DUMP_PATH like the db130 dump.
+func dumpThreadsSnapshotOnce(ctx context.Context, l *listener, log zerolog.Logger) {
+	path := os.Getenv("MBS_POLL_DUMP_PATH")
+	if path == "" {
+		return
+	}
+	threadsDumpDone.Do(func() {
+		tResp, err := l.client.SnapshotPoll(ctx, "205")
+		if err != nil {
+			log.Warn().Err(err).Msg("listener: db205 threads poll failed")
+			return
+		}
+		if tResp == nil || len(tResp.Payload) == 0 {
+			log.Warn().Msg("listener: db205 threads poll empty")
+			return
+		}
+		tp := path + ".threads"
+		if err := os.WriteFile(tp, tResp.Payload, 0o600); err != nil {
+			log.Warn().Err(err).Str("path", tp).Msg("listener: threads dump failed")
+			return
+		}
+		log.Info().Int64("uid", l.uid).Int("bytes", len(tResp.Payload)).Str("path", tp).
+			Msg("listener: dumped raw db205 threads payload")
+	})
+}
+
+// dumpPollPayloadOnce writes the first non-empty poll payload to
+// MBS_POLL_DUMP_PATH (if set) exactly once per process. No-op when the
+// env var is unset. Best-effort: failures are logged, never fatal.
+func dumpPollPayloadOnce(uid int64, payload []byte, log zerolog.Logger) {
+	path := os.Getenv("MBS_POLL_DUMP_PATH")
+	if path == "" {
+		return
+	}
+	pollDumpDone.Do(func() {
+		if err := os.WriteFile(path, payload, 0o600); err != nil {
+			log.Warn().Err(err).Str("path", path).Msg("listener: poll dump failed")
+			return
+		}
+		log.Info().Int64("uid", uid).Int("bytes", len(payload)).Str("path", path).
+			Msg("listener: dumped raw db130 poll payload")
+	})
 }
 
 // stubInboxItem is a sentinel for tests that want to drive deltas

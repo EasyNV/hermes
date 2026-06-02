@@ -427,6 +427,21 @@ func processMbsInbound(
 		return true
 	}
 
+	// Un-keyable guard: the conversation is keyed on (workspace, uid,
+	// thread_id) and the synthetic contact slug needs a stable id too.
+	// When BOTH thread_id and sender_phone are empty there is no way to
+	// key the conversation — this happens for non-message deltas or a
+	// payload the extractor couldn't resolve. ACK-drop (return true)
+	// rather than NAK: retrying can't conjure a key, and a NAK loop
+	// pins the consumer redelivering the same un-keyable event forever.
+	if event.ThreadId == "" && strings.TrimPrefix(event.SenderPhone, "+") == "" {
+		log.Warn().
+			Int64("uid", event.Uid).
+			Str("mid", event.Mid).
+			Msg("MBS inbound: no thread_id and no sender_phone — un-keyable, dropping")
+		return true
+	}
+
 	// 1. Resolve workspace from MBS uid (joins mbs_sessions ↔ workspaces).
 	workspaceID, resolvedTenantID, err := store.GetWorkspaceIDForMbsUid(ctx, event.Uid)
 	if err != nil {
@@ -442,12 +457,23 @@ func processMbsInbound(
 
 	// 2. Resolve or auto-create contact.
 	senderPhone := strings.TrimPrefix(event.SenderPhone, "+")
+	// Identity enrichment: mbs publishes no sender_phone for inbound
+	// (the snapshot payload doesn't carry it), but the send path recorded
+	// (uid, thread_id) -> phone in mbs_phone_threads. Reverse-resolve it so
+	// the contact shows the real customer phone and UNIFIES with any
+	// outbound conversation, instead of a synthetic mbs:thread:<id> slug.
+	if senderPhone == "" && event.ThreadId != "" {
+		if phone, perr := store.GetPhoneByMbsThread(ctx, event.Uid, event.ThreadId); perr == nil && phone != "" {
+			senderPhone = strings.TrimPrefix(phone, "+")
+		}
+	}
 	var (
 		lookupKey string
 		autoName  string
 	)
 	if senderPhone == "" {
-		// Synthetic stable slug per MBS thread.
+		// Synthetic stable slug per MBS thread (customer-first thread the
+		// send path never populated — phone fills in on first outbound).
 		lookupKey = "mbs:thread:" + event.ThreadId
 		tail := event.ThreadId
 		if len(tail) > 8 {
@@ -483,8 +509,28 @@ func processMbsInbound(
 
 	// 3. Find or create MBS conversation.
 	uidStr := strconv.FormatInt(event.Uid, 10)
+	// Defensive guard + diagnostic: the conversation upsert binds
+	// workspace_id and contact_id as NOT-NULL uuid columns. If either is
+	// empty we'd hit "invalid input syntax for type uuid" and NAK-loop
+	// forever. Surface the exact runtime values and ACK-drop instead.
+	contactID := ""
+	if contact != nil {
+		contactID = contact.ID
+	}
+	if workspaceID == "" || contactID == "" {
+		log.Error().
+			Int64("uid", event.Uid).
+			Str("thread_id", event.ThreadId).
+			Str("workspace_id", workspaceID).
+			Str("contact_id", contactID).
+			Str("sender_phone", senderPhone).
+			Str("lookup_key", lookupKey).
+			Bool("contact_nil", contact == nil).
+			Msg("MBS inbound: empty workspace_id or contact_id before upsert — dropping")
+		return true
+	}
 	conv, _, err := store.FindOrCreateMbsConversation(
-		ctx, workspaceID, contact.ID, uidStr, event.ThreadId, event.PageId,
+		ctx, workspaceID, contactID, uidStr, event.ThreadId, event.PageId,
 	)
 	if err != nil {
 		log.Error().Err(err).

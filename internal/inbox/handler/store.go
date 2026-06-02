@@ -163,6 +163,7 @@ type Store interface {
 	FindContactByPhone(ctx context.Context, phone string) (*ContactRow, string, error) // returns contact + tenantID
 	GetWorkspaceIDForWaNumber(ctx context.Context, waNumberID string) (string, string, error) // returns workspaceID, tenantID
 	GetWorkspaceIDForMbsUid(ctx context.Context, uid int64) (string, string, error) // returns workspaceID, tenantID for an MBS session
+	GetPhoneByMbsThread(ctx context.Context, uid int64, threadID string) (string, error) // reverse mbs_phone_threads lookup: (uid, thread_id) -> phone
 	AutoCreateContact(ctx context.Context, tenantID, phone, name string) (*ContactRow, error) // auto-create from inbound message
 	ClearAllConversations(ctx context.Context, workspaceID string) (int64, error) // delete all conversations + messages in workspace
 
@@ -637,7 +638,7 @@ func (s *PgStore) FindOrCreateConversation(ctx context.Context, workspaceID, con
 		VALUES ($1, $2, $3, $4, 'wa', 'unassigned', now())
 		ON CONFLICT (workspace_id, contact_id, wa_number_id) WHERE channel = 'wa'
 		DO UPDATE SET last_message_at = now()
-		RETURNING id, workspace_id, contact_id, COALESCE(wa_number_id, ''), assigned_to,
+		RETURNING id, workspace_id, contact_id, COALESCE(wa_number_id::text, ''), assigned_to,
 		          status, last_message_at, campaign_id, first_response_time_secs, created_at,
 		          COALESCE(channel, 'wa'),
 		          COALESCE(mbs_session_uid, ''),
@@ -706,7 +707,7 @@ func (s *PgStore) FindOrCreateMbsConversation(
 		DO UPDATE SET last_message_at = now(),
 		              mbs_page_id = COALESCE(NULLIF(EXCLUDED.mbs_page_id, ''), conversations.mbs_page_id)
 		RETURNING id, workspace_id, contact_id,
-		          COALESCE(wa_number_id, ''), assigned_to,
+		          COALESCE(wa_number_id::text, ''), assigned_to,
 		          status, last_message_at, campaign_id,
 		          first_response_time_secs, created_at,
 		          COALESCE(channel, 'mbs'),
@@ -944,9 +945,37 @@ func (s *PgStore) GetWorkspaceIDForMbsUid(ctx context.Context, uid int64) (strin
 	return workspaceID, tenantID, nil
 }
 
-// ---------------------------------------------------------------------------
-// Canned Responses
-// ---------------------------------------------------------------------------
+// GetPhoneByMbsThread reverses the send-path mapping: given a resolved
+// (uid, thread_id), return the customer phone (E.164 sans +). The send
+// path (mbs-native ResolvePhone → UpsertPhoneThread) writes
+// mbs_phone_threads(uid, page_id, phone, thread_id, ...); here we read it
+// back to give an inbound message its real contact identity instead of a
+// synthetic mbs:thread:<id> slug.
+//
+// Same shared hermes DB as GetWorkspaceIDForMbsUid — in-process, no RPC.
+// thread_id is unique per (uid, customer) so we don't need page_id here.
+// Returns ErrNotFound when the thread was never populated by an outbound
+// (customer-first conversation) — caller falls back to the synthetic slug.
+func (s *PgStore) GetPhoneByMbsThread(ctx context.Context, uid int64, threadID string) (string, error) {
+	if threadID == "" {
+		return "", ErrNotFound
+	}
+	var phone string
+	err := s.pool.QueryRow(ctx, `
+		SELECT phone
+		FROM mbs_phone_threads
+		WHERE uid = $1 AND thread_id = $2
+		ORDER BY last_send_at DESC NULLS LAST
+		LIMIT 1`, uid, threadID,
+	).Scan(&phone)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("getting phone for mbs thread: %w", err)
+	}
+	return phone, nil
+}
 
 func (s *PgStore) CreateCannedResponse(ctx context.Context, workspaceID, shortcut, body string, createdBy *string) (*CannedResponseRow, error) {
 	r := &CannedResponseRow{}

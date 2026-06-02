@@ -350,6 +350,8 @@ services:
       MBS_BRIDGE_MAX_CONCURRENT: ${MBS_BRIDGE_MAX_CONCURRENT:-10}
       MBS_STREAM_REPLICAS: ${MBS_STREAM_REPLICAS:-1}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Diagnostic one-shot raw poll-payload dump (empty = disabled).
+      MBS_POLL_DUMP_PATH: ${MBS_POLL_DUMP_PATH:-}
     depends_on:
       postgres:
         condition: service_healthy
