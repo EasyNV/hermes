@@ -62,6 +62,13 @@ service HermesMbs {
   // future sends until re-bridged.
   rpc BurnSession(BurnMbsSessionRequest) returns (BurnMbsSessionResponse);
 
+  // Permanently remove a session: hard-delete the mbs_sessions row and
+  // cascade its assets + phone-thread cache. Unlike BurnSession (which
+  // keeps the row for audit), this leaves NO trace. Tears down any live
+  // connection first. Reserved for operator-initiated cleanup (wrong
+  // account / GDPR / test teardown).
+  rpc RemoveSession(RemoveMbsSessionRequest) returns (RemoveMbsSessionResponse);
+
   // ─── Phone resolution ─────────────────────────────────────────
 
   // Resolve a phone number to a thread_id (customer_id). Cheap: uses
@@ -285,6 +292,16 @@ message BurnMbsSessionRequest {
 
 message BurnMbsSessionResponse {
   MbsSessionInfo session = 1;
+}
+
+message RemoveMbsSessionRequest {
+  int64 uid = 1;
+}
+
+message RemoveMbsSessionResponse {
+  // Echoes the removed uid for client-side reconciliation. The row no
+  // longer exists, so there is no session to return.
+  int64 uid = 1;
 }
 
 

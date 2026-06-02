@@ -428,6 +428,97 @@ func TestBurnSession_MissingUID(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// RemoveSession
+// ─────────────────────────────────────────────────────────────────────
+
+func TestRemoveSession_HappyPath(t *testing.T) {
+	h, st, pub, mgr := newLifecycleHandler(t)
+	seedActiveSession(t, st, 100, "tenant-A")
+
+	resp, err := h.RemoveSession(ctxWith("tenant-A"),
+		&hermesv1.RemoveMbsSessionRequest{Uid: 100})
+	if err != nil {
+		t.Fatalf("RemoveSession: %v", err)
+	}
+	if resp.Uid != 100 {
+		t.Errorf("resp uid: got %d want 100", resp.Uid)
+	}
+
+	// Side effects:
+	// 1. Manager.Disconnect called (tear down before delete).
+	if mgr.disconnectCalls.Load() != 1 {
+		t.Errorf("Disconnect calls: got %d want 1", mgr.disconnectCalls.Load())
+	}
+	// 2. Row is GONE from the store (hard delete, not soft-burn).
+	if _, err := st.GetSession(context.Background(), 100); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("row should be deleted; GetSession err = %v want ErrNotFound", err)
+	}
+	// 3. Lifecycle event published: ACTIVE → UNSPECIFIED, reason "removed".
+	if len(pub.lifecycle) != 1 {
+		t.Fatalf("lifecycle events: got %d want 1", len(pub.lifecycle))
+	}
+	ev := pub.lifecycle[0]
+	if ev.uid != 100 || ev.tenantID != "tenant-A" {
+		t.Errorf("event metadata: %+v", ev)
+	}
+	if ev.prev != hermesv1.MbsSessionState_MBS_SESSION_STATE_ACTIVE {
+		t.Errorf("prev state: got %v want ACTIVE", ev.prev)
+	}
+	if ev.nxt != hermesv1.MbsSessionState_MBS_SESSION_STATE_UNSPECIFIED {
+		t.Errorf("next state: got %v want UNSPECIFIED", ev.nxt)
+	}
+	if ev.reason != "removed" {
+		t.Errorf("reason: got %q want 'removed'", ev.reason)
+	}
+}
+
+func TestRemoveSession_NotFound(t *testing.T) {
+	h, _, pub, mgr := newLifecycleHandler(t)
+	_, err := h.RemoveSession(ctxWith("tenant-A"),
+		&hermesv1.RemoveMbsSessionRequest{Uid: 999})
+	if status.Code(err) != codes.NotFound {
+		t.Errorf("expected NotFound, got %v", err)
+	}
+	// No side effects: tenant check fails before Disconnect/delete.
+	if mgr.disconnectCalls.Load() != 0 {
+		t.Errorf("Disconnect should not fire on NotFound, got %d", mgr.disconnectCalls.Load())
+	}
+	if len(pub.lifecycle) != 0 {
+		t.Errorf("no lifecycle event expected, got %d", len(pub.lifecycle))
+	}
+}
+
+func TestRemoveSession_TenantMismatch(t *testing.T) {
+	h, st, pub, mgr := newLifecycleHandler(t)
+	seedActiveSession(t, st, 100, "tenant-A")
+
+	_, err := h.RemoveSession(ctxWith("tenant-B"),
+		&hermesv1.RemoveMbsSessionRequest{Uid: 100})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Errorf("expected PermissionDenied, got %v", err)
+	}
+	// Row must still exist — cross-tenant removal rejected.
+	if _, err := st.GetSession(context.Background(), 100); err != nil {
+		t.Errorf("cross-tenant remove should not delete; GetSession err = %v", err)
+	}
+	if mgr.disconnectCalls.Load() != 0 {
+		t.Error("Disconnect should not fire on tenant mismatch")
+	}
+	if len(pub.lifecycle) != 0 {
+		t.Error("no lifecycle event expected on tenant mismatch")
+	}
+}
+
+func TestRemoveSession_MissingUID(t *testing.T) {
+	h, _, _, _ := newLifecycleHandler(t)
+	_, err := h.RemoveSession(ctxWith("tenant-A"),
+		&hermesv1.RemoveMbsSessionRequest{})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("expected InvalidArgument, got %v", err)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Pagination helper tests (verify clamping math)
 // ─────────────────────────────────────────────────────────────────────
 

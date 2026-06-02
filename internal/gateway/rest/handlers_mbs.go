@@ -155,6 +155,27 @@ func (a *Adapter) burnMbsSession(w http.ResponseWriter, r *http.Request) {
 	a.writeProto(w, resp)
 }
 
+// removeMbsSession
+//
+//	DELETE /api/v1/mbs-sessions/{uid}
+//
+// Permanently removes the session (hard-delete + cascade). Distinct from
+// burn (POST .../burn), which soft-disables and keeps the row.
+func (a *Adapter) removeMbsSession(w http.ResponseWriter, r *http.Request) {
+	uid, ok := parseUIDPath(w, r)
+	if !ok {
+		return
+	}
+	resp, err := a.mbs.RemoveMbsSession(r.Context(), &hermesv1.RemoveMbsSessionRequest{
+		Uid: uid,
+	})
+	if err != nil {
+		a.grpcError(w, err)
+		return
+	}
+	a.writeProto(w, resp)
+}
+
 // resolveMbsPhone
 //
 //	POST /api/v1/mbs-sessions/{uid}/resolve-phone

@@ -42,6 +42,7 @@ type MbsRouter interface {
 	GetMbsSessionStatus(ctx context.Context, req *hermesv1.GetMbsSessionStatusRequest) (*hermesv1.GetMbsSessionStatusResponse, error)
 	ListSessionAssets(ctx context.Context, req *hermesv1.ListSessionAssetsRequest) (*hermesv1.ListSessionAssetsResponse, error)
 	BurnMbsSession(ctx context.Context, req *hermesv1.BurnMbsSessionRequest) (*hermesv1.BurnMbsSessionResponse, error)
+	RemoveMbsSession(ctx context.Context, req *hermesv1.RemoveMbsSessionRequest) (*hermesv1.RemoveMbsSessionResponse, error)
 	ResolveMbsPhone(ctx context.Context, req *hermesv1.ResolvePhoneRequest) (*hermesv1.ResolvePhoneResponse, error)
 	SendMbsMessage(ctx context.Context, req *hermesv1.MbsSendMessageRequest) (*hermesv1.MbsSendMessageResponse, error)
 }
@@ -193,6 +194,7 @@ func (a *Adapter) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/mbs-sessions/{uid}", a.auth(a.getMbsSession))
 	mux.HandleFunc("GET /api/v1/mbs-sessions/{uid}/assets", a.auth(a.listMbsSessionAssets))
 	mux.HandleFunc("POST /api/v1/mbs-sessions/{uid}/burn", a.auth(a.burnMbsSession))
+	mux.HandleFunc("DELETE /api/v1/mbs-sessions/{uid}", a.auth(a.removeMbsSession))
 	mux.HandleFunc("POST /api/v1/mbs-sessions/{uid}/resolve-phone", a.auth(a.resolveMbsPhone))
 	mux.HandleFunc("POST /api/v1/mbs-sessions/{uid}/messages", a.auth(a.sendMbsMessage))
 

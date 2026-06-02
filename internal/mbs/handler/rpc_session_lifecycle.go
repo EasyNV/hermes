@@ -226,6 +226,57 @@ func (h *Handler) BurnSession(ctx context.Context, req *hermesv1.BurnMbsSessionR
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// RemoveSession
+// ─────────────────────────────────────────────────────────────────────
+
+// RemoveSession permanently deletes a session row (and cascades its
+// assets + phone-thread cache via ON DELETE CASCADE FKs). Unlike
+// BurnSession, no row survives — this is operator-initiated cleanup, not
+// a soft-disable. Tears down any live connection first so the in-memory
+// manager state doesn't outlive the row.
+func (h *Handler) RemoveSession(ctx context.Context, req *hermesv1.RemoveMbsSessionRequest) (*hermesv1.RemoveMbsSessionResponse, error) {
+	tenantID, err := requireTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if req.Uid == 0 {
+		return nil, status.Error(codes.InvalidArgument, "uid is required")
+	}
+
+	// 1. Verify tenant ownership + capture prior state (for lifecycle event).
+	row, err := h.store.GetSessionByTenant(ctx, tenantID, req.Uid)
+	if err != nil {
+		return nil, mapStoreErr(err)
+	}
+	prevState := dbStateToProto(row.State)
+
+	// 2. Tear down any in-memory connection (best-effort — Disconnect is
+	// idempotent and no-ops if uid isn't currently connected). Must run
+	// BEFORE the delete so the manager releases its pod claim and listener
+	// rather than racing a re-claim against a row that's about to vanish.
+	if h.manager != nil {
+		_ = h.manager.Disconnect(req.Uid)
+	}
+
+	// 3. Hard-delete. Cascade FKs clear mbs_session_assets +
+	// mbs_phone_threads in the same transaction.
+	if err := h.store.DeleteSession(ctx, req.Uid); err != nil {
+		return nil, mapStoreErr(err)
+	}
+
+	// 4. Emit a lifecycle event. There is no post-state row, so we signal
+	// removal as a transition to UNSPECIFIED with reason "removed" — inbox
+	// /UI consumers treat UNSPECIFIED-after-existing as "gone".
+	h.publisher.PublishSessionLifecycle(
+		req.Uid, tenantID,
+		prevState, hermesv1.MbsSessionState_MBS_SESSION_STATE_UNSPECIFIED,
+		"removed", 0, h.podID,
+	)
+
+	return &hermesv1.RemoveMbsSessionResponse{Uid: req.Uid}, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────
 

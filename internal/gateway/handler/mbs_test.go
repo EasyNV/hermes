@@ -29,6 +29,7 @@ type stubMbsClient struct {
 	lastStatusReq  *hermesv1.GetMbsSessionStatusRequest
 	lastAssetsReq  *hermesv1.ListSessionAssetsRequest
 	lastBurnReq    *hermesv1.BurnMbsSessionRequest
+	lastRemoveReq  *hermesv1.RemoveMbsSessionRequest
 	lastResolveReq *hermesv1.ResolvePhoneRequest
 	lastSendReq    *hermesv1.MbsSendMessageRequest
 
@@ -109,6 +110,15 @@ func (s *stubMbsClient) BurnSession(ctx context.Context, in *hermesv1.BurnMbsSes
 		return &hermesv1.BurnMbsSessionResponse{}, nil
 	}
 	return s.burnResp, nil
+}
+
+func (s *stubMbsClient) RemoveSession(ctx context.Context, in *hermesv1.RemoveMbsSessionRequest, opts ...grpc.CallOption) (*hermesv1.RemoveMbsSessionResponse, error) {
+	s.captureMD(ctx)
+	s.lastRemoveReq = in
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &hermesv1.RemoveMbsSessionResponse{Uid: in.GetUid()}, nil
 }
 
 func (s *stubMbsClient) ResolvePhone(ctx context.Context, in *hermesv1.ResolvePhoneRequest, opts ...grpc.CallOption) (*hermesv1.ResolvePhoneResponse, error) {

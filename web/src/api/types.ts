@@ -378,6 +378,7 @@ export interface MbsListSessionsResponse { sessions: MbsSession[]; pagination: P
 export interface MbsGetSessionStatusResponse { session: MbsSession }
 export interface MbsListSessionAssetsResponse { assets: MbsAsset[] }
 export interface MbsBurnSessionResponse { session: MbsSession }
+export interface MbsRemoveSessionResponse { uid: string }
 export interface MbsResolvePhoneResponse {
   threadId: string         // FBID-keyed thread id; empty if exists=false
   pageId: string

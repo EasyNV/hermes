@@ -5,6 +5,7 @@ import type {
   MbsGetSessionStatusResponse,
   MbsListSessionAssetsResponse,
   MbsBurnSessionResponse,
+  MbsRemoveSessionResponse,
   MbsResolvePhoneResponse,
   MbsSendMessageResponse,
   PageRequest,
@@ -53,6 +54,16 @@ export function burnMbsSession(uid: string, reason?: string) {
     `/mbs-sessions/${uid}/burn`,
     reason ? { reason } : undefined,
   )
+}
+
+/**
+ * Permanently remove the session: hard-delete the row + cascade its
+ * assets and phone-thread cache. Unlike burn (soft-disable, keeps the
+ * row), this leaves NO trace and cannot be undone. Returns the removed
+ * uid for store reconciliation.
+ */
+export function removeMbsSession(uid: string) {
+  return api.del<MbsRemoveSessionResponse>(`/mbs-sessions/${uid}`)
 }
 
 /**

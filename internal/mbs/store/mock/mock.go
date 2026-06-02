@@ -341,7 +341,21 @@ func (s *Store) BurnSession(ctx context.Context, uid int64, reason string) error
 }
 
 func (s *Store) DeleteSession(ctx context.Context, uid int64) error {
-	return store.ErrNotImplemented
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.sessions[uid]; !ok {
+		return store.ErrNotFound
+	}
+	delete(s.sessions, uid)
+	// Mirror the ON DELETE CASCADE FKs: assets + phone-thread cache for
+	// this uid go with the row.
+	delete(s.assets, uid)
+	for k := range s.phoneThreads {
+		if k.uid == uid {
+			delete(s.phoneThreads, k)
+		}
+	}
+	return nil
 }
 
 func (s *Store) UpsertAssets(ctx context.Context, uid int64, assets []*store.AssetRow) error {

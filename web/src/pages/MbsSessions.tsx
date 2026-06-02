@@ -5,6 +5,7 @@ import {
   MoreHorizontal,
   Plus,
   Flame,
+  Trash2,
   ChevronDown,
   ChevronRight,
   Loader2,
@@ -17,6 +18,7 @@ import {
   getMbsSessionStatus,
   listMbsSessionAssets,
   burnMbsSession,
+  removeMbsSession,
 } from '@/api/mbs'
 import { MbsSessionState } from '@/api/types'
 import type { MbsSessionState as MbsSessionStateT } from '@/api/types'
@@ -102,6 +104,10 @@ export default function MbsSessions() {
     open: false,
     uid: '',
   })
+  const [confirmRemove, setConfirmRemove] = useState<{ open: boolean; uid: string }>({
+    open: false,
+    uid: '',
+  })
   const [expandedUid, setExpandedUid] = useState<string>('')
 
   // ── Sessions list ─────────────────────────────────────────────
@@ -154,6 +160,21 @@ export default function MbsSessions() {
     },
     onError: (e: unknown) => {
       const msg = e instanceof ApiError ? e.message : 'Burn failed'
+      toast.error(msg)
+    },
+  })
+
+  const removeMut = useMutation({
+    mutationFn: ({ uid }: { uid: string }) => removeMbsSession(uid),
+    onSuccess: ({ uid }) => {
+      useMbsStore.getState().removeOne(uid)
+      toast.success(`Session ${uid} removed`)
+      setConfirmRemove({ open: false, uid: '' })
+      if (expandedUid === uid) setExpandedUid('')
+      queryClient.invalidateQueries({ queryKey: ['mbs', 'sessions'] })
+    },
+    onError: (e: unknown) => {
+      const msg = e instanceof ApiError ? e.message : 'Remove failed'
       toast.error(msg)
     },
   })
@@ -343,6 +364,13 @@ export default function MbsSessions() {
                               <Flame className="mr-2 h-4 w-4" />
                               Burn session
                             </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={() => setConfirmRemove({ open: true, uid: s.uid })}
+                              className="text-destructive focus:text-destructive"
+                            >
+                              <Trash2 className="mr-2 h-4 w-4" />
+                              Remove session
+                            </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
                       </TableCell>
@@ -495,6 +523,23 @@ export default function MbsSessions() {
         confirmLabel="Burn"
         destructive
         loading={burnMut.isPending}
+      />
+
+      {/* Remove confirm — hard delete, irreversible */}
+      <ConfirmDialog
+        open={confirmRemove.open}
+        onClose={() => setConfirmRemove({ open: false, uid: '' })}
+        onConfirm={() => removeMut.mutate({ uid: confirmRemove.uid })}
+        title="Remove this MBS account?"
+        description={
+          'This permanently deletes the session and all its data (assets, ' +
+          'phone-thread cache) from Hermes. This cannot be undone — unlike Burn, ' +
+          'no record is kept. To use this account again you would need to bridge ' +
+          'it from scratch.'
+        }
+        confirmLabel="Remove permanently"
+        destructive
+        loading={removeMut.isPending}
       />
     </div>
   )

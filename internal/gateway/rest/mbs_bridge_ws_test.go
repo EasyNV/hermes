@@ -182,6 +182,9 @@ func (f *fakeMbsBridgeClient) ListSessionAssets(context.Context, *hermesv1.ListS
 func (f *fakeMbsBridgeClient) BurnSession(context.Context, *hermesv1.BurnMbsSessionRequest, ...grpc.CallOption) (*hermesv1.BurnMbsSessionResponse, error) {
 	return nil, errors.New("not implemented in bridge tests")
 }
+func (f *fakeMbsBridgeClient) RemoveSession(context.Context, *hermesv1.RemoveMbsSessionRequest, ...grpc.CallOption) (*hermesv1.RemoveMbsSessionResponse, error) {
+	return nil, errors.New("not implemented in bridge tests")
+}
 func (f *fakeMbsBridgeClient) ResolvePhone(context.Context, *hermesv1.ResolvePhoneRequest, ...grpc.CallOption) (*hermesv1.ResolvePhoneResponse, error) {
 	return nil, errors.New("not implemented in bridge tests")
 }
