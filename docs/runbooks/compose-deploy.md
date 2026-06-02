@@ -66,7 +66,7 @@ docker-compose -f docker-compose.dev.yml exec postgres \
 
 # Inspect DEK mount inside mbs container
 docker-compose -f docker-compose.dev.yml exec mbs ls -l /run/secrets/mbs_dek
-# Expect: -r--------    1 root  root    32 ...
+# Expect: -r--------    1 root  root    65 ... (64 hex chars + trailing newline)
 
 # Confirm gateway can dial mbs
 docker-compose -f docker-compose.dev.yml logs --tail=200 gateway 2>&1 | grep -i mbs
@@ -203,8 +203,8 @@ persists across stack tears. If you ever need to rotate it, see
 Almost always missing or malformed DEK. Verify:
 
 ```sh
-ls -l deploy/secrets/dev/mbs-dek.bin     # must exist, 32 bytes, mode 0400
-wc -c deploy/secrets/dev/mbs-dek.bin     # must print 32
+ls -l deploy/secrets/dev/mbs-dek.bin     # must exist, 65 bytes, mode 0400
+wc -c deploy/secrets/dev/mbs-dek.bin     # must print 65
 ```
 
 If the file is missing, generate it (`./scripts/dek-generate.sh
@@ -228,7 +228,7 @@ container:
 
 ```sh
 docker-compose -f docker-compose.dev.yml exec mbs cat /run/secrets/mbs_dek | wc -c
-# Must print 32.
+# Must print 65 (64 hex chars + trailing newline).
 ```
 
 ### Port already in use
@@ -293,7 +293,7 @@ make proto-gen
 #    spent inside the mbs build pulling mautrix-meta + utls deps.
 make docker-build-all
 
-# 3. Bootstrap secrets. The DEK and JWT signing key are 32-byte hex.
+# 3. Bootstrap secrets. The DEK and JWT signing key are 64-char hex files (32 bytes entropy + newline).
 ./scripts/dek-generate.sh deploy/secrets/prod/mbs-dek.bin
 ./scripts/dek-generate.sh deploy/secrets/prod/jwt-signing-key
 

@@ -1,247 +1,338 @@
-# Hermès REST API Reference
+# Hermes API Reference
 
-76 endpoints on port **8081** under `/api/v1/`. All responses are JSON. Auth via `Authorization: Bearer <jwt>` header.
+Hermes exposes protobuf/gRPC services, a REST JSON adapter for the frontend, and WebSocket endpoints for live events and MBS bridge login.
 
----
+Current gateway surfaces:
 
-## Auth (4 endpoints)
+- Gateway gRPC: `:8080`
+- Gateway REST/WS: `:8081`
+- MBS gRPC: `:8082`
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/api/v1/auth/login` | No | Login with email + password |
-| POST | `/api/v1/auth/refresh` | No | Refresh JWT tokens |
-| POST | `/api/v1/auth/logout` | Yes | Invalidate refresh tokens |
-| GET | `/api/v1/auth/me` | Yes | Get current user profile |
+Authentication uses bearer JWTs:
 
-### Login
-```bash
-curl -X POST http://localhost:8081/api/v1/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"admin@hermes.local","password":"admin123"}'
-# → {"accessToken":"eyJ...","refreshToken":"uuid","expiresIn":900,"user":{...}}
+```http
+Authorization: Bearer <jwt>
 ```
 
-## Dashboard (1 endpoint)
+Do not put real JWTs, passwords, cookies, access tokens, TOTP secrets, or connection strings in docs or examples. Use `[REDACTED]`.
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| GET | `/api/v1/dashboard/stats?tenantId=&workspaceId=` | Yes | Aggregate stats |
+## Protobuf services
 
-## Tenants (4 endpoints)
+Definitions live in `proto/hermes/v1/`.
 
-| Method | Path | Auth | Roles | Description |
-|--------|------|------|-------|-------------|
-| POST | `/api/v1/tenants` | Yes | superadmin | Create tenant |
-| GET | `/api/v1/tenants` | Yes | superadmin, tenant_admin | List tenants |
-| GET | `/api/v1/tenants/{id}` | Yes | superadmin, tenant_admin | Get tenant |
-| PUT | `/api/v1/tenants/{id}` | Yes | superadmin, tenant_admin | Update tenant |
+### `HermesGateway` — 75 RPCs
 
-## Workspaces (5 endpoints)
+Gateway/core API:
 
-| Method | Path | Auth | Roles | Description |
-|--------|------|------|-------|-------------|
-| POST | `/api/v1/workspaces` | Yes | superadmin, tenant_admin | Create workspace |
-| GET | `/api/v1/workspaces?tenantId=` | Yes | all | List workspaces |
-| GET | `/api/v1/workspaces/{id}` | Yes | all | Get workspace |
-| PUT | `/api/v1/workspaces/{id}` | Yes | superadmin, tenant_admin, workspace_admin | Update |
-| DELETE | `/api/v1/workspaces/{id}` | Yes | superadmin, tenant_admin | Delete |
+- Auth: `Login`, `RefreshToken`, `Logout`, `GetMe`
+- Tenants: `CreateTenant`, `GetTenant`, `ListTenants`, `UpdateTenant`
+- Workspaces: `CreateWorkspace`, `GetWorkspace`, `ListWorkspaces`, `UpdateWorkspace`, `DeleteWorkspace`
+- Users: `CreateUser`, `GetUser`, `ListUsers`, `UpdateUser`, `DeleteUser`
+- WA numbers: `RegisterWaNumber`, `GetQRCode`, `ListWaNumbers`, `GetWaNumber`, `UpdateWaNumber`, `DisconnectWaNumber`, `ReconnectWaNumber`, `DeleteWaNumber`
+- Proxies: `AddProxies`, `ListProxies`, `UpdateProxy`, `DeleteProxy`, `AssignProxy`, `GetProxyHealth`, `GetBestProxy`
+- Contacts: `CreateContact`, `ImportContacts`, `ListContacts`, `GetContact`, `UpdateContact`, `DeleteContact`
+- Templates/campaigns: `CreateTemplate`, `GetTemplate`, `ListTemplates`, `UpdateTemplate`, `DeleteTemplate`, `CreateCampaign`, `GetCampaign`, `ListCampaigns`, `StartCampaign`, `PauseCampaign`, `ResumeCampaign`, `CancelCampaign`, `UpdateCampaignNumbers`, `UpdateCampaignContacts`, `ListCampaignContacts`, `ListCampaignNumbers`
+- Inbox: `ListConversations`, `GetConversation`, `ClaimConversation`, `TransferConversation`, `CloseConversation`, `ListMessages`, `SendMessage`, `SearchMessages`, `SendTypingIndicator`
+- Reporting/admin: `GetContactCampaignHistory`, `GetAgentPerformance`, `GetDashboardStats`
+- Canned responses: `CreateCannedResponse`, `ListCannedResponses`, `UpdateCannedResponse`, `DeleteCannedResponse`
+- Notifications: `ConfigureNotification`, `ListNotificationConfigs`, `TestNotification`, `DeleteNotificationConfig`
 
-## Users (5 endpoints)
+### `HermesMbs` — 9 RPCs
 
-| Method | Path | Auth | Roles | Description |
-|--------|------|------|-------|-------------|
-| POST | `/api/v1/users` | Yes | superadmin, tenant_admin, workspace_admin | Create user |
-| GET | `/api/v1/users?workspaceId=` | Yes | superadmin, tenant_admin, workspace_admin | List users |
-| GET | `/api/v1/users/{id}` | Yes | superadmin, tenant_admin, workspace_admin | Get user |
-| PUT | `/api/v1/users/{id}` | Yes | superadmin, tenant_admin, workspace_admin | Update user |
-| DELETE | `/api/v1/users/{id}` | Yes | superadmin, tenant_admin, workspace_admin | Delete user |
+MBS API:
 
-## WhatsApp Numbers (9 endpoints)
+- `BridgeLogin`
+- `ListSessions`
+- `GetSessionStatus`
+- `ListSessionAssets`
+- `BurnSession`
+- `RemoveSession`
+- `ResolvePhone`
+- `SendMessage`
+- `Listen`
 
-| Method | Path | Auth | Roles | Description |
-|--------|------|------|-------|-------------|
-| POST | `/api/v1/wa-numbers` | Yes | superadmin, tenant_admin | Register number (triggers QR) |
-| GET | `/api/v1/wa-numbers?tenantId=&workspaceId=&status=` | Yes | all | List numbers |
-| GET | `/api/v1/wa-numbers/{id}` | Yes | all | Get number details |
-| GET | `/api/v1/wa-numbers/{id}/qr-code` | Yes | superadmin, tenant_admin | Get QR code (PNG base64) |
-| PUT | `/api/v1/wa-numbers/{id}` | Yes | superadmin, tenant_admin | Update name/proxy/workspaces |
-| POST | `/api/v1/wa-numbers/{id}/disconnect` | Yes | superadmin, tenant_admin | Disconnect session |
-| POST | `/api/v1/wa-numbers/{id}/reconnect` | Yes | superadmin, tenant_admin | Reconnect session |
-| DELETE | `/api/v1/wa-numbers/{id}` | Yes | superadmin, tenant_admin | Delete number |
-| POST | `/api/v1/wa-numbers/{id}/pair-phone` | Yes | superadmin, tenant_admin | Phone number pairing |
+### Other backend service APIs
 
-### Register Number
-```bash
-curl -X POST http://localhost:8081/api/v1/wa-numbers \
-  -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"phone":"628123456789","displayName":"Sales Bot","workspaceIds":["ws-uuid"]}'
-# → {"waNumber":{...},"qrCode":"iVBORw0K..."}  # base64 PNG
+- `HermesCampaign` — 17 RPCs.
+- `HermesInbox` — 14 RPCs.
+- `HermesContacts` — 11 RPCs.
+- `HermesProxy` — 11 RPCs.
+- `HermesWa` — 8 RPCs.
+- `HermesNotify` — 6 RPCs.
+
+## REST adapter
+
+The REST adapter is mounted under `/api/v1/` on the gateway HTTP server. It currently registers 89 routes total including the MBS bridge-login WebSocket.
+
+### Auth
+
+Unauthenticated:
+
+- `POST /api/v1/auth/login`
+- `POST /api/v1/auth/refresh`
+
+Authenticated:
+
+- `POST /api/v1/auth/logout`
+- `GET /api/v1/auth/me`
+
+Example login request shape:
+
+```json
+{
+  "email": "operator@example.com",
+  "password": "[REDACTED]"
+}
 ```
 
-### Phone Pairing (alternative to QR)
-```bash
-curl -X POST http://localhost:8081/api/v1/wa-numbers/{id}/pair-phone \
-  -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"phoneNumber":"628123456789"}'
-# → {"pairingCode":"ABCD-EFGH"}
-# User enters code: WhatsApp → Linked Devices → Link with phone number
+Example login response shape:
+
+```json
+{
+  "accessToken": "[REDACTED]",
+  "refreshToken": "[REDACTED]",
+  "user": {
+    "id": "...",
+    "tenantId": "...",
+    "email": "operator@example.com",
+    "role": "tenant_admin"
+  }
+}
 ```
 
-## Proxies (7 endpoints)
+### Dashboard
 
-| Method | Path | Auth | Roles | Description |
-|--------|------|------|-------|-------------|
-| POST | `/api/v1/proxies` | Yes | superadmin, tenant_admin | Bulk add proxies |
-| GET | `/api/v1/proxies?tenantId=&status=` | Yes | superadmin, tenant_admin | List proxies |
-| GET | `/api/v1/proxies/best?tenantId=` | Yes | superadmin, tenant_admin | Get best proxy |
-| GET | `/api/v1/proxies/{id}/health` | Yes | superadmin, tenant_admin | Health check |
-| PUT | `/api/v1/proxies/{id}` | Yes | superadmin, tenant_admin | Update proxy |
-| DELETE | `/api/v1/proxies/{id}` | Yes | superadmin, tenant_admin | Delete proxy |
-| POST | `/api/v1/proxies/assign` | Yes | superadmin, tenant_admin | Assign proxy to number |
+- `GET /api/v1/dashboard/stats`
 
-## Contacts (7 endpoints)
+### Tenants
 
-| Method | Path | Auth | Roles | Description |
-|--------|------|------|-------|-------------|
-| POST | `/api/v1/contacts` | Yes | superadmin, tenant_admin, workspace_admin | Create contact |
-| POST | `/api/v1/contacts/import` | Yes | superadmin, tenant_admin, workspace_admin | CSV import |
-| GET | `/api/v1/contacts?tenantId=&search=&tags=` | Yes | all | List contacts |
-| GET | `/api/v1/contacts/{id}` | Yes | all | Get contact |
-| PUT | `/api/v1/contacts/{id}` | Yes | superadmin, tenant_admin, workspace_admin | Update |
-| DELETE | `/api/v1/contacts/{id}` | Yes | superadmin, tenant_admin, workspace_admin | Delete |
-| GET | `/api/v1/contacts/{id}/campaigns` | Yes | all | Campaign history |
+- `POST /api/v1/tenants`
+- `GET /api/v1/tenants`
+- `GET /api/v1/tenants/{id}`
+- `PUT /api/v1/tenants/{id}`
 
-## Templates (5 endpoints)
+### Workspaces
 
-| Method | Path | Auth | Roles | Description |
-|--------|------|------|-------|-------------|
-| POST | `/api/v1/templates` | Yes | superadmin, tenant_admin, workspace_admin | Create template |
-| GET | `/api/v1/templates?workspaceId=&search=` | Yes | all | List templates |
-| GET | `/api/v1/templates/{id}` | Yes | all | Get template |
-| PUT | `/api/v1/templates/{id}` | Yes | superadmin, tenant_admin, workspace_admin | Update |
-| DELETE | `/api/v1/templates/{id}` | Yes | superadmin, tenant_admin, workspace_admin | Delete |
+- `POST /api/v1/workspaces`
+- `GET /api/v1/workspaces`
+- `GET /api/v1/workspaces/{id}`
+- `PUT /api/v1/workspaces/{id}`
+- `DELETE /api/v1/workspaces/{id}`
 
-## Campaigns (11 endpoints)
+### Users
 
-| Method | Path | Auth | Roles | Description |
-|--------|------|------|-------|-------------|
-| POST | `/api/v1/campaigns` | Yes | superadmin, tenant_admin, workspace_admin | Create campaign |
-| GET | `/api/v1/campaigns?workspaceId=&status=` | Yes | all | List campaigns |
-| GET | `/api/v1/campaigns/{id}` | Yes | all | Get campaign + numbers + template |
-| POST | `/api/v1/campaigns/{id}/start` | Yes | superadmin, tenant_admin, workspace_admin | Start campaign |
-| POST | `/api/v1/campaigns/{id}/pause` | Yes | superadmin, tenant_admin, workspace_admin | Pause |
-| POST | `/api/v1/campaigns/{id}/resume` | Yes | superadmin, tenant_admin, workspace_admin | Resume |
-| POST | `/api/v1/campaigns/{id}/cancel` | Yes | superadmin, tenant_admin, workspace_admin | Cancel |
-| PUT | `/api/v1/campaigns/{id}/numbers` | Yes | superadmin, tenant_admin, workspace_admin | Assign numbers |
-| PUT | `/api/v1/campaigns/{id}/contacts` | Yes | superadmin, tenant_admin, workspace_admin | Assign contacts |
-| GET | `/api/v1/campaigns/{id}/contacts?status=` | Yes | all | List campaign contacts |
-| GET | `/api/v1/campaigns/{id}/numbers` | Yes | all | List campaign numbers |
+- `POST /api/v1/users`
+- `GET /api/v1/users`
+- `GET /api/v1/users/{id}`
+- `PUT /api/v1/users/{id}`
+- `DELETE /api/v1/users/{id}`
 
-### Create + Start Campaign
-```bash
-# Create
-curl -X POST http://localhost:8081/api/v1/campaigns \
-  -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"workspaceId":"ws-uuid","templateId":"tpl-uuid","name":"Promo Q2",
-       "waNumberIds":["num-uuid"],"contactIds":["c-uuid1","c-uuid2"],
-       "delayMinMs":3000,"delayMaxMs":15000}'
+### WA numbers
 
-# Start
-curl -X POST http://localhost:8081/api/v1/campaigns/{id}/start \
-  -H "Authorization: Bearer $TOKEN"
+- `POST /api/v1/wa-numbers`
+- `GET /api/v1/wa-numbers`
+- `GET /api/v1/wa-numbers/{id}`
+- `GET /api/v1/wa-numbers/{id}/qr-code`
+- `POST /api/v1/wa-numbers/{id}/pair-phone`
+- `PUT /api/v1/wa-numbers/{id}`
+- `POST /api/v1/wa-numbers/{id}/disconnect`
+- `POST /api/v1/wa-numbers/{id}/reconnect`
+- `DELETE /api/v1/wa-numbers/{id}`
+
+### Proxies
+
+- `POST /api/v1/proxies`
+- `GET /api/v1/proxies`
+- `GET /api/v1/proxies/best`
+- `GET /api/v1/proxies/{id}/health`
+- `PUT /api/v1/proxies/{id}`
+- `DELETE /api/v1/proxies/{id}`
+- `POST /api/v1/proxies/assign`
+
+### Contacts
+
+- `POST /api/v1/contacts`
+- `POST /api/v1/contacts/import`
+- `GET /api/v1/contacts`
+- `GET /api/v1/contacts/{id}`
+- `PUT /api/v1/contacts/{id}`
+- `DELETE /api/v1/contacts/{id}`
+- `GET /api/v1/contacts/{id}/campaigns`
+
+### Templates
+
+- `POST /api/v1/templates`
+- `GET /api/v1/templates`
+- `GET /api/v1/templates/{id}`
+- `PUT /api/v1/templates/{id}`
+- `DELETE /api/v1/templates/{id}`
+
+### Campaigns
+
+- `POST /api/v1/campaigns`
+- `GET /api/v1/campaigns`
+- `GET /api/v1/campaigns/{id}`
+- `POST /api/v1/campaigns/{id}/start`
+- `POST /api/v1/campaigns/{id}/pause`
+- `POST /api/v1/campaigns/{id}/resume`
+- `POST /api/v1/campaigns/{id}/cancel`
+- `PUT /api/v1/campaigns/{id}/numbers`
+- `PUT /api/v1/campaigns/{id}/contacts`
+- `GET /api/v1/campaigns/{id}/contacts`
+- `GET /api/v1/campaigns/{id}/numbers`
+
+Campaigns can dispatch through WA or MBS, depending on campaign configuration and selected sender/session type. MBS campaign sends are queued on `hermes.mbs.send.campaign.<tenant_id>`.
+
+### Conversations / inbox
+
+- `GET /api/v1/conversations`
+- `GET /api/v1/conversations/{id}`
+- `POST /api/v1/conversations/{id}/claim`
+- `POST /api/v1/conversations/{id}/transfer`
+- `POST /api/v1/conversations/{id}/close`
+- `GET /api/v1/conversations/{id}/messages`
+- `POST /api/v1/conversations/{id}/messages`
+- `POST /api/v1/conversations/{id}/typing`
+- `DELETE /api/v1/conversations/clear`
+- `POST /api/v1/messages/search`
+
+### Agent performance
+
+- `GET /api/v1/agent-performance`
+
+### Canned responses
+
+- `POST /api/v1/canned-responses`
+- `GET /api/v1/canned-responses`
+- `PUT /api/v1/canned-responses/{id}`
+- `DELETE /api/v1/canned-responses/{id}`
+
+### MBS sessions
+
+- `GET /api/v1/mbs-sessions`
+- `GET /api/v1/mbs-sessions/{uid}`
+- `GET /api/v1/mbs-sessions/{uid}/assets`
+- `POST /api/v1/mbs-sessions/{uid}/burn`
+- `DELETE /api/v1/mbs-sessions/{uid}`
+- `POST /api/v1/mbs-sessions/{uid}/resolve-phone`
+- `POST /api/v1/mbs-sessions/{uid}/messages`
+
+`GET /api/v1/mbs-sessions` supports tenant-scoped listing. Gateway derives/forces tenant context from the authenticated user.
+
+`POST /api/v1/mbs-sessions/{uid}/resolve-phone` accepts a phone number and optional `pageIdOverride`; it returns thread/page/WEC resolution data.
+
+`POST /api/v1/mbs-sessions/{uid}/messages` accepts either a `threadId` or phone recipient, text, optional dedupe ID, and optional `pageIdOverride`.
+
+### Allowlist
+
+- `GET /api/v1/allowlist`
+- `POST /api/v1/allowlist`
+- `DELETE /api/v1/allowlist`
+- `DELETE /api/v1/allowlist/clear`
+
+### Notifications
+
+- `POST /api/v1/notifications`
+- `GET /api/v1/notifications`
+- `POST /api/v1/notifications/{id}/test`
+- `DELETE /api/v1/notifications/{id}`
+
+## WebSocket endpoints
+
+### General event WebSocket
+
+- `/ws`
+
+The frontend uses this endpoint for gateway fan-out of service events.
+
+### MBS bridge login WebSocket
+
+- `/ws/mbs/bridge-login?token=<jwt>`
+
+This endpoint tunnels `HermesMbs.BridgeLogin` over WebSocket JSON frames.
+
+Browser → gateway frames:
+
+```json
+{"type":"start","payload":{"email":"operator@example.com","password":"[REDACTED]","totpSecret":"[REDACTED_OPTIONAL]"}}
 ```
 
-## Inbox — Conversations (9 endpoints)
-
-| Method | Path | Auth | Roles | Description |
-|--------|------|------|-------|-------------|
-| GET | `/api/v1/conversations?workspaceId=&status=&assignedTo=&search=` | Yes | all | List conversations |
-| GET | `/api/v1/conversations/{id}` | Yes | all | Get conversation + contact + WA number |
-| POST | `/api/v1/conversations/{id}/claim` | Yes | workspace_admin, cs_agent | Claim conversation |
-| POST | `/api/v1/conversations/{id}/transfer` | Yes | workspace_admin, cs_agent | Transfer to agent |
-| POST | `/api/v1/conversations/{id}/close` | Yes | workspace_admin, cs_agent | Close conversation |
-| GET | `/api/v1/conversations/{id}/messages?page=&pageSize=` | Yes | all | List messages |
-| POST | `/api/v1/conversations/{id}/messages` | Yes | workspace_admin, cs_agent | Send reply |
-| POST | `/api/v1/conversations/{id}/typing` | Yes | all | Send typing indicator |
-| POST | `/api/v1/messages/search` | Yes | all | Full-text message search |
-
-### Send Reply
-```bash
-curl -X POST http://localhost:8081/api/v1/conversations/{id}/messages \
-  -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"contentType":"CONTENT_TYPE_TEXT","body":"Hello from Hermes!"}'
-# → {"message":{"id":"...","status":"MESSAGE_STATUS_PENDING",...}}
-# Status updates: pending → sent → delivered (async via whatsmeow)
+```json
+{"type":"input","payload":{"fieldId":"totp_code","value":"[REDACTED]"}}
 ```
 
-## Agent Performance (1 endpoint)
+```json
+{"type":"cancel"}
+```
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| GET | `/api/v1/agent-performance?workspaceId=&userId=` | Yes | Agent metrics |
+Gateway → browser frames:
 
-## Canned Responses (4 endpoints)
+```json
+{"type":"bridge_login_progress","payload":{"stage":"BRIDGE_STAGE_PREFLIGHT","detail":"..."}}
+```
 
-| Method | Path | Auth | Roles | Description |
-|--------|------|------|-------|-------------|
-| POST | `/api/v1/canned-responses` | Yes | superadmin, tenant_admin, workspace_admin | Create |
-| GET | `/api/v1/canned-responses?workspaceId=&search=` | Yes | all | List |
-| PUT | `/api/v1/canned-responses/{id}` | Yes | superadmin, tenant_admin, workspace_admin | Update |
-| DELETE | `/api/v1/canned-responses/{id}` | Yes | superadmin, tenant_admin, workspace_admin | Delete |
+```json
+{"type":"bridge_login_prompt","payload":{"stepId":"two_step_verification","instructions":"...","fields":[{"id":"totp_code","name":"Code","type":"code"}]}}
+```
 
-## Notifications (4 endpoints)
+```json
+{"type":"bridge_login_success","payload":{"uid":"...","displayName":"...","pageCount":1,"assets":[...]}}
+```
 
-| Method | Path | Auth | Roles | Description |
-|--------|------|------|-------|-------------|
-| POST | `/api/v1/notifications` | Yes | superadmin, tenant_admin, workspace_admin | Configure |
-| GET | `/api/v1/notifications?workspaceId=` | Yes | superadmin, tenant_admin, workspace_admin | List |
-| POST | `/api/v1/notifications/{id}/test` | Yes | superadmin, tenant_admin, workspace_admin | Test |
-| DELETE | `/api/v1/notifications/{id}` | Yes | superadmin, tenant_admin, workspace_admin | Delete |
+```json
+{"type":"bridge_login_failure","payload":{"code":"BRIDGE_ERR_CHECKPOINT","message":"...","retryable":false}}
+```
 
----
+```json
+{"type":"error","payload":{"code":"BAD_FRAME","message":"..."}}
+```
 
-## WebSocket Events
+Security notes:
 
-Connect: `ws://localhost:8081/ws?token=<jwt>`
+- Gateway validates the JWT before accepting/bridging the flow.
+- Gateway overwrites tenant from JWT claims; browser-supplied tenant is ignored.
+- Frame size is capped.
+- The bridge flow has a bounded timeout.
+- Token-in-query posture is currently shared with the existing WebSocket pattern; production logs and reverse proxies must scrub query strings.
 
-### Client → Server
-| Type | Payload | Description |
-|------|---------|-------------|
-| `ping` | — | Heartbeat |
-| `auth` | `{token}` | Re-authenticate |
-| `subscribe_conversation` | `{conversation_id}` | Subscribe to conversation events |
-| `unsubscribe_conversation` | `{conversation_id}` | Unsubscribe |
+## Roles
 
-### Server → Client
-| Type | Scope | Description |
-|------|-------|-------------|
-| `new_message` | tenant | Inbound WhatsApp message |
-| `message_status_updated` | tenant | Delivery status change |
-| `number_status_changed` | tenant | WA number connection change |
-| `ban_detected` | tenant | Number banned |
-| `campaign_status_changed` | workspace | Campaign state transition |
-| `campaign_progress` | workspace | Campaign delivery progress |
-| `import_complete` | user | CSV import finished |
-| `typing_indicator` | tenant | Contact typing |
+Current role names used by the gateway/auth model:
 
----
+- `superadmin`
+- `tenant_admin`
+- `workspace_admin`
+- `cs_agent`
 
-## RBAC Roles
-
-`superadmin` > `tenant_admin` > `workspace_admin` > `cs_agent`
-
-- **superadmin**: Full platform access
-- **tenant_admin**: Manages own tenant's workspaces, numbers, proxies
-- **workspace_admin**: Manages campaigns, templates, contacts, inbox
-- **cs_agent**: Inbox only (unassigned + own conversations), can send replies
+RBAC is enforced on gRPC through middleware. REST endpoints authenticate through JWT middleware; REST-to-gRPC RBAC parity should be verified and enforced as part of hardening.
 
 ## Pagination
 
-All list endpoints accept `?page=1&pageSize=50`. Response includes:
+List endpoints use protobuf `PageRequest` / `PageResponse` semantics. REST responses use the protojson camelCase shape.
+
+Typical request fields:
+
 ```json
-{"pagination":{"total":100,"page":1,"pageSize":50,"totalPages":2}}
+{
+  "page": 1,
+  "pageSize": 50
+}
 ```
+
+Typical response field:
+
+```json
+{
+  "page": {
+    "page": 1,
+    "pageSize": 50,
+    "total": 123
+  }
+}
+```
+
+## Error shape
+
+REST handlers map gRPC status codes to HTTP status codes and return JSON error payloads. Treat response details as implementation-specific; client code should key on HTTP status and stable error codes where provided.
+
+Do not expose raw internal errors containing secrets. Audit any `err.Error()` propagation before returning it to a browser or external caller.

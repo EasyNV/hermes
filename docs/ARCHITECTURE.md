@@ -1,219 +1,325 @@
-# Hermès Architecture
+# Hermes Architecture
 
-## Service Dependency Graph
+Hermes is a multi-service WhatsApp automation stack. It combines:
 
-```
-                    ┌─────────────────────┐
-                    │   hermes-gateway     │
-                    │  gRPC:8080 REST:8081 │
-                    └──────────┬──────────┘
-                               │ gRPC
-        ┌──────────┬───────────┼───────────┬──────────┬──────────┐
-        ▼          ▼           ▼           ▼          ▼          ▼
-   ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
-   │ wa      │ │ campaign│ │ inbox   │ │contacts │ │ proxy   │ │ notify  │
-   │ :9104   │ │ :9105   │ │ :9106   │ │ :9102   │ │ :9101   │ │ :9103   │
-   └────┬────┘ └─────────┘ └─────────┘ └─────────┘ └────┬────┘ └─────────┘
-        │ gRPC                                           │
-        └────────────────────────────────────────────────┘
-                        wa → proxy (GetProxy/GetBestProxy on session connect)
-```
+- Public gateway APIs for frontend and operator clients.
+- gRPC microservices for WA, MBS, campaign, inbox, contacts, proxy, and notify domains.
+- PostgreSQL-backed persistence.
+- NATS/JetStream eventing and send queues.
+- Redis-backed runtime/session support.
+- A React/Vite operator frontend.
+- Private MBS bridge/native integration modules under `third_party/`.
 
-All services share a single PostgreSQL cluster with per-service migration namespaces.
+`re/**` reverse-engineering workspaces are intentionally outside normal service architecture and build/test status.
 
-## REST-to-gRPC Adapter
+## Service graph
 
-The gateway serves pure gRPC on port 8080. The frontend needs REST/JSON. The adapter (`internal/gateway/rest/`) bridges this gap:
-
-- 76 HTTP routes registered on the existing port 8081 HTTP server (alongside `/ws`)
-- Each route decodes JSON via `protojson.Unmarshal`, calls the gRPC handler method directly (in-process, zero network hops), encodes the response via `protojson.Marshal`
-- Auth: JWT extracted from `Authorization: Bearer` header, validated via `middleware.ParseJWT`, context populated with `CtxUserID/TenantID/WorkspaceID/Role`
-- CORS: permissive in dev (`Access-Control-Allow-Origin: *`)
-- gRPC status codes mapped to HTTP: `InvalidArgument→400`, `Unauthenticated→401`, `PermissionDenied→403`, `NotFound→404`, `Unimplemented→501`
-
-## Auth Flow
-
-```
-Login(email, password)
-  → bcrypt verify against users table
-  → Generate JWT (HS256, 15min TTL)
-    Claims: {uid, tid, wid, role, exp, iat, jti}
-  → Generate refresh token (UUID, stored in refresh_tokens table, 7d TTL)
-  → Return {accessToken, refreshToken, expiresIn, user}
-
-Every authenticated request:
-  → AuthInterceptor extracts JWT from metadata/header
-  → Validates signature + expiry
-  → Injects uid/tid/wid/role into context
-  → RBACInterceptor checks method against 73-entry rpcRoles map
-  → Superadmin bypasses all RBAC checks
+```text
+                         ┌────────────────────┐
+                         │ React/Vite frontend │
+                         └─────────┬──────────┘
+                                   │ REST + WS
+                                   ▼
+┌──────────────────────────────────────────────────────────────┐
+│ gateway                                                       │
+│ - gRPC HermesGateway on :8080                                 │
+│ - REST/JSON + WebSocket on :8081                              │
+│ - JWT auth, claim injection, RBAC middleware                  │
+│ - direct gRPC clients to backend services                     │
+└────┬─────────┬─────────┬──────────┬────────┬────────┬────────┘
+     │         │         │          │        │        │
+     ▼         ▼         ▼          ▼        ▼        ▼
+   proxy    contacts   notify       wa      mbs    campaign ───► inbox
+     │         │         │          │        │        │          │
+     └─────────┴─────────┴──────────┴────────┴────────┴──────────┘
+                                   │
+                            PostgreSQL / NATS / Redis
 ```
 
-## NATS JetStream Events
+Service entrypoints:
 
-### Streams (no subject overlap)
+- `cmd/gateway`
+- `cmd/proxy`
+- `cmd/contacts`
+- `cmd/notify`
+- `cmd/wa`
+- `cmd/mbs`
+- `cmd/campaign`
+- `cmd/inbox`
+- `cmd/mbs-import`
 
-| Stream | Subjects | Retention |
-|--------|----------|-----------|
-| HERMES_WA | `hermes.wa.message.>`, `hermes.wa.ban.>`, `hermes.wa.connection.>`, `hermes.wa.presence.>` | 7 days |
-| HERMES_CAMPAIGN | `hermes.campaign.>`, `hermes.wa.send.campaign.>` | 30 days |
-| HERMES_INBOX | `hermes.wa.send.manual.>` | 24 hours |
-| HERMES_CONTACTS | `hermes.contacts.>` | 24 hours |
-| HERMES_NOTIFY | `hermes.notify.>` | 1 hour |
+Each primary service has private implementation under `internal/<service>/` and migrations under `migrations/<service>/`.
 
-### Event Map
+## API contracts
 
-| Subject | Publisher | Consumers | Durable Name |
-|---------|-----------|-----------|--------------|
-| `hermes.wa.message.inbound.{tid}` | wa | inbox, campaign, gateway | inbox-inbound, campaign-inbound, gateway-inbound |
-| `hermes.wa.message.outbound.{tid}` | wa | inbox, gateway | inbox-outbound, gateway-outbound |
-| `hermes.wa.ban.{tid}` | wa | campaign, proxy, gateway | campaign-ban, proxy-ban, gateway-ban |
-| `hermes.wa.connection.{tid}` | wa | gateway | gateway-connection |
-| `hermes.wa.presence.{tid}` | wa | gateway | gateway-presence |
-| `hermes.wa.send.campaign.{tid}` | campaign | wa | wa-campaign-send |
-| `hermes.wa.send.manual.{tid}` | inbox | wa | wa-manual-send |
-| `hermes.campaign.status.{tid}` | campaign | gateway | gateway-campaign-status |
-| `hermes.campaign.progress.{tid}` | campaign | gateway | gateway-campaign-progress |
-| `hermes.contacts.import.done.{tid}` | contacts | gateway | gateway-import-done |
-| `hermes.notify.dispatch.{tid}` | inbox, campaign | notify | notify-dispatch |
+Protobuf definitions live under `proto/hermes/v1/`.
 
-All events include `EventMeta` envelope: `event_id` (UUID, used as `Nats-Msg-Id` for dedup), `tenant_id`, `timestamp`, `source`.
+Current service contracts:
 
-**Critical: Consumers must NAK (not ACK) on processing failure.** ACKing an unprocessed task = permanent data loss.
+- `HermesGateway`: 75 RPCs.
+- `HermesMbs`: 9 RPCs.
+- `HermesCampaign`: 17 RPCs.
+- `HermesInbox`: 14 RPCs.
+- `HermesContacts`: 11 RPCs.
+- `HermesProxy`: 11 RPCs.
+- `HermesWa`: 8 RPCs.
+- `HermesNotify`: 6 RPCs.
 
-## Database Schema (20 tables)
+The gateway REST adapter mounts 89 routes total. It is an in-process JSON adapter around the gateway handler, not grpc-gateway/envoy/connect-go.
 
-### Gateway (5 tables)
-- `tenants` — top-level accounts
-- `workspaces` — organizational units within tenants
-- `users` — authenticated users with email/password/role
-- `workspace_members` — user↔workspace assignment with role
-- `refresh_tokens` — JWT refresh token store
+## Gateway architecture
 
-### WA (2 tables + whatsmeow auto-creates ~16 internal tables)
-- `wa_numbers` — registered WhatsApp numbers with status/health/proxy assignment
-- `wa_number_workspaces` — number↔workspace assignment (many-to-many)
+Gateway responsibilities:
 
-### Campaign (4 tables)
-- `templates` — message templates with spintax + variable placeholders
-- `campaigns` — campaign definitions with status lifecycle
-- `campaign_numbers` — WA numbers assigned to campaigns
-- `campaign_contacts` — contacts assigned to campaigns with per-contact send status
+- Authenticate user login/refresh/logout flows.
+- Issue and parse JWTs.
+- Inject user, tenant, workspace, and role claims into handler contexts.
+- Apply gRPC auth/RBAC middleware.
+- Expose REST JSON endpoints for the frontend.
+- Expose WebSocket endpoints:
+  - `/ws` for general event fan-out.
+  - `/ws/mbs/bridge-login` for bidirectional MBS bridge login.
+- Hold gRPC clients to backend services.
+- Subscribe to NATS/JetStream events for frontend WebSocket fan-out.
 
-### Inbox (3 tables)
-- `conversations` — 1:1 chat threads (unique per workspace+contact+wa_number)
-- `messages` — individual messages with direction, status, wa_message_id
-- `canned_responses` — quick-reply shortcuts
+Gateway gRPC runs on `:8080`. Gateway REST/WS runs on `:8081`.
 
-### Contacts (3 tables)
-- `contacts` — contact records with phone, name, ban status
-- `contact_tags` — tag assignments (many-to-many)
-- `contact_custom_fields` — key-value custom fields (separate table, NOT a column)
+### Authentication and authorization
 
-### Proxy (1 table)
-- `proxies` — SOCKS5/HTTP proxy pool with health/ban tracking
+- REST endpoints under `/api/v1/auth/login` and `/api/v1/auth/refresh` are unauthenticated.
+- Most REST endpoints are wrapped in JWT auth middleware.
+- gRPC requests are protected by auth/RBAC interceptors.
+- Current review status: REST RBAC parity with gRPC RBAC should remain a hardening priority.
+- MBS unary gateway methods force tenant from JWT-derived context before calling `hermes-mbs`.
+- The MBS bridge-login WebSocket validates the JWT inline and overwrites any client-supplied tenant with the JWT tenant.
 
-### Notify (1 table)
-- `notification_configs` — webhook/push notification targets per workspace
+### CORS / origins
 
-## Campaign Dispatch Flow
+The REST/WS server currently has permissive CORS/origin posture suitable for development. Production deployments should front the stack with a reverse proxy and enforce explicit allowed origins.
 
-```
-CreateCampaign (draft) → assign numbers + contacts → StartCampaign
-  ↓
-Campaign engine starts goroutine for this campaign
-  ↓
-Loop: fetch 100 PENDING contacts
-  ↓
-For each contact:
-  1. Select WA number (round_robin or least_used rotation)
-  2. Resolve template: spintax → variable substitution
-  3. Calculate typing_duration_ms = clamp(len(body) * rand(50,80), 1500, 8000)
-  4. Calculate post_send_delay_ms = rand(delay_min, delay_max)
-  5. Publish CampaignSendTask to NATS hermes.wa.send.campaign.{tid}
-  6. Mark contact as "sent" in campaign_contacts
-  ↓
-WA consumer receives task:
-  1. GetClient(waNumberId) — must be CONNECTED
-  2. SendTypingIndicator (composing → wait → paused)
-  3. SendMessage via whatsmeow
-  4. IncrementSentCount on wa_number
-  5. ACK the NATS message
-  ↓
-Progress events published every 10 sends or 5 seconds
-Campaign completes when all contacts processed
-Auto-pause on ban threshold breach
-```
+## Eventing architecture
 
-## Inbox Inbound Flow
+NATS/JetStream carries service events and async send work.
 
-```
-Contact sends WhatsApp message
-  ↓
-whatsmeow fires *events.Message
-  ↓
-WA event handler filters:
-  - Skip IsFromMe (history sync, self-messages)
-  - Accept chat.Server: DefaultUserServer OR HiddenUserServer (@lid)
-  - Skip IsGroup
-  - For LID senders: resolve phone via SenderAlt JID
-  ↓
-Publish WaInboundMessageEvent to NATS hermes.wa.message.inbound.{tid}
-  ↓
-Inbox consumer receives:
-  1. Normalize phone (strip '+' prefix)
-  2. Find contact by phone (try with and without '+')
-  3. If not found: auto-create contact
-  4. Resolve workspace from WA number
-  5. Find or create conversation
-  6. Reopen if closed
-  7. Store message in DB
-  8. Update last_message_at
-  9. If unassigned: publish notification
-  ↓
-Gateway WebSocket hub receives NATS event → broadcasts to matching clients
-Frontend updates conversation list in real-time
-```
+Important event/work subjects include:
 
-## Inbox Reply Flow
+- WA messages/lifecycle:
+  - `hermes.wa.message.inbound.<tenant_id>`
+  - `hermes.wa.message.outbound.<tenant_id>`
+  - `hermes.wa.connection.<tenant_id>`
+  - `hermes.wa.ban.<tenant_id>`
+  - `hermes.wa.send.campaign.<tenant_id>`
+  - `hermes.wa.send.manual.<tenant_id>`
+- Campaign progress/status:
+  - `hermes.campaign.progress.<tenant_id>`
+  - `hermes.campaign.status.<tenant_id>`
+- Contacts imports:
+  - `hermes.contacts.import.done.<tenant_id>`
+- Notify dispatch:
+  - `hermes.notify.dispatch.<tenant_id>`
+- MBS messages/lifecycle/work:
+  - `hermes.mbs.message.inbound.<tenant_id>`
+  - `hermes.mbs.message.outbound.<tenant_id>`
+  - `hermes.mbs.session.<event>.<tenant_id>`
+  - `hermes.mbs.send.campaign.<tenant_id>`
+  - `hermes.mbs.send.manual.<tenant_id>`
 
-```
-Agent types message in inbox UI → clicks Send
-  ↓
-POST /api/v1/conversations/{id}/messages
-  ↓
-Inbox service:
-  1. Create message in DB (status = PENDING)
-  2. Resolve contact phone (strip '+' for JID)
-  3. Construct recipientJID: phone + "@s.whatsapp.net"
-  4. Publish ManualSendTask to NATS hermes.wa.send.manual.{tid}
-  5. Return message to frontend
-  ↓
-WA consumer receives:
-  1. GetClient(waNumberId) — NAK if not connected (retry later)
-  2. SendMessage via whatsmeow
-  3. Update message: status='sent', wa_message_id=<from whatsmeow>
-  4. ACK the NATS message
-  ↓
-whatsmeow delivery receipt:
-  → WA event handler publishes WaOutboundStatusEvent
-  → Inbox consumer updates message status: sent → delivered → read
+The `mbs` service owns two JetStream streams:
+
+- `HERMES_MBS` — `hermes.mbs.message.>` and `hermes.mbs.session.>`, limits retention, 7-day max age.
+- `HERMES_MBS_SEND` — `hermes.mbs.send.>`, work-queue retention, 24-hour max age.
+
+MBS send consumers use durable subscriptions:
+
+- `mbs-campaign-send` on `hermes.mbs.send.campaign.*`
+- `mbs-manual-send` on `hermes.mbs.send.manual.*`
+
+The consumer parses the tenant from the subject suffix, injects it into the context, converts `MbsCampaignSendTask` to `MbsSendMessageRequest`, and calls the same `SendMessage` handler used by direct RPC sends.
+
+## WhatsApp (`wa`) architecture
+
+The WA service uses `go.mau.fi/whatsmeow` for QR/phone-paired WhatsApp sessions. Gateway routes WA number registration, QR code retrieval, disconnect/reconnect, send, typing, and status calls to `hermes-wa`.
+
+`wa` depends on:
+
+- PostgreSQL for persisted session/domain state.
+- Redis for runtime/session support.
+- NATS for messages, lifecycle, campaign/manual send subjects.
+- Proxy service for proxy assignment/health behavior.
+
+## MBS architecture
+
+The MBS stack is split into three layers:
+
+1. `internal/mbs` / `cmd/mbs` — Hermes service layer.
+2. `third_party/mbs-native` — native BizApp/MBS client library.
+3. `third_party/mautrix-meta-patched` — patched mautrix-meta bridge dependency that mints/exposes login payload/device identity needed by `mbs-native`.
+
+### Bridge login flow
+
+```text
+browser BridgeLoginDialog
+  │
+  │ WebSocket /ws/mbs/bridge-login?token=<jwt>
+  ▼
+gateway REST adapter
+  │ validates JWT, forces tenant metadata
+  │ opens HermesMbs.BridgeLogin bidi stream
+  ▼
+hermes-mbs BridgeLogin handler
+  │ runs bridge driver with email/password + optional TOTP secret
+  │ emits prompt/progress/success/failure frames
+  ▼
+patched mautrix-meta driver
+  │ exposes login payload + device identity
+  ▼
+mbs-native auth / web / transport / mqtt client
+  │ materializes native BizApp session + discovers assets
+  ▼
+PostgreSQL encrypted session/cookie/blob rows + mbs_session_assets
 ```
 
-## whatsmeow Integration
+Current frontend dialog inputs:
 
-- **Device identity**: MacOS Desktop (`Os="Mac OS"`, `PlatformType=DESKTOP`, `Version=2.2450.6`)
-- **QR pairing**: `GetQRChannel(context.Background())` → `Connect()` → consume QR events. **Must use background context** — request context cancellation kills the websocket.
-- **Phone pairing**: after first QR event, call `PairPhone(phone, true, PairClientChrome, "Chrome (Linux)")` → returns 8-char code
-- **QR image**: raw whatsmeow string converted to 256px PNG via `go-qrcode`, returned as base64
-- **Session persistence**: PostgreSQL via `pgx` stdlib driver (blank import required)
-- **LID contacts**: WhatsApp migrated contacts to `@lid` server. Accept both `DefaultUserServer` and `HiddenUserServer`.
+- Email or phone.
+- Password.
+- Optional base32 TOTP secret.
 
-## WebSocket Hub
+Prompt frames support live 2FA/checkpoint input if auto-TOTP is not available.
 
-- Hub manages clients in `map[*Client]struct{}` with RWMutex
-- Max 3 connections per user
-- Heartbeat: server ping every 30s, close after 3 missed pongs
-- `EventSubscriber` bridges 8 NATS subjects to JSON WebSocket messages
-- Scoping: tenant-wide, workspace-scoped, or user-specific broadcasts
-- Non-blocking send with drop on full buffer
+The bridge login handler enforces:
+
+- First stream message must be `BridgeLoginStart`.
+- Tenant from stream metadata is required.
+- Body tenant must match metadata tenant when present.
+- Concurrent bridge attempts are limited by semaphore.
+- Secret-bearing persistence is encrypted field-by-field with AAD before DB write.
+- Cross-tenant UID overwrite attempts fail closed.
+
+### MBS session state
+
+Current MBS session states:
+
+- `ACTIVE`
+- `SUSPENDED`
+- `BURNED`
+- `BRIDGING`
+
+Session metadata includes UID, tenant, display name, last CONNACK result, device/app diagnostics, primary asset, timestamps, and login identifier.
+
+Assets include page/WABA/WEC data:
+
+- `page_id`, `page_name`
+- `waba_id`
+- `wec_mailbox_id`, `wec_phone_number`
+- `business_presence_node_id`
+- optional IG account ID
+- business manager ID/name
+- primary flag
+- WEC registration flag
+
+### MBS sending and listening
+
+MBS sends use `MbsSendMessageRequest`:
+
+- `uid` selects the MBS session.
+- Recipient is either `thread_id` or `phone`.
+- `text` is required.
+- `client_dedupe_id` supports idempotent retry/redelivery handling.
+- `page_id_override` supports multi-page accounts and must be treated as authorization-sensitive.
+
+Phone sends resolve to a thread through cache or live BizInbox WhatsApp customer mutation before native send.
+
+Inbound listening is exposed through `HermesMbs.Listen` and NATS message events.
+
+## Campaign architecture
+
+Campaigns own templates, recipients, selected senders, lifecycle, and send scheduling. They can dispatch through WA or MBS paths.
+
+MBS campaign dispatch publishes work to:
+
+```text
+hermes.mbs.send.campaign.<tenant_id>
+```
+
+The MBS consumer redelivers transient failures up to the configured max delivery count and terminates permanent failures (invalid arguments, not found, permission/credential failures, burned sessions, etc.).
+
+Current MBS sender rotation strategies:
+
+- `round_robin`
+- `least_used`
+
+Review note: campaign progress semantics should be kept explicit. Enqueue/send attempt status is not the same as confirmed downstream delivery.
+
+## Persistence
+
+PostgreSQL is the source of truth. Each service has its own migration directory and migration table name:
+
+```text
+schema_migrations_gateway
+schema_migrations_wa
+schema_migrations_mbs
+schema_migrations_campaign
+schema_migrations_inbox
+schema_migrations_contacts
+schema_migrations_proxy
+schema_migrations_notify
+```
+
+Production compose uses file-backed secrets. The MBS data encryption key is mounted into the `mbs` container and used for encrypted bridge/session material. Losing the DEK makes encrypted MBS rows unrecoverable.
+
+## Deployment architecture
+
+### Development compose
+
+`docker-compose.dev.yml` builds local backend services from `Dockerfile.dev`, starts infrastructure, runs migrations, starts all eight services, and starts the frontend Vite dev server.
+
+Default dev ports:
+
+- Postgres host port: `${HERMES_PG_HOST_PORT:-5433}`
+- Redis: `6380`
+- NATS client: `4222`
+- NATS monitor: `8222`
+- Gateway gRPC: `8080`
+- Gateway REST/WS: `8081`
+- MBS gRPC: `8082`
+- MBS metrics/health: `9092`
+- Frontend Vite: `5173`
+
+### Production compose
+
+`docker-compose.prod.yml` uses prebuilt images:
+
+- `hermes-proxy:${HERMES_VERSION}`
+- `hermes-contacts:${HERMES_VERSION}`
+- `hermes-notify:${HERMES_VERSION}`
+- `hermes-wa:${HERMES_VERSION}`
+- `hermes-campaign:${HERMES_VERSION}`
+- `hermes-inbox:${HERMES_VERSION}`
+- `hermes-mbs:${HERMES_VERSION}`
+- `hermes-gateway:${HERMES_VERSION}`
+- `hermes-web:${HERMES_VERSION}`
+
+Production posture includes restart policies, resource limits, read-only service containers for MBS/gateway, tmpfs `/tmp`, file-backed Docker secrets, and health gates.
+
+## Security boundaries and open hardening items
+
+Important trust boundaries:
+
+- Browser → gateway REST/WS.
+- Gateway → backend gRPC services.
+- NATS subjects/payloads → service consumers.
+- MBS bridge driver/native client → encrypted persistence.
+- Frontend local token storage → WebSocket query-token transport.
+- Multi-tenant object access in gateway, store, MBS session, and campaign paths.
+
+Current hardening priorities:
+
+- REST RBAC parity with gRPC RBAC.
+- Strict origin/CORS configuration for production.
+- WebSocket token handling and log scrubbing.
+- Object-level tenant/workspace/session checks.
+- Validation of MBS `page_id_override` against session-owned assets.
+- Subject/payload tenant consistency for NATS work queues.
+- Encryption/redaction review for all MBS bridge/session material.
+- Dev dependency advisory cleanup.
