@@ -261,7 +261,7 @@ func (s *PgStore) ListConversations(ctx context.Context, workspaceID, statusFilt
 
 	offset := (page - 1) * pageSize
 	query := fmt.Sprintf(`
-		SELECT c.id, c.workspace_id, c.contact_id, COALESCE(c.wa_number_id, ''), c.assigned_to,
+		SELECT c.id, c.workspace_id, c.contact_id, COALESCE(c.wa_number_id::text, ''), c.assigned_to,
 		       c.status, c.last_message_at, c.campaign_id, c.first_response_time_secs, c.created_at,
 		       COALESCE(ct.name, ''), COALESCE(ct.phone, ''),
 		       COALESCE((SELECT LEFT(body, 100) FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1), ''),
@@ -303,7 +303,7 @@ func (s *PgStore) ListConversations(ctx context.Context, workspaceID, statusFilt
 func (s *PgStore) GetConversation(ctx context.Context, id string) (*ConversationRow, error) {
 	r := &ConversationRow{}
 	err := s.pool.QueryRow(ctx, `
-		SELECT c.id, c.workspace_id, c.contact_id, COALESCE(c.wa_number_id, ''), c.assigned_to,
+		SELECT c.id, c.workspace_id, c.contact_id, COALESCE(c.wa_number_id::text, ''), c.assigned_to,
 		       c.status, c.last_message_at, c.campaign_id, c.first_response_time_secs, c.created_at,
 		       COALESCE(ct.name, ''), COALESCE(ct.phone, ''), '', 0,
 		       COALESCE(c.channel, 'wa'),
