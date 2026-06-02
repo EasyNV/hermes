@@ -32,6 +32,23 @@ func TestParseInboxItem_LsRespWithEmptyPayload_Empty(t *testing.T) {
 	}
 }
 
+func TestParseInboxItem_MessageBearingItem_EmitsNothing(t *testing.T) {
+	// Regression: the push path must NOT emit message deltas. Before the
+	// fix, a message-bearing RawPayload (mid.$ markers) was extracted via
+	// fb.ExtractMessages and emitted with a mis-keyed thread_id, polluting
+	// the inbox with snowflake-keyed junk conversations and racing the
+	// authoritative poll-path insert on the global mbs_mid unique index.
+	// The poll path (parseSnapshotPoll) is the sole inbound source now.
+	item := &client.InboxItem{
+		LsResp:     &fb.LsResp{Payload: []byte("mid.$cAAABfUHQkGCexampleBody")},
+		RawPayload: []byte("38 13 7467527909983384158 mid.$cAAABfUHQkGCexample 38 04 hello"),
+	}
+	got := parseInboxItem(item, 100)
+	if got != nil {
+		t.Errorf("push path must emit no message deltas, got %d: %+v", len(got), got)
+	}
+}
+
 func TestParseSnapshotPoll_NilResp(t *testing.T) {
 	got := parseSnapshotPoll(nil, 100)
 	if got != nil {

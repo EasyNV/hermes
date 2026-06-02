@@ -40,46 +40,33 @@ func profileIDFromURL(u string) string {
 	return id
 }
 
-// parseInboxItem converts one server-pushed client.InboxItem into zero
-// or more InboundDelta records. The Inbox channel carries:
+// parseInboxItem handles server-pushed client.InboxItem deltas. It
+// intentionally emits NO message InboundDeltas.
 //
-//   - Non-/ls_resp PUBLISHes (raw Frame only). Chunk 3 ignores these —
-//     they're typically analytics/presence that handler doesn't surface.
-//   - /ls_resp PUBLISHes on topic 179 (LsResp + RawPayload set).
-//     Unsolicited deltas: new messages, receipts, typing.
+// History: chunk 3 extracted messages here via fb.ExtractMessages on the
+// delta-push format. That extractor cannot reliably key INBOUND messages:
+// it reads thread_id from m.OTID (the sender's OUTBOUND optimistic id,
+// empty on genuine customer inbound) and, lacking the threads block, mis-
+// parses message bodies. On real customer replies this produced junk —
+// conversations keyed on per-message snowflakes (mbs:thread:<snowflake>),
+// corrupted bodies, and an "un-keyable, dropping" flood — AND, because the
+// messages table has a GLOBAL unique index on mbs_mid, the junk push-path
+// row won the insert race and BLOCKED the correct poll-path row for the
+// same MID (ON CONFLICT DO NOTHING).
 //
-// We delegate the actual byte-level extraction to fb.ExtractMessages,
-// which already exists in mbs-native/fb/lspayload.go.
+// The authoritative inbound source is parseSnapshotPoll (SnapshotPoll
+// "130"), which recovers BOTH senderFBID AND the threads block and JOINs
+// them to the real customer_id. It captures every inbound message and is
+// idempotent on mbs_mid. The push path is therefore pure pollution for
+// messages and is disabled. Receipts/typing/presence carried no message
+// body and were never surfaced anyway, so nothing of value is lost.
 //
-// Empty result is valid — receipt/typing/presence deltas produce
-// extractable messages with empty Body, which callers can filter on.
+// The function is retained (rather than deleted) so the listener call site
+// stays stable and the rationale lives next to the code; if a non-message
+// use for the push channel appears (delivery receipts, typing), it can be
+// reintroduced here WITHOUT re-enabling message-delta emission.
 func parseInboxItem(item *client.InboxItem, uid int64) []*InboundDelta {
-	if item == nil {
-		return nil
-	}
-	if item.LsResp == nil || len(item.RawPayload) == 0 {
-		// Non-/ls_resp publish (analytics, presence binary). Skip —
-		// chunk 3 doesn't surface these. Frame-only items can be
-		// reintroduced in chunk 5 if a use case appears.
-		return nil
-	}
-	msgs := fb.ExtractMessages(item.RawPayload)
-	now := time.Now()
-	out := make([]*InboundDelta, 0, len(msgs))
-	for _, m := range msgs {
-		out = append(out, &InboundDelta{
-			UID:        uid,
-			ThreadID:   deriveThreadID(m),
-			MID:        m.MID,
-			SenderName: m.Sender,
-			SenderURL:  m.SenderURL,
-			Text:       m.Body,
-			Kind:       m.Kind,
-			ReceivedAt: now,
-			Raw:        item,
-		})
-	}
-	return out
+	return nil
 }
 
 // parseSnapshotPoll extracts message deltas from a /ls_resp envelope
