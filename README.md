@@ -9,23 +9,43 @@ The current codebase is a Go 1.25 service stack with a React/Vite frontend, prot
 
 > Security note: this repository handles account credentials, JWTs, bridge envelopes, cookies, access tokens, TOTP secrets, and message data. Keep secrets out of docs, logs, commits, screenshots, and bug reports. Use `[REDACTED]` placeholders in examples.
 
+## Architecture
+
+```
+┌──────────────┐     ┌────────────────────────────┐     ┌──────────┬──────────┬──────────┐
+│  hermes-web  │────▶│     hermes-gateway         │────▶│ wa       │ mbs      │ campaign │
+│  (React SPA) │ WS  │  gRPC :8080                │gRPC │ inbox    │ contacts │ proxy    │
+│  :5173       │◀────│  REST + WS :8081           │◀────│ notify   │          │          │
+└──────────────┘     └────────────────────────────┘     └──────────┴──────────┴──────────┘
+                              ↕ NATS JetStream (WA + MBS + campaign/contacts/notify subjects)
+                         PostgreSQL 17  ·  Redis 7  ·  NATS 2
+                                   │
+                   third_party/ submodules (replace directives):
+                   mbs-native (BizApp client) · mautrix-meta-patched (bridge login)
+```
+
+**9 backend services + 1 operator tool:**
+
+| Service | Port (dev) | Description |
+|---------|------------|-------------|
+| `hermes-gateway` | 8080 (gRPC), 8081 (REST + WS) | API gateway, JWT auth, RBAC, WebSocket hub, REST adapter |
+| `hermes-wa` | gRPC + HTTP pair | WhatsApp session management via whatsmeow |
+| `hermes-mbs` | 8082 (gRPC), 9092 (health) | Meta Business Suite sessions, bridge login, assets, native send, inbound poll/listen |
+| `hermes-campaign` | gRPC | Bulk send engine with anti-ban controls (WA + MBS) |
+| `hermes-inbox` | gRPC | Agent conversation view, message search (WA + MBS) |
+| `hermes-contacts` | gRPC | Contact CRUD + CSV import |
+| `hermes-proxy` | gRPC | SOCKS5/HTTP proxy pool management |
+| `hermes-notify` | gRPC | Webhook + push notification dispatch |
+| `hermes-web` | 5173 | React SPA (Vite + TypeScript) |
+| `mbs-import` | — | One-shot operator import tool (not a long-running service) |
+
 ## Current stack
 
 ### Backend services
 
-Hermes builds eight primary Go services plus one operator/import tool:
-
-- `gateway` — public gRPC, REST, WebSocket, auth, JWT, RBAC, service fan-out.
-- `proxy` — proxy inventory, assignment, health, and ban-flag support.
-- `contacts` — contacts, tags, imports, ban checks, campaign history support.
-- `notify` — notification configuration and test dispatch.
-- `wa` — whatsmeow-backed WhatsApp sessions paired through QR/phone pairing.
-- `mbs` — Meta Business Suite sessions, bridge login, session assets, phone resolution, native sends, inbound listen.
-- `campaign` — template/campaign lifecycle and WA/MBS send orchestration.
-- `inbox` — conversations, messages, agent assignment, canned responses.
-- `mbs-import` — one-shot operator import tooling.
-
-Service entrypoints live in `cmd/`. Private implementation lives in `internal/`. Generated protobuf Go bindings live in `gen/go/hermes/v1/`.
+Hermes builds nine Go services plus one operator/import tool (see the service
+table above). Service entrypoints live in `cmd/`. Private implementation lives
+in `internal/`. Generated protobuf Go bindings live in `gen/go/hermes/v1/`.
 
 ### Frontend
 
@@ -47,26 +67,91 @@ Dev compose exposes the Vite server on `http://localhost:5173`. Production compo
 - `migrate/migrate` for per-service migrations.
 - Docker Compose dev/prod stacks for single-host deployment.
 
-## Repository layout
+### Tech Stack
 
-```text
-.
-├── cmd/                         # Service entrypoints + mbs-import operator tool
-├── deploy/                      # Deployment support, proxy config, secret file locations
-├── docs/                        # Architecture, API, deployment, status, runbooks, contracts
-├── gen/go/hermes/v1/            # Generated protobuf Go bindings
-├── internal/                    # Private service implementations
-├── migrations/                  # Per-service DB migrations
-├── proto/hermes/v1/             # Protobuf API/event definitions
-├── scripts/                     # Operator/build helper scripts
-├── third_party/
-│   ├── mautrix-meta-patched/    # Hermes-patched go.mau.fi/mautrix-meta submodule
-│   └── mbs-native/              # Hermes MBS native client submodule
-├── web/                         # React/Vite frontend
-├── docker-compose.dev.yml       # Local full-stack compose
-├── docker-compose.prod.yml      # Image-based production compose
-├── go.mod
-└── Makefile
+| Component | Choice |
+|-----------|--------|
+| Backend | Go 1.25 (monorepo, 9 services + `mbs-import`) |
+| Frontend | React 19 + Vite + TypeScript |
+| UI | Tailwind CSS + shadcn/ui + Radix + Lucide |
+| State | Zustand (client) + TanStack Query (server) |
+| Routing | TanStack Router |
+| Database | PostgreSQL 17 (shared cluster, per-service migrations) |
+| Cache | Redis 7 |
+| Message Broker | NATS JetStream 2 |
+| WA Library | whatsmeow (Go native, identifies as MacOS Desktop) |
+| MBS Client | `third_party/mbs-native` (native BizApp/Lightspeed MQTToT) |
+| MBS Bridge | `third_party/mautrix-meta-patched` (patched `go.mau.fi/mautrix-meta`) |
+| Proto Codegen | buf |
+| Dev Infra | Docker Compose (dev + prod stacks) |
+
+## Project Structure
+
+```
+hermes/
+├── cmd/                          # Service entry points (main.go per service)
+│   ├── gateway/                  # API gateway + REST adapter + WS hub
+│   ├── wa/                       # WhatsApp sessions + NATS consumers
+│   ├── mbs/                      # MBS service + send consumers + JetStream streams
+│   ├── mbs-import/               # One-shot operator import tool
+│   ├── campaign/                 # Campaign dispatch engine
+│   ├── inbox/                    # Conversation management + NATS consumers
+│   ├── contacts/                 # Contact CRUD
+│   ├── proxy/                    # Proxy pool
+│   └── notify/                   # Notification dispatch
+├── internal/                     # Service-specific code
+│   ├── gateway/
+│   │   ├── handler/              # 75 RPC handler implementations
+│   │   ├── middleware/           # JWT auth + RBAC interceptors
+│   │   ├── rest/                 # REST-to-gRPC adapter (89 mounted routes)
+│   │   └── websocket/            # WebSocket hub + NATS→WS event bridge (incl. mbs_new_message)
+│   ├── wa/
+│   │   ├── handler/              # 8 RPC handlers
+│   │   ├── session/              # whatsmeow session manager + event publisher
+│   │   └── sender/               # Message send + typing indicators
+│   ├── mbs/                      # 9 RPC handlers (HermesMbs)
+│   │   ├── handler/              # bridge-login, lifecycle, resolve-phone, send
+│   │   ├── bridge/               # mautrix-meta-patched driver + login envelope
+│   │   ├── session/              # connection manager + listener + inbound snapshot parser
+│   │   ├── store/                # session/asset/thread persistence
+│   │   ├── importer/             # operator import
+│   │   └── refresh/              # cookie/session freshness ticker
+│   ├── campaign/
+│   │   ├── handler/              # 17 RPC handlers
+│   │   ├── engine/               # Dispatch engine + number rotation
+│   │   └── spintax/              # Spintax resolver
+│   ├── inbox/
+│   │   ├── handler/              # 14 RPC handlers (WA + MBS conversations)
+│   │   └── conversation/         # State machine
+│   ├── contacts/handler/         # 11 RPC handlers
+│   ├── proxy/handler/            # 11 RPC handlers
+│   └── notify/
+│       ├── handler/              # 6 RPC handlers
+│       └── dispatch/             # Webhook dispatch
+├── pkg/                          # Shared packages (db, nats, config, logger)
+├── proto/hermes/v1/              # Proto source files (10 files)
+├── gen/go/hermes/v1/             # Generated Go stubs (DO NOT EDIT)
+├── migrations/                   # DB migrations per service (golang-migrate, 8 services)
+├── third_party/                  # Private submodules (replace directives — clone --recurse-submodules)
+│   ├── mbs-native/               # Native MBS/BizApp Lightspeed client (consumed by hermes-mbs)
+│   └── mautrix-meta-patched/     # Patched go.mau.fi/mautrix-meta for bridge login
+├── web/                          # React frontend
+│   └── src/
+│       ├── api/                  # Typed API client (per-domain modules incl. mbs.ts)
+│       ├── pages/                # 12 page components
+│       ├── components/           # Layout + shared + shadcn/ui + mbs/
+│       ├── hooks/                # useAuth, useWebSocket, useDebounce
+│       └── stores/               # Zustand stores (auth, inbox, campaigns, mbs, websocket)
+├── deploy/                       # Deployment support, proxy config, secret file locations
+├── docker-compose.dev.yml        # Full local dev stack
+├── docker-compose.prod.yml       # Image-based production compose
+├── Dockerfile / Dockerfile.dev / Dockerfile.web
+└── docs/
+    ├── API.md                    # Complete REST API reference
+    ├── ARCHITECTURE.md           # Deep technical documentation
+    ├── DEPLOYMENT.md             # Docker Compose setup + env vars + troubleshooting
+    ├── BUILD-STATUS.md           # Latest audited build/test/security status
+    └── runbooks/                 # Operator runbooks (compose-deploy, mbs-bootstrap, secrets)
 ```
 
 `re/**` is reverse-engineering workspace material and is intentionally excluded from normal build/test/documentation status.
