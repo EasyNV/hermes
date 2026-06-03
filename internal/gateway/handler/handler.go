@@ -1499,6 +1499,25 @@ func (h *Handler) authorizeConversationAccess(ctx context.Context, convID string
 	return nil
 }
 
+// CanAccessConversation reports whether (role, userID) may read a conversation,
+// resolving its assigned_to via the inbox service. Exported so the WebSocket hub
+// can authorize per-conversation subscriptions with the SAME ownership model the
+// REST/gRPC conversation endpoints enforce. Returns false on any resolution
+// error (fail-closed) — the hub treats inability to verify as deny.
+func (h *Handler) CanAccessConversation(ctx context.Context, role, userID, conversationID string) bool {
+	if role != "cs_agent" {
+		return true // privileged: full access, no fetch
+	}
+	if h.inboxClient == nil {
+		return false
+	}
+	resp, err := h.inboxClient.GetConversation(ctx, &hermesv1.InboxGetConversationRequest{Id: conversationID})
+	if err != nil {
+		return false // fail-closed: can't verify ownership -> deny
+	}
+	return canAccessConversation(role, userID, resp.GetConversation().GetAssignedTo())
+}
+
 func (h *Handler) ListConversations(ctx context.Context, req *hermesv1.ListConversationsRequest) (*hermesv1.ListConversationsResponse, error) {
 	if h.inboxClient == nil {
 		return nil, status.Error(codes.Unavailable, "inbox service not available")

@@ -61,18 +61,11 @@ func (s *EventSubscriber) handleMbsInboundMessage(msg *natsgo.Msg) {
 		s.log.Warn().Str("subject", msg.Subject).Msg("mbs inbound: empty tenant_id (publisher misconfig)")
 	}
 
-	payload := map[string]any{
-		"uid":          strconv.FormatInt(ev.GetUid(), 10),
-		"pageId":       ev.GetPageId(),
-		"wecMailboxId": ev.GetWecMailboxId(),
-		"threadId":     ev.GetThreadId(),
-		"mid":          ev.GetMid(),
-		"senderPhone":  ev.GetSenderPhone(),
-		"text":         ev.GetText(),
-		"receivedAt":   protoToISO(ev.GetMetaTimestamp(), extractTimestamp(ev.GetMeta())),
-	}
-	data := marshalWSEvent("mbs_new_message", payload)
-	s.hub.Broadcast(tenantID, "", data)
+	// RBAC WS scoping: the "mbs_new_message" frame is now emitted by
+	// handleInboxMessageNew (hermes.inbox.message.new.*) with conversation
+	// ownership scoping. The raw handler no longer broadcasts (would leak across
+	// agents + double-deliver); retained only to keep draining the MBS stream.
+	// tenantID is already read above via extractTenantID(ev.GetMeta()).
 
 	_ = msg.Ack()
 }
@@ -165,6 +158,61 @@ func (s *EventSubscriber) handleMbsSessionLifecycle(msg *natsgo.Msg) {
 	data := marshalWSEvent("mbs_session_lifecycle", payload)
 	s.hub.Broadcast(tenantID, "", data)
 
+	_ = msg.Ack()
+}
+
+// handleInboxMessageNew handles hermes.inbox.message.new.<tenant>, the enriched
+// inbound event published by hermes-inbox AFTER a conversation exists. It carries
+// conversation ownership (conversation_id, workspace_id, assigned_to) so the
+// gateway can scope the live message frame per the conversation ownership model:
+// admins get it tenant-wide; a cs_agent gets it only for own + unassigned (in
+// their workspace). This is the sole emitter of "new_message"/"mbs_new_message"
+// frames; the raw wa/mbs inbound handlers no longer broadcast.
+//
+// The emitted frame shape is preserved per channel so the frontend stores are
+// unchanged: WA -> "new_message", MBS -> "mbs_new_message".
+func (s *EventSubscriber) handleInboxMessageNew(msg *natsgo.Msg) {
+	var ev hermesv1.InboxMessageNewEvent
+	if err := proto.Unmarshal(msg.Data, &ev); err != nil {
+		s.log.Error().Err(err).Msg("unmarshal InboxMessageNewEvent")
+		_ = msg.Ack()
+		return
+	}
+	tenantID := extractTenantID(ev.GetMeta())
+	if tenantID == "" {
+		s.log.Warn().Str("subject", msg.Subject).Msg("inbox.message.new: empty tenant_id")
+	}
+
+	receivedAt := protoToISO(ev.GetReceivedAt(), extractTimestamp(ev.GetMeta()))
+
+	var data []byte
+	if ev.GetChannel() == "mbs" {
+		payload := map[string]any{
+			"uid":         strconv.FormatInt(ev.GetUid(), 10),
+			"threadId":    ev.GetThreadId(),
+			"mid":         ev.GetMessageId(),
+			"senderPhone": ev.GetContactPhone(),
+			"text":        ev.GetBody(),
+			"receivedAt":  receivedAt,
+			// conversation context for any future per-conversation client logic
+			"conversationId": ev.GetConversationId(),
+		}
+		data = marshalWSEvent("mbs_new_message", payload)
+	} else {
+		payload := map[string]any{
+			"conversation_id": ev.GetConversationId(),
+			"workspace_id":    ev.GetWorkspaceId(),
+			"assigned_to":     ev.GetAssignedTo(),
+			"wa_message_id":   ev.GetMessageId(),
+			"contact_name":    ev.GetContactName(),
+			"contact_phone":   ev.GetContactPhone(),
+			"body":            ev.GetBody(),
+			"received_at":     receivedAt,
+		}
+		data = marshalWSEvent("new_message", payload)
+	}
+
+	s.hub.BroadcastConversationScoped(tenantID, ev.GetWorkspaceId(), ev.GetAssignedTo(), data)
 	_ = msg.Ack()
 }
 

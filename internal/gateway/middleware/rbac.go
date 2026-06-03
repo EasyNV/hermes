@@ -99,12 +99,77 @@ var rpcRoles = map[string][]string{
 	"/hermes.v1.HermesGateway/TransferConversation": {"workspace_admin", "cs_agent"},
 	"/hermes.v1.HermesGateway/CloseConversation":    {"workspace_admin", "cs_agent"},
 	"/hermes.v1.HermesGateway/SendMessage":          {"workspace_admin", "cs_agent"},
+
+	// --- MBS (HermesMbs proxy) ---
+	// These RPCs are served by the HermesMbs service and proxied through the
+	// gateway handler + REST adapter; the gRPC interceptor never sees them
+	// directly, but the REST authz wrapper enforces these keys. Method keys
+	// use the HermesMbs full-method form for consistency.
+	// D1: read RPCs — all roles (Dashboard tile + cold-compose picker need the list).
+	"/hermes.v1.HermesMbs/ListSessions":      {"superadmin", "tenant_admin", "workspace_admin", "cs_agent"},
+	"/hermes.v1.HermesMbs/GetSessionStatus":  {"superadmin", "tenant_admin", "workspace_admin", "cs_agent"},
+	"/hermes.v1.HermesMbs/ListSessionAssets": {"superadmin", "tenant_admin", "workspace_admin", "cs_agent"},
+	// D2: send/resolve — all roles (cold-compose is an agent action).
+	"/hermes.v1.HermesMbs/ResolvePhone": {"superadmin", "tenant_admin", "workspace_admin", "cs_agent"},
+	"/hermes.v1.HermesMbs/SendMessage":  {"superadmin", "tenant_admin", "workspace_admin", "cs_agent"},
+	// D3: destructive — admins only (cs_agent excluded).
+	"/hermes.v1.HermesMbs/BurnSession":   {"superadmin", "tenant_admin", "workspace_admin"},
+	"/hermes.v1.HermesMbs/RemoveSession": {"superadmin", "tenant_admin", "workspace_admin"},
+
+	// --- REST-only routes (no HermesGateway gRPC equivalent) ---
+	// Synthetic "REST:" keys for routes that exist only in the REST adapter
+	// (admin/allowlist/pairing operations dispatched in-process, not via a
+	// gateway RPC). The REST authz wrapper passes these exact keys.
+	"REST:DELETE /api/v1/conversations/clear": {"superadmin", "tenant_admin", "workspace_admin"},
+	"REST:GET /api/v1/allowlist":              {"superadmin", "tenant_admin", "workspace_admin", "cs_agent"},
+	"REST:POST /api/v1/allowlist":             {"superadmin", "tenant_admin", "workspace_admin"},
+	"REST:DELETE /api/v1/allowlist":           {"superadmin", "tenant_admin", "workspace_admin"},
+	"REST:DELETE /api/v1/allowlist/clear":     {"superadmin", "tenant_admin", "workspace_admin"},
+	"REST:POST /api/v1/wa-numbers/{id}/pair-phone": {"superadmin", "tenant_admin"},
+	"REST:POST /api/v1/conversations/{id}/typing":  {"superadmin", "tenant_admin", "workspace_admin", "cs_agent"},
+}
+
+// HasRule reports whether a method key has an explicit RBAC rule in the policy
+// map. Used by the REST route-audit test to guarantee every authenticated route
+// maps to a known rule — under default-deny, a missing key silently 403s in
+// production, so the build must fail instead.
+func HasRule(method string) bool {
+	_, ok := rpcRoles[method]
+	return ok
+}
+
+// AuthorizeMethod enforces role-tier RBAC for a logical method key. It is the
+// single source of truth shared by the gRPC RBACInterceptor and the REST authz
+// wrapper so both transports enforce identical policy from one rpcRoles map.
+//
+//   - empty role            -> PermissionDenied (no role in context)
+//   - superadmin            -> always allowed (bypass)
+//   - method not in map     -> PermissionDenied (fail-closed / default-deny)
+//   - role in allowed list  -> allowed
+//   - otherwise             -> PermissionDenied
+func AuthorizeMethod(role, method string) error {
+	if role == "" {
+		return status.Error(codes.PermissionDenied, "no role in context")
+	}
+	if role == "superadmin" {
+		return nil
+	}
+	allowed, ok := rpcRoles[method]
+	if !ok {
+		return status.Errorf(codes.PermissionDenied, "no RBAC rule for %s", method)
+	}
+	for _, r := range allowed {
+		if r == role {
+			return nil
+		}
+	}
+	return status.Errorf(codes.PermissionDenied, "role %q not allowed for %s", role, method)
 }
 
 // RBACInterceptor returns a gRPC unary server interceptor that enforces
 // role-based access control. It reads the caller's role from the context
-// (set by AuthInterceptor) and checks it against the allowed roles for the
-// requested RPC method. The superadmin role always bypasses RBAC checks.
+// (set by AuthInterceptor) and delegates to AuthorizeMethod. Login and
+// RefreshToken RPCs are skipped (unauthenticated).
 func RBACInterceptor() grpc.UnaryServerInterceptor {
 	return func(
 		ctx context.Context,
@@ -118,27 +183,9 @@ func RBACInterceptor() grpc.UnaryServerInterceptor {
 			return handler(ctx, req)
 		}
 
-		role := RoleFromCtx(ctx)
-		if role == "" {
-			return nil, status.Error(codes.PermissionDenied, "no role in context")
+		if err := AuthorizeMethod(RoleFromCtx(ctx), info.FullMethod); err != nil {
+			return nil, err
 		}
-
-		// Superadmin bypasses all RBAC checks.
-		if role == "superadmin" {
-			return handler(ctx, req)
-		}
-
-		allowed, ok := rpcRoles[info.FullMethod]
-		if !ok {
-			return nil, status.Errorf(codes.PermissionDenied, "no RBAC rule for %s", info.FullMethod)
-		}
-
-		for _, r := range allowed {
-			if r == role {
-				return handler(ctx, req)
-			}
-		}
-
-		return nil, status.Errorf(codes.PermissionDenied, "role %q not allowed for %s", role, info.FullMethod)
+		return handler(ctx, req)
 	}
 }

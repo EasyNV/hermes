@@ -38,10 +38,14 @@ const (
 // JWT claims for WebSocket auth
 // ---------------------------------------------------------------------------
 
+// wsClaims mirrors middleware.Claims. JSON tags MUST match the token-generating
+// handler.Claims: uid, tid, wid, role. (Previously these were user_id/tenant_id/
+// workspace_id, which silently parsed as empty — breaking ALL WS tenant scoping,
+// not just the conversation-scoped fan-out. Surfaced by the GAP-3b live test.)
 type wsClaims struct {
-	UserID      string `json:"user_id"`
-	TenantID    string `json:"tenant_id"`
-	WorkspaceID string `json:"workspace_id"`
+	UserID      string `json:"uid"`
+	TenantID    string `json:"tid"`
+	WorkspaceID string `json:"wid"`
 	Role        string `json:"role"`
 	jwt.RegisteredClaims
 }
@@ -67,20 +71,35 @@ type conversationPayload struct {
 // Hub — manages all connected WebSocket clients
 // ---------------------------------------------------------------------------
 
+// ConversationAuthorizer resolves whether a (role, userID) caller may access a
+// conversation. Backed in production by the gateway handler's
+// CanAccessConversation, which resolves the conversation's assigned_to via the
+// inbox service and applies the cs_agent ownership model (own + unassigned).
+// Injected so the hub can gate per-conversation subscriptions without importing
+// the handler package (avoids an import cycle) and so tests can stub it.
+type ConversationAuthorizer interface {
+	CanAccessConversation(ctx context.Context, role, userID, conversationID string) bool
+}
+
 // Hub maintains the set of active WebSocket clients and broadcasts messages
 // to clients scoped by tenant/workspace.
 type Hub struct {
 	clients   map[*Client]struct{}
 	mu        sync.RWMutex
 	jwtSecret []byte
+	authz     ConversationAuthorizer // may be nil (tests / partial wiring)
 	log       zerolog.Logger
 }
 
 // NewHub creates a new Hub with the given JWT secret for token validation.
-func NewHub(jwtSecret []byte, log zerolog.Logger) *Hub {
+// authz gates per-conversation subscriptions; when nil, subscription access
+// checks are skipped (legacy behavior — used only in unit tests that don't
+// exercise subscription authorization).
+func NewHub(jwtSecret []byte, authz ConversationAuthorizer, log zerolog.Logger) *Hub {
 	return &Hub{
 		clients:   make(map[*Client]struct{}),
 		jwtSecret: jwtSecret,
+		authz:     authz,
 		log:       log.With().Str("component", "ws-hub").Logger(),
 	}
 }
@@ -233,6 +252,38 @@ func (h *Hub) BroadcastToConversation(conversationID string, data []byte) {
 		if c.subscriptions[conversationID] {
 			c.sendMsg(data)
 		}
+	}
+}
+
+// BroadcastConversationScoped fans out a message event to clients per the
+// conversation ownership model:
+//
+//   - client must be in the event's tenant
+//   - privileged roles (non cs_agent) receive it (tenant-wide)
+//   - cs_agent receives it only when the conversation is unassigned AND the
+//     client is in the conversation's workspace, OR it's assigned to that agent
+//
+// This mirrors the REST/gRPC conversation read gate so live updates never leak
+// another agent's conversation. assignedTo == "" means unassigned.
+func (h *Hub) BroadcastConversationScoped(tenantID, workspaceID, assignedTo string, data []byte) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for c := range h.clients {
+		if c.tenantID != tenantID {
+			continue
+		}
+		if c.role == "cs_agent" {
+			switch {
+			case assignedTo == "" && c.workspaceID == workspaceID:
+				// unassigned: any cs_agent in the workspace
+			case assignedTo == c.userID:
+				// own
+			default:
+				continue
+			}
+		}
+		c.sendMsg(data)
 	}
 }
 
@@ -389,6 +440,16 @@ func (c *Client) handleSubscribe(payload json.RawMessage) {
 	var p conversationPayload
 	if err := json.Unmarshal(payload, &p); err != nil || p.ConversationID == "" {
 		c.sendError("INVALID_MESSAGE", "missing conversation_id")
+		return
+	}
+
+	// RBAC scope: a cs_agent may only subscribe to conversations they may read
+	// (own + unassigned). Privileged roles pass through. Mirrors the REST/gRPC
+	// conversation ownership model so live updates can't leak another agent's
+	// conversation. Fail-closed when the authorizer can't verify.
+	if c.hub.authz != nil && !c.hub.authz.CanAccessConversation(context.Background(), c.role, c.userID, p.ConversationID) {
+		c.sendError("FORBIDDEN", "conversation assigned to another agent")
+		c.hub.log.Warn().Str("user_id", c.userID).Str("conversation_id", p.ConversationID).Msg("ws: subscribe denied")
 		return
 	}
 

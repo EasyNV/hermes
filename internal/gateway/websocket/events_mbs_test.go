@@ -25,6 +25,12 @@ type recordedBroadcast struct {
 	data                  []byte
 }
 
+// recordedScoped captures one BroadcastConversationScoped call's args.
+type recordedScoped struct {
+	tenantID, workspaceID, assignedTo string
+	data                              []byte
+}
+
 // recordingBroadcaster satisfies the Broadcaster interface and records
 // every broadcast for assertion. Thread-safe so tests run cleanly
 // under -race.
@@ -33,6 +39,7 @@ type recordingBroadcaster struct {
 	broadcasts []recordedBroadcast
 	users      []recordedBroadcast
 	convos     []recordedBroadcast
+	scoped     []recordedScoped
 }
 
 func (r *recordingBroadcaster) Broadcast(tenantID, workspaceID string, data []byte) {
@@ -53,6 +60,12 @@ func (r *recordingBroadcaster) BroadcastToConversation(conversationID string, da
 	r.convos = append(r.convos, recordedBroadcast{conversationID, "", data})
 }
 
+func (r *recordingBroadcaster) BroadcastConversationScoped(tenantID, workspaceID, assignedTo string, data []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.scoped = append(r.scoped, recordedScoped{tenantID, workspaceID, assignedTo, data})
+}
+
 // snapshot returns a copy of recorded broadcasts so tests don't race
 // the handler goroutine (when any).
 func (r *recordingBroadcaster) snapshot() []recordedBroadcast {
@@ -60,6 +73,15 @@ func (r *recordingBroadcaster) snapshot() []recordedBroadcast {
 	defer r.mu.Unlock()
 	out := make([]recordedBroadcast, len(r.broadcasts))
 	copy(out, r.broadcasts)
+	return out
+}
+
+// scopedSnapshot returns a copy of recorded conversation-scoped broadcasts.
+func (r *recordingBroadcaster) scopedSnapshot() []recordedScoped {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]recordedScoped, len(r.scoped))
+	copy(out, r.scoped)
 	return out
 }
 
@@ -106,7 +128,12 @@ func parseFrame(t *testing.T, data []byte) (frameType string, payload map[string
 // Tests
 // ─────────────────────────────────────────────────────────────────────
 
-func TestMbsInbound_BuildsFrame(t *testing.T) {
+func TestMbsInbound_RawHandlerNoLongerBroadcasts(t *testing.T) {
+	// GAP 3b: the raw hermes.mbs.message.inbound.* handler is neutralized.
+	// The "mbs_new_message" frame is now emitted by handleInboxMessageNew
+	// (enriched event carrying conversation ownership) so the fan-out can be
+	// scoped per the conversation ownership model. The raw handler must drain
+	// the stream (Ack) but emit zero broadcasts.
 	sub, rec := newTestSubscriber(t)
 	receivedAt := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
 	ev := &hermesv1.MbsInboundMessageEvent{
@@ -126,26 +153,61 @@ func TestMbsInbound_BuildsFrame(t *testing.T) {
 	}
 	sub.handleMbsInboundMessage(natsMsg("hermes.mbs.message.inbound.tenant-A", data))
 
-	br := rec.snapshot()
-	if len(br) != 1 {
-		t.Fatalf("want 1 broadcast, got %d", len(br))
+	if got := len(rec.snapshot()); got != 0 {
+		t.Fatalf("raw mbs inbound handler must not broadcast, got %d", got)
 	}
-	if br[0].tenantID != "tenant-A" {
-		t.Errorf("tenantID: got %q", br[0].tenantID)
+	if got := len(rec.scopedSnapshot()); got != 0 {
+		t.Fatalf("raw mbs inbound handler must not scoped-broadcast, got %d", got)
 	}
-	if br[0].workspaceID != "" {
-		t.Errorf("workspaceID should be empty for tenant-scoped events: %q", br[0].workspaceID)
+}
+
+func TestInboxMessageNew_Mbs_BuildsScopedFrame(t *testing.T) {
+	// handleInboxMessageNew is the sole emitter of "mbs_new_message". It scopes
+	// the fan-out via BroadcastConversationScoped(tenant, workspace, assignedTo).
+	sub, rec := newTestSubscriber(t)
+	receivedAt := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	ev := &hermesv1.InboxMessageNewEvent{
+		Meta:           &hermesv1.EventMeta{TenantId: "tenant-A", Timestamp: timestamppb.Now()},
+		ConversationId: "conv-uuid-1",
+		WorkspaceId:    "ws-1",
+		AssignedTo:     "agent-7",
+		Channel:        "mbs",
+		ContactPhone:   "62812345",
+		Body:           "hello world",
+		MessageId:      "mid.$cAAAA_test",
+		ReceivedAt:     timestamppb.New(receivedAt),
+		Uid:            1674772559,
+		ThreadId:       "thread-789",
+	}
+	data, err := proto.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	sub.handleInboxMessageNew(natsMsg("hermes.inbox.message.new.tenant-A", data))
+
+	sc := rec.scopedSnapshot()
+	if len(sc) != 1 {
+		t.Fatalf("want 1 scoped broadcast, got %d", len(sc))
+	}
+	if sc[0].tenantID != "tenant-A" {
+		t.Errorf("tenantID: got %q", sc[0].tenantID)
+	}
+	if sc[0].workspaceID != "ws-1" {
+		t.Errorf("workspaceID: got %q want ws-1", sc[0].workspaceID)
+	}
+	if sc[0].assignedTo != "agent-7" {
+		t.Errorf("assignedTo: got %q want agent-7", sc[0].assignedTo)
 	}
 
-	frameType, payload := parseFrame(t, br[0].data)
+	frameType, payload := parseFrame(t, sc[0].data)
 	if frameType != "mbs_new_message" {
 		t.Errorf("frame type: got %q want mbs_new_message", frameType)
 	}
 	if payload["uid"] != "1674772559" {
 		t.Errorf("uid: got %v (want string '1674772559')", payload["uid"])
 	}
-	if payload["pageId"] != "page-123" {
-		t.Errorf("pageId: got %v", payload["pageId"])
+	if payload["threadId"] != "thread-789" {
+		t.Errorf("threadId: got %v", payload["threadId"])
 	}
 	if payload["mid"] != "mid.$cAAAA_test" {
 		t.Errorf("mid: got %v", payload["mid"])
@@ -155,6 +217,50 @@ func TestMbsInbound_BuildsFrame(t *testing.T) {
 	}
 	if !strings.HasPrefix(payload["receivedAt"].(string), "2026-05-29T12:00:00") {
 		t.Errorf("receivedAt: got %v", payload["receivedAt"])
+	}
+}
+
+func TestInboxMessageNew_Wa_BuildsScopedFrame(t *testing.T) {
+	// WA channel emits the "new_message" frame, also scoped.
+	sub, rec := newTestSubscriber(t)
+	receivedAt := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	ev := &hermesv1.InboxMessageNewEvent{
+		Meta:           &hermesv1.EventMeta{TenantId: "tenant-A", Timestamp: timestamppb.Now()},
+		ConversationId: "conv-uuid-2",
+		WorkspaceId:    "ws-2",
+		AssignedTo:     "", // unassigned
+		Channel:        "wa",
+		ContactName:    "Jane",
+		ContactPhone:   "628199",
+		Body:           "hi there",
+		MessageId:      "wamid.ABC",
+		ReceivedAt:     timestamppb.New(receivedAt),
+	}
+	data, _ := proto.Marshal(ev)
+	sub.handleInboxMessageNew(natsMsg("hermes.inbox.message.new.tenant-A", data))
+
+	sc := rec.scopedSnapshot()
+	if len(sc) != 1 {
+		t.Fatalf("want 1 scoped broadcast, got %d", len(sc))
+	}
+	if sc[0].assignedTo != "" {
+		t.Errorf("assignedTo: got %q want empty (unassigned)", sc[0].assignedTo)
+	}
+	frameType, payload := parseFrame(t, sc[0].data)
+	if frameType != "new_message" {
+		t.Errorf("frame type: got %q want new_message", frameType)
+	}
+	if payload["conversation_id"] != "conv-uuid-2" {
+		t.Errorf("conversation_id: got %v", payload["conversation_id"])
+	}
+	if payload["wa_message_id"] != "wamid.ABC" {
+		t.Errorf("wa_message_id: got %v", payload["wa_message_id"])
+	}
+	if payload["contact_name"] != "Jane" {
+		t.Errorf("contact_name: got %v", payload["contact_name"])
+	}
+	if payload["body"] != "hi there" {
+		t.Errorf("body: got %v", payload["body"])
 	}
 }
 
@@ -302,9 +408,12 @@ func TestMbsHandlers_MalformedProto_AckAndDrop(t *testing.T) {
 }
 
 func TestMbsHandlers_TenantScoped_NoWorkspaceID(t *testing.T) {
-	// All three MBS event families are tenant-wide. Workspace ID
-	// must always be empty in the broadcast call (Hub fans to all
-	// tenant clients regardless of workspace).
+	// The outbound + lifecycle MBS event families are tenant-wide (no workspace
+	// dimension — MBS sessions belong to a tenant). Workspace ID must always be
+	// empty in the broadcast call. NOTE: inbound is excluded here — it's
+	// neutralized (GAP 3b); the inbound frame now flows through
+	// handleInboxMessageNew with conversation scoping (see
+	// TestInboxMessageNew_*_BuildsScopedFrame).
 	sub, rec := newTestSubscriber(t)
 	cases := []struct {
 		name string
@@ -312,9 +421,6 @@ func TestMbsHandlers_TenantScoped_NoWorkspaceID(t *testing.T) {
 		fn   func(*EventSubscriber, *natsgo.Msg)
 		subj string
 	}{
-		{"inbound", &hermesv1.MbsInboundMessageEvent{
-			Meta: &hermesv1.EventMeta{TenantId: "tenant-X"}, Uid: 1,
-		}, (*EventSubscriber).handleMbsInboundMessage, "hermes.mbs.message.inbound.tenant-X"},
 		{"outbound", &hermesv1.MbsOutboundEvent{
 			Meta: &hermesv1.EventMeta{TenantId: "tenant-X"}, Uid: 1,
 		}, (*EventSubscriber).handleMbsOutboundStatus, "hermes.mbs.message.outbound.tenant-X"},
@@ -328,8 +434,8 @@ func TestMbsHandlers_TenantScoped_NoWorkspaceID(t *testing.T) {
 		c.fn(sub, natsMsg(c.subj, data))
 	}
 	br := rec.snapshot()
-	if len(br) != 3 {
-		t.Fatalf("want 3 broadcasts, got %d", len(br))
+	if len(br) != 2 {
+		t.Fatalf("want 2 broadcasts, got %d", len(br))
 	}
 	for i, b := range br {
 		if b.tenantID != "tenant-X" {
@@ -341,25 +447,31 @@ func TestMbsHandlers_TenantScoped_NoWorkspaceID(t *testing.T) {
 	}
 }
 
-func TestMbsInbound_FallsBackToMetaTimestamp(t *testing.T) {
-	// When meta_timestamp is nil, receivedAt falls back to the
-	// EventMeta.timestamp. This documents the cascade.
+func TestInboxMessageNew_FallsBackToMetaTimestamp(t *testing.T) {
+	// When received_at is nil, the frame's receivedAt falls back to the
+	// EventMeta.timestamp. This documents the cascade (moved from the raw
+	// inbound handler to the enriched-event handler).
 	sub, rec := newTestSubscriber(t)
 	metaTs := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	ev := &hermesv1.MbsInboundMessageEvent{
+	ev := &hermesv1.InboxMessageNewEvent{
 		Meta: &hermesv1.EventMeta{
 			TenantId:  "tenant-A",
 			Timestamp: timestamppb.New(metaTs),
 		},
-		Uid: 1,
-		Mid: "mid.x",
-		// MetaTimestamp deliberately nil
+		ConversationId: "conv-1",
+		Channel:        "mbs",
+		Uid:            1,
+		MessageId:      "mid.x",
+		// ReceivedAt deliberately nil
 	}
 	data, _ := proto.Marshal(ev)
-	sub.handleMbsInboundMessage(natsMsg("hermes.mbs.message.inbound.tenant-A", data))
+	sub.handleInboxMessageNew(natsMsg("hermes.inbox.message.new.tenant-A", data))
 
-	br := rec.snapshot()
-	_, payload := parseFrame(t, br[0].data)
+	sc := rec.scopedSnapshot()
+	if len(sc) != 1 {
+		t.Fatalf("want 1 scoped broadcast, got %d", len(sc))
+	}
+	_, payload := parseFrame(t, sc[0].data)
 	if !strings.HasPrefix(payload["receivedAt"].(string), "2026-01-01T00:00:00") {
 		t.Errorf("receivedAt did not fall back to meta.timestamp: %v", payload["receivedAt"])
 	}

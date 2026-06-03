@@ -1004,13 +1004,8 @@ func (a *Adapter) deleteNotificationConfig(w http.ResponseWriter, r *http.Reques
 // ═══════════════════════════════════════════════════════════════
 
 func (a *Adapter) clearAllConversations(w http.ResponseWriter, r *http.Request) {
-	// RBAC: workspace_admin+ only
-	role, _ := r.Context().Value(middleware.CtxRole).(string)
-	if role != "superadmin" && role != "tenant_admin" && role != "workspace_admin" {
-		a.writeError(w, 403, "PERMISSION_DENIED", "workspace_admin or higher required")
-		return
-	}
-
+	// RBAC (workspace_admin+) enforced by the authz wrapper at route registration
+	// via middleware.AuthorizeMethod("REST:DELETE /api/v1/conversations/clear").
 	workspaceID, _ := r.Context().Value(middleware.CtxWorkspaceID).(string)
 	if workspaceID == "" {
 		a.writeError(w, 400, "BAD_REQUEST", "no workspace in context")
@@ -1072,11 +1067,8 @@ func (a *Adapter) addToAllowlist(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Adapter) clearAllowlist(w http.ResponseWriter, r *http.Request) {
-	role, _ := r.Context().Value(middleware.CtxRole).(string)
-	if role != "superadmin" && role != "tenant_admin" && role != "workspace_admin" {
-		a.writeError(w, 403, "PERMISSION_DENIED", "workspace_admin or higher required")
-		return
-	}
+	// RBAC (workspace_admin+) enforced by the authz wrapper at route registration
+	// via middleware.AuthorizeMethod("REST:DELETE /api/v1/allowlist/clear").
 	workspaceID, _ := r.Context().Value(middleware.CtxWorkspaceID).(string)
 	if workspaceID == "" {
 		a.writeError(w, 400, "BAD_REQUEST", "no workspace in context")

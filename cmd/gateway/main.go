@@ -126,7 +126,7 @@ func main() {
 	hermesv1.RegisterHermesGatewayServer(grpcServer, h)
 
 	// WebSocket hub
-	hub := gwws.NewHub([]byte(cfg.JWTSecret), log)
+	hub := gwws.NewHub([]byte(cfg.JWTSecret), h, log)
 	eventSub := gwws.NewEventSubscriber(hub, js, log)
 	if err := eventSub.Start(); err != nil {
 		log.Warn().Err(err).Msg("failed to start NATS event subscriber (WebSocket events will not work)")
@@ -213,6 +213,12 @@ func ensureStreams(js natsgo.JetStreamContext) error {
 		// doesn't see a config mismatch. Whoever boots first creates
 		// the stream; the other side no-ops.
 		{"HERMES_MBS", []string{"hermes.mbs.message.>", "hermes.mbs.session.>"}, 7 * 24 * time.Hour},
+		// HERMES_INBOX_EVENTS (RBAC WS scoping): enriched inbound events the
+		// inbox publishes (hermes.inbox.message.new.<tenant>) carrying
+		// conversation_id/workspace_id/assigned_to so the gateway can scope WS
+		// fan-out per conversation ownership. Separate from HERMES_INBOX (which
+		// owns hermes.wa.send.manual.>) — no subject overlap.
+		{"HERMES_INBOX_EVENTS", []string{"hermes.inbox.message.>"}, 24 * time.Hour},
 	}
 
 	for _, s := range streams {

@@ -436,3 +436,41 @@ message MbsCampaignSendTask {
   // Idempotency key = campaign_id + contact_id (prevents double sends on retry).
   string idempotency_key = 9;
 }
+
+// ──────────────────────────────────────────────────────────────────
+
+// InboxMessageNewEvent is published by hermes-inbox AFTER a conversation is
+// found/created for a newly-stored inbound message. It carries the ownership
+// fields (conversation_id, workspace_id, assigned_to) that the raw
+// WaInboundMessageEvent / MbsInboundMessageEvent lack, so the gateway can scope
+// the live "new_message" / "mbs_new_message" WebSocket fan-out per the
+// conversation ownership model (cs_agent: own + unassigned; admins: tenant-wide).
+//
+// Published only when a NEW message row was inserted (not on idempotent
+// re-polls) and only after the conversation row exists, so the gateway never
+// races conversation creation. Subject: hermes.inbox.message.new.<tenant>.
+message InboxMessageNewEvent {
+  EventMeta meta = 1;
+  // Conversation the message belongs to (inbox-owned UUID).
+  string conversation_id = 2;
+  // Workspace the conversation belongs to.
+  string workspace_id = 3;
+  // Assigned agent user id, or empty when unassigned.
+  string assigned_to = 4;
+  // Channel discriminator: "wa" or "mbs".
+  string channel = 5;
+  // Display fields (mirror the existing new_message / mbs_new_message frames).
+  string contact_name = 6;
+  string contact_phone = 7;
+  string body = 8;
+  // Message id: wa_message_id (WA) or mbs mid (MBS).
+  string message_id = 9;
+  // When the message was received/stored.
+  google.protobuf.Timestamp received_at = 10;
+  // MBS-only: numeric BizApp uid (the page admin's FB user id). 0 for WA.
+  // Lets the gateway preserve the mbs_new_message frame shape the frontend
+  // keys conversations on (uid, thread_id).
+  int64 uid = 11;
+  // MBS-only: thread id. Empty for WA.
+  string thread_id = 12;
+}

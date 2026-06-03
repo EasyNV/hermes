@@ -24,6 +24,7 @@ type Broadcaster interface {
 	Broadcast(tenantID, workspaceID string, data []byte)
 	BroadcastToUser(userID string, data []byte)
 	BroadcastToConversation(conversationID string, data []byte)
+	BroadcastConversationScoped(tenantID, workspaceID, assignedTo string, data []byte)
 }
 
 // EventSubscriber subscribes to NATS JetStream subjects and fans out events
@@ -150,6 +151,19 @@ func (s *EventSubscriber) Start() error {
 			maxDeliv: 3,
 			ackWait:  10 * time.Second,
 		},
+		// ─── Inbox enriched inbound (RBAC WS scoping) ────────────────
+		// hermes.inbox.message.new.<tenant> carries conversation ownership
+		// (conversation_id, workspace_id, assigned_to) so message fan-out can
+		// be scoped per the conversation ownership model. This SUPERSEDES the
+		// tenant-wide "new_message"/"mbs_new_message" fan-out from the raw
+		// wa/mbs inbound handlers, which now only drive non-message UX.
+		{
+			subject:  "hermes.inbox.message.new.*",
+			durable:  "gateway-inbox-scoped",
+			handler:  s.handleInboxMessageNew,
+			maxDeliv: 3,
+			ackWait:  10 * time.Second,
+		},
 	}
 
 	for _, cfg := range subscriptions {
@@ -192,21 +206,14 @@ func (s *EventSubscriber) handleInboundMessage(msg *natsgo.Msg) {
 		return
 	}
 
-	tenantID := extractTenantID(ev.GetMeta())
-
-	payload := map[string]any{
-		"wa_number_id":  ev.GetWaNumberId(),
-		"sender_jid":    ev.GetSenderJid(),
-		"sender_phone":  ev.GetSenderPhone(),
-		"wa_message_id": ev.GetWaMessageId(),
-		"content_type":  ev.GetContentType().String(),
-		"body":          ev.GetBody(),
-		"media_url":     ev.GetMediaUrl(),
-		"sender_name":   ev.GetSenderName(),
-	}
-
-	data := marshalWSEvent("new_message", payload)
-	s.hub.Broadcast(tenantID, "", data)
+	// RBAC WS scoping: the "new_message" frame is now emitted by
+	// handleInboxMessageNew (hermes.inbox.message.new.*), which carries the
+	// conversation ownership fields needed to scope delivery. Broadcasting the
+	// raw event tenant-wide here would (a) leak other agents' messages to a
+	// cs_agent and (b) double-deliver. The raw handler now only ACKs; it is
+	// retained as a JetStream consumer so the WA stream keeps draining.
+	// (Reference a getter, not `_ = ev`, to avoid copying the proto lock — vet.)
+	_ = ev.GetMeta()
 
 	_ = msg.Ack()
 }

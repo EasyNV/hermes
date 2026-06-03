@@ -291,6 +291,11 @@ func startInboundConsumer(js natsgo.JetStreamContext, store handler.Store, log z
 			publishNotification(js, log, event.Meta.GetTenantId(), workspaceID, contact, body)
 		}
 
+		// 8. Publish enriched event for scoped WS fan-out (RBAC: per-conversation
+		// ownership). Carries conversation_id/workspace_id/assigned_to the raw
+		// inbound event lacks.
+		publishInboxMessageNew(js, log, event.Meta.GetTenantId(), conv, "wa", event.WaMessageId, body, contact, 0, "")
+
 		msg.Ack()
 		log.Debug().
 			Str("conv_id", conv.ID).
@@ -587,6 +592,10 @@ func processMbsInbound(
 		publishNotification(js, log, tenantID, workspaceID, contact, event.Text)
 	}
 
+	// 8. Publish enriched event for scoped WS fan-out (RBAC: per-conversation
+	// ownership). New message only (we already returned on re-poll above).
+	publishInboxMessageNew(js, log, tenantID, conv, "mbs", event.Mid, event.Text, contact, event.Uid, event.ThreadId)
+
 	log.Debug().
 		Str("conv_id", conv.ID).
 		Str("thread_id", event.ThreadId).
@@ -772,6 +781,65 @@ func publishNotification(js natsgo.JetStreamContext, log zerolog.Logger, tenantI
 	subject := "hermes.notify.dispatch." + tenantID
 	if _, err := js.Publish(subject, data, natsgo.MsgId(eventID)); err != nil {
 		log.Error().Err(err).Str("subject", subject).Msg("failed to publish notify event")
+	}
+}
+
+// publishInboxMessageNew publishes an enriched InboxMessageNewEvent carrying the
+// conversation ownership fields (conversation_id, workspace_id, assigned_to) the
+// raw WA/MBS inbound events lack. The gateway consumes this to scope the live
+// "new_message"/"mbs_new_message" WS fan-out per the conversation ownership
+// model (cs_agent: own + unassigned; admins: tenant-wide).
+//
+// Published only for newly-inserted messages, AFTER the conversation row exists,
+// so the gateway never races conversation creation. Best-effort: a publish
+// failure is logged but does not fail inbound processing (the message is already
+// stored; the client reconciles on next REST fetch).
+func publishInboxMessageNew(js natsgo.JetStreamContext, log zerolog.Logger, tenantID string, conv *handler.ConversationRow, channel, messageID, body string, contact *handler.ContactRow, uid int64, threadID string) {
+	if js == nil {
+		return
+	}
+	eventID := uuid.New().String()
+	assignedTo := ""
+	if conv.AssignedTo != nil {
+		assignedTo = *conv.AssignedTo
+	}
+	contactName, contactPhone := "", ""
+	if contact != nil {
+		contactName, contactPhone = contact.Name, contact.Phone
+	}
+	preview := body
+	if len(preview) > 200 {
+		preview = preview[:200]
+	}
+
+	event := &hermesv1.InboxMessageNewEvent{
+		Meta: &hermesv1.EventMeta{
+			EventId:   eventID,
+			TenantId:  tenantID,
+			Timestamp: timestamppb.Now(),
+			Source:    "hermes-inbox",
+		},
+		ConversationId: conv.ID,
+		WorkspaceId:    conv.WorkspaceID,
+		AssignedTo:     assignedTo,
+		Channel:        channel,
+		ContactName:    contactName,
+		ContactPhone:   contactPhone,
+		Body:           preview,
+		MessageId:      messageID,
+		ReceivedAt:     timestamppb.Now(),
+		Uid:            uid,
+		ThreadId:       threadID,
+	}
+
+	data, err := proto.Marshal(event)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to marshal InboxMessageNewEvent")
+		return
+	}
+	subject := "hermes.inbox.message.new." + tenantID
+	if _, err := js.Publish(subject, data, natsgo.MsgId(eventID)); err != nil {
+		log.Error().Err(err).Str("subject", subject).Msg("failed to publish InboxMessageNewEvent")
 	}
 }
 

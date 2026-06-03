@@ -94,109 +94,109 @@ func (a *Adapter) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/auth/login", a.login)
 	mux.HandleFunc("POST /api/v1/auth/refresh", a.refreshToken)
 
-	// Auth (requires JWT)
-	mux.HandleFunc("POST /api/v1/auth/logout", a.auth(a.logout))
-	mux.HandleFunc("GET /api/v1/auth/me", a.auth(a.getMe))
+	// Auth (requires JWT, any authenticated role)
+	mux.HandleFunc("POST /api/v1/auth/logout", a.authz("/hermes.v1.HermesGateway/Logout", a.logout))
+	mux.HandleFunc("GET /api/v1/auth/me", a.authz("/hermes.v1.HermesGateway/GetMe", a.getMe))
 
 	// Dashboard
-	mux.HandleFunc("GET /api/v1/dashboard/stats", a.auth(a.getDashboardStats))
+	mux.HandleFunc("GET /api/v1/dashboard/stats", a.authz("/hermes.v1.HermesGateway/GetDashboardStats", a.getDashboardStats))
 
 	// Tenants
-	mux.HandleFunc("POST /api/v1/tenants", a.auth(a.createTenant))
-	mux.HandleFunc("GET /api/v1/tenants", a.auth(a.listTenants))
-	mux.HandleFunc("GET /api/v1/tenants/{id}", a.auth(a.getTenant))
-	mux.HandleFunc("PUT /api/v1/tenants/{id}", a.auth(a.updateTenant))
+	mux.HandleFunc("POST /api/v1/tenants", a.authz("/hermes.v1.HermesGateway/CreateTenant", a.createTenant))
+	mux.HandleFunc("GET /api/v1/tenants", a.authz("/hermes.v1.HermesGateway/ListTenants", a.listTenants))
+	mux.HandleFunc("GET /api/v1/tenants/{id}", a.authz("/hermes.v1.HermesGateway/GetTenant", a.getTenant))
+	mux.HandleFunc("PUT /api/v1/tenants/{id}", a.authz("/hermes.v1.HermesGateway/UpdateTenant", a.updateTenant))
 
 	// Workspaces
-	mux.HandleFunc("POST /api/v1/workspaces", a.auth(a.createWorkspace))
-	mux.HandleFunc("GET /api/v1/workspaces", a.auth(a.listWorkspaces))
-	mux.HandleFunc("GET /api/v1/workspaces/{id}", a.auth(a.getWorkspace))
-	mux.HandleFunc("PUT /api/v1/workspaces/{id}", a.auth(a.updateWorkspace))
-	mux.HandleFunc("DELETE /api/v1/workspaces/{id}", a.auth(a.deleteWorkspace))
+	mux.HandleFunc("POST /api/v1/workspaces", a.authz("/hermes.v1.HermesGateway/CreateWorkspace", a.createWorkspace))
+	mux.HandleFunc("GET /api/v1/workspaces", a.authz("/hermes.v1.HermesGateway/ListWorkspaces", a.listWorkspaces))
+	mux.HandleFunc("GET /api/v1/workspaces/{id}", a.authz("/hermes.v1.HermesGateway/GetWorkspace", a.getWorkspace))
+	mux.HandleFunc("PUT /api/v1/workspaces/{id}", a.authz("/hermes.v1.HermesGateway/UpdateWorkspace", a.updateWorkspace))
+	mux.HandleFunc("DELETE /api/v1/workspaces/{id}", a.authz("/hermes.v1.HermesGateway/DeleteWorkspace", a.deleteWorkspace))
 
 	// Users
-	mux.HandleFunc("POST /api/v1/users", a.auth(a.createUser))
-	mux.HandleFunc("GET /api/v1/users", a.auth(a.listUsers))
-	mux.HandleFunc("GET /api/v1/users/{id}", a.auth(a.getUser))
-	mux.HandleFunc("PUT /api/v1/users/{id}", a.auth(a.updateUser))
-	mux.HandleFunc("DELETE /api/v1/users/{id}", a.auth(a.deleteUser))
+	mux.HandleFunc("POST /api/v1/users", a.authz("/hermes.v1.HermesGateway/CreateUser", a.createUser))
+	mux.HandleFunc("GET /api/v1/users", a.authz("/hermes.v1.HermesGateway/ListUsers", a.listUsers))
+	mux.HandleFunc("GET /api/v1/users/{id}", a.authz("/hermes.v1.HermesGateway/GetUser", a.getUser))
+	mux.HandleFunc("PUT /api/v1/users/{id}", a.authz("/hermes.v1.HermesGateway/UpdateUser", a.updateUser))
+	mux.HandleFunc("DELETE /api/v1/users/{id}", a.authz("/hermes.v1.HermesGateway/DeleteUser", a.deleteUser))
 
 	// WA Numbers
-	mux.HandleFunc("POST /api/v1/wa-numbers", a.auth(a.registerWaNumber))
-	mux.HandleFunc("GET /api/v1/wa-numbers", a.auth(a.listWaNumbers))
-	mux.HandleFunc("GET /api/v1/wa-numbers/{id}", a.auth(a.getWaNumber))
-	mux.HandleFunc("GET /api/v1/wa-numbers/{id}/qr-code", a.auth(a.getQRCode))
-	mux.HandleFunc("PUT /api/v1/wa-numbers/{id}", a.auth(a.updateWaNumber))
-	mux.HandleFunc("POST /api/v1/wa-numbers/{id}/disconnect", a.auth(a.disconnectWaNumber))
-	mux.HandleFunc("POST /api/v1/wa-numbers/{id}/reconnect", a.auth(a.reconnectWaNumber))
-	mux.HandleFunc("DELETE /api/v1/wa-numbers/{id}", a.auth(a.deleteWaNumber))
+	mux.HandleFunc("POST /api/v1/wa-numbers", a.authz("/hermes.v1.HermesGateway/RegisterWaNumber", a.registerWaNumber))
+	mux.HandleFunc("GET /api/v1/wa-numbers", a.authz("/hermes.v1.HermesGateway/ListWaNumbers", a.listWaNumbers))
+	mux.HandleFunc("GET /api/v1/wa-numbers/{id}", a.authz("/hermes.v1.HermesGateway/GetWaNumber", a.getWaNumber))
+	mux.HandleFunc("GET /api/v1/wa-numbers/{id}/qr-code", a.authz("/hermes.v1.HermesGateway/GetQRCode", a.getQRCode))
+	mux.HandleFunc("PUT /api/v1/wa-numbers/{id}", a.authz("/hermes.v1.HermesGateway/UpdateWaNumber", a.updateWaNumber))
+	mux.HandleFunc("POST /api/v1/wa-numbers/{id}/disconnect", a.authz("/hermes.v1.HermesGateway/DisconnectWaNumber", a.disconnectWaNumber))
+	mux.HandleFunc("POST /api/v1/wa-numbers/{id}/reconnect", a.authz("/hermes.v1.HermesGateway/ReconnectWaNumber", a.reconnectWaNumber))
+	mux.HandleFunc("DELETE /api/v1/wa-numbers/{id}", a.authz("/hermes.v1.HermesGateway/DeleteWaNumber", a.deleteWaNumber))
 
 	// Proxies
-	mux.HandleFunc("POST /api/v1/proxies", a.auth(a.addProxies))
-	mux.HandleFunc("GET /api/v1/proxies", a.auth(a.listProxies))
-	mux.HandleFunc("GET /api/v1/proxies/best", a.auth(a.getBestProxy))
-	mux.HandleFunc("GET /api/v1/proxies/{id}/health", a.auth(a.getProxyHealth))
-	mux.HandleFunc("PUT /api/v1/proxies/{id}", a.auth(a.updateProxy))
-	mux.HandleFunc("DELETE /api/v1/proxies/{id}", a.auth(a.deleteProxy))
-	mux.HandleFunc("POST /api/v1/proxies/assign", a.auth(a.assignProxy))
+	mux.HandleFunc("POST /api/v1/proxies", a.authz("/hermes.v1.HermesGateway/AddProxies", a.addProxies))
+	mux.HandleFunc("GET /api/v1/proxies", a.authz("/hermes.v1.HermesGateway/ListProxies", a.listProxies))
+	mux.HandleFunc("GET /api/v1/proxies/best", a.authz("/hermes.v1.HermesGateway/GetBestProxy", a.getBestProxy))
+	mux.HandleFunc("GET /api/v1/proxies/{id}/health", a.authz("/hermes.v1.HermesGateway/GetProxyHealth", a.getProxyHealth))
+	mux.HandleFunc("PUT /api/v1/proxies/{id}", a.authz("/hermes.v1.HermesGateway/UpdateProxy", a.updateProxy))
+	mux.HandleFunc("DELETE /api/v1/proxies/{id}", a.authz("/hermes.v1.HermesGateway/DeleteProxy", a.deleteProxy))
+	mux.HandleFunc("POST /api/v1/proxies/assign", a.authz("/hermes.v1.HermesGateway/AssignProxy", a.assignProxy))
 
 	// Contacts
-	mux.HandleFunc("POST /api/v1/contacts", a.auth(a.createContact))
-	mux.HandleFunc("POST /api/v1/contacts/import", a.auth(a.importContacts))
-	mux.HandleFunc("GET /api/v1/contacts", a.auth(a.listContacts))
-	mux.HandleFunc("GET /api/v1/contacts/{id}", a.auth(a.getContact))
-	mux.HandleFunc("PUT /api/v1/contacts/{id}", a.auth(a.updateContact))
-	mux.HandleFunc("DELETE /api/v1/contacts/{id}", a.auth(a.deleteContact))
-	mux.HandleFunc("GET /api/v1/contacts/{id}/campaigns", a.auth(a.getContactCampaignHistory))
+	mux.HandleFunc("POST /api/v1/contacts", a.authz("/hermes.v1.HermesGateway/CreateContact", a.createContact))
+	mux.HandleFunc("POST /api/v1/contacts/import", a.authz("/hermes.v1.HermesGateway/ImportContacts", a.importContacts))
+	mux.HandleFunc("GET /api/v1/contacts", a.authz("/hermes.v1.HermesGateway/ListContacts", a.listContacts))
+	mux.HandleFunc("GET /api/v1/contacts/{id}", a.authz("/hermes.v1.HermesGateway/GetContact", a.getContact))
+	mux.HandleFunc("PUT /api/v1/contacts/{id}", a.authz("/hermes.v1.HermesGateway/UpdateContact", a.updateContact))
+	mux.HandleFunc("DELETE /api/v1/contacts/{id}", a.authz("/hermes.v1.HermesGateway/DeleteContact", a.deleteContact))
+	mux.HandleFunc("GET /api/v1/contacts/{id}/campaigns", a.authz("/hermes.v1.HermesGateway/GetContactCampaignHistory", a.getContactCampaignHistory))
 
 	// Templates
-	mux.HandleFunc("POST /api/v1/templates", a.auth(a.createTemplate))
-	mux.HandleFunc("GET /api/v1/templates", a.auth(a.listTemplates))
-	mux.HandleFunc("GET /api/v1/templates/{id}", a.auth(a.getTemplate))
-	mux.HandleFunc("PUT /api/v1/templates/{id}", a.auth(a.updateTemplate))
-	mux.HandleFunc("DELETE /api/v1/templates/{id}", a.auth(a.deleteTemplate))
+	mux.HandleFunc("POST /api/v1/templates", a.authz("/hermes.v1.HermesGateway/CreateTemplate", a.createTemplate))
+	mux.HandleFunc("GET /api/v1/templates", a.authz("/hermes.v1.HermesGateway/ListTemplates", a.listTemplates))
+	mux.HandleFunc("GET /api/v1/templates/{id}", a.authz("/hermes.v1.HermesGateway/GetTemplate", a.getTemplate))
+	mux.HandleFunc("PUT /api/v1/templates/{id}", a.authz("/hermes.v1.HermesGateway/UpdateTemplate", a.updateTemplate))
+	mux.HandleFunc("DELETE /api/v1/templates/{id}", a.authz("/hermes.v1.HermesGateway/DeleteTemplate", a.deleteTemplate))
 
 	// Campaigns
-	mux.HandleFunc("POST /api/v1/campaigns", a.auth(a.createCampaign))
-	mux.HandleFunc("GET /api/v1/campaigns", a.auth(a.listCampaigns))
-	mux.HandleFunc("GET /api/v1/campaigns/{id}", a.auth(a.getCampaign))
-	mux.HandleFunc("POST /api/v1/campaigns/{id}/start", a.auth(a.startCampaign))
-	mux.HandleFunc("POST /api/v1/campaigns/{id}/pause", a.auth(a.pauseCampaign))
-	mux.HandleFunc("POST /api/v1/campaigns/{id}/resume", a.auth(a.resumeCampaign))
-	mux.HandleFunc("POST /api/v1/campaigns/{id}/cancel", a.auth(a.cancelCampaign))
-	mux.HandleFunc("PUT /api/v1/campaigns/{id}/numbers", a.auth(a.updateCampaignNumbers))
-	mux.HandleFunc("PUT /api/v1/campaigns/{id}/contacts", a.auth(a.updateCampaignContacts))
-	mux.HandleFunc("GET /api/v1/campaigns/{id}/contacts", a.auth(a.listCampaignContacts))
-	mux.HandleFunc("GET /api/v1/campaigns/{id}/numbers", a.auth(a.listCampaignNumbers))
+	mux.HandleFunc("POST /api/v1/campaigns", a.authz("/hermes.v1.HermesGateway/CreateCampaign", a.createCampaign))
+	mux.HandleFunc("GET /api/v1/campaigns", a.authz("/hermes.v1.HermesGateway/ListCampaigns", a.listCampaigns))
+	mux.HandleFunc("GET /api/v1/campaigns/{id}", a.authz("/hermes.v1.HermesGateway/GetCampaign", a.getCampaign))
+	mux.HandleFunc("POST /api/v1/campaigns/{id}/start", a.authz("/hermes.v1.HermesGateway/StartCampaign", a.startCampaign))
+	mux.HandleFunc("POST /api/v1/campaigns/{id}/pause", a.authz("/hermes.v1.HermesGateway/PauseCampaign", a.pauseCampaign))
+	mux.HandleFunc("POST /api/v1/campaigns/{id}/resume", a.authz("/hermes.v1.HermesGateway/ResumeCampaign", a.resumeCampaign))
+	mux.HandleFunc("POST /api/v1/campaigns/{id}/cancel", a.authz("/hermes.v1.HermesGateway/CancelCampaign", a.cancelCampaign))
+	mux.HandleFunc("PUT /api/v1/campaigns/{id}/numbers", a.authz("/hermes.v1.HermesGateway/UpdateCampaignNumbers", a.updateCampaignNumbers))
+	mux.HandleFunc("PUT /api/v1/campaigns/{id}/contacts", a.authz("/hermes.v1.HermesGateway/UpdateCampaignContacts", a.updateCampaignContacts))
+	mux.HandleFunc("GET /api/v1/campaigns/{id}/contacts", a.authz("/hermes.v1.HermesGateway/ListCampaignContacts", a.listCampaignContacts))
+	mux.HandleFunc("GET /api/v1/campaigns/{id}/numbers", a.authz("/hermes.v1.HermesGateway/ListCampaignNumbers", a.listCampaignNumbers))
 
 	// Conversations
-	mux.HandleFunc("GET /api/v1/conversations", a.auth(a.listConversations))
-	mux.HandleFunc("GET /api/v1/conversations/{id}", a.auth(a.getConversation))
-	mux.HandleFunc("POST /api/v1/conversations/{id}/claim", a.auth(a.claimConversation))
-	mux.HandleFunc("POST /api/v1/conversations/{id}/transfer", a.auth(a.transferConversation))
-	mux.HandleFunc("POST /api/v1/conversations/{id}/close", a.auth(a.closeConversation))
-	mux.HandleFunc("GET /api/v1/conversations/{id}/messages", a.auth(a.listMessages))
-	mux.HandleFunc("POST /api/v1/conversations/{id}/messages", a.auth(a.sendMessage))
-	mux.HandleFunc("POST /api/v1/conversations/{id}/typing", a.auth(a.sendTypingIndicator))
-	mux.HandleFunc("POST /api/v1/messages/search", a.auth(a.searchMessages))
+	mux.HandleFunc("GET /api/v1/conversations", a.authz("/hermes.v1.HermesGateway/ListConversations", a.listConversations))
+	mux.HandleFunc("GET /api/v1/conversations/{id}", a.authz("/hermes.v1.HermesGateway/GetConversation", a.getConversation))
+	mux.HandleFunc("POST /api/v1/conversations/{id}/claim", a.authz("/hermes.v1.HermesGateway/ClaimConversation", a.claimConversation))
+	mux.HandleFunc("POST /api/v1/conversations/{id}/transfer", a.authz("/hermes.v1.HermesGateway/TransferConversation", a.transferConversation))
+	mux.HandleFunc("POST /api/v1/conversations/{id}/close", a.authz("/hermes.v1.HermesGateway/CloseConversation", a.closeConversation))
+	mux.HandleFunc("GET /api/v1/conversations/{id}/messages", a.authz("/hermes.v1.HermesGateway/ListMessages", a.listMessages))
+	mux.HandleFunc("POST /api/v1/conversations/{id}/messages", a.authz("/hermes.v1.HermesGateway/SendMessage", a.sendMessage))
+	mux.HandleFunc("POST /api/v1/conversations/{id}/typing", a.authz("REST:POST /api/v1/conversations/{id}/typing", a.sendTypingIndicator))
+	mux.HandleFunc("POST /api/v1/messages/search", a.authz("/hermes.v1.HermesGateway/SearchMessages", a.searchMessages))
 
 	// Agent Performance
-	mux.HandleFunc("GET /api/v1/agent-performance", a.auth(a.getAgentPerformance))
+	mux.HandleFunc("GET /api/v1/agent-performance", a.authz("/hermes.v1.HermesGateway/GetAgentPerformance", a.getAgentPerformance))
 
 	// Canned Responses
-	mux.HandleFunc("POST /api/v1/canned-responses", a.auth(a.createCannedResponse))
-	mux.HandleFunc("GET /api/v1/canned-responses", a.auth(a.listCannedResponses))
-	mux.HandleFunc("PUT /api/v1/canned-responses/{id}", a.auth(a.updateCannedResponse))
-	mux.HandleFunc("DELETE /api/v1/canned-responses/{id}", a.auth(a.deleteCannedResponse))
+	mux.HandleFunc("POST /api/v1/canned-responses", a.authz("/hermes.v1.HermesGateway/CreateCannedResponse", a.createCannedResponse))
+	mux.HandleFunc("GET /api/v1/canned-responses", a.authz("/hermes.v1.HermesGateway/ListCannedResponses", a.listCannedResponses))
+	mux.HandleFunc("PUT /api/v1/canned-responses/{id}", a.authz("/hermes.v1.HermesGateway/UpdateCannedResponse", a.updateCannedResponse))
+	mux.HandleFunc("DELETE /api/v1/canned-responses/{id}", a.authz("/hermes.v1.HermesGateway/DeleteCannedResponse", a.deleteCannedResponse))
 
 	// MBS sessions (chunk E2.2)
-	mux.HandleFunc("GET /api/v1/mbs-sessions", a.auth(a.listMbsSessions))
-	mux.HandleFunc("GET /api/v1/mbs-sessions/{uid}", a.auth(a.getMbsSession))
-	mux.HandleFunc("GET /api/v1/mbs-sessions/{uid}/assets", a.auth(a.listMbsSessionAssets))
-	mux.HandleFunc("POST /api/v1/mbs-sessions/{uid}/burn", a.auth(a.burnMbsSession))
-	mux.HandleFunc("DELETE /api/v1/mbs-sessions/{uid}", a.auth(a.removeMbsSession))
-	mux.HandleFunc("POST /api/v1/mbs-sessions/{uid}/resolve-phone", a.auth(a.resolveMbsPhone))
-	mux.HandleFunc("POST /api/v1/mbs-sessions/{uid}/messages", a.auth(a.sendMbsMessage))
+	mux.HandleFunc("GET /api/v1/mbs-sessions", a.authz("/hermes.v1.HermesMbs/ListSessions", a.listMbsSessions))
+	mux.HandleFunc("GET /api/v1/mbs-sessions/{uid}", a.authz("/hermes.v1.HermesMbs/GetSessionStatus", a.getMbsSession))
+	mux.HandleFunc("GET /api/v1/mbs-sessions/{uid}/assets", a.authz("/hermes.v1.HermesMbs/ListSessionAssets", a.listMbsSessionAssets))
+	mux.HandleFunc("POST /api/v1/mbs-sessions/{uid}/burn", a.authz("/hermes.v1.HermesMbs/BurnSession", a.burnMbsSession))
+	mux.HandleFunc("DELETE /api/v1/mbs-sessions/{uid}", a.authz("/hermes.v1.HermesMbs/RemoveSession", a.removeMbsSession))
+	mux.HandleFunc("POST /api/v1/mbs-sessions/{uid}/resolve-phone", a.authz("/hermes.v1.HermesMbs/ResolvePhone", a.resolveMbsPhone))
+	mux.HandleFunc("POST /api/v1/mbs-sessions/{uid}/messages", a.authz("/hermes.v1.HermesMbs/SendMessage", a.sendMbsMessage))
 
 	// MBS bridge-login WebSocket (chunk E2.2).
 	// Mounted OUTSIDE a.auth — the upgrade can't propagate ctx values
@@ -205,22 +205,22 @@ func (a *Adapter) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/ws/mbs/bridge-login", a.bridgeLoginWS)
 
 	// Phone pairing
-	mux.HandleFunc("POST /api/v1/wa-numbers/{id}/pair-phone", a.auth(a.pairPhone))
+	mux.HandleFunc("POST /api/v1/wa-numbers/{id}/pair-phone", a.authz("REST:POST /api/v1/wa-numbers/{id}/pair-phone", a.pairPhone))
 
 	// Admin operations
-	mux.HandleFunc("DELETE /api/v1/conversations/clear", a.auth(a.clearAllConversations))
+	mux.HandleFunc("DELETE /api/v1/conversations/clear", a.authz("REST:DELETE /api/v1/conversations/clear", a.clearAllConversations))
 
 	// Contact allowlist
-	mux.HandleFunc("GET /api/v1/allowlist", a.auth(a.listAllowlist))
-	mux.HandleFunc("POST /api/v1/allowlist", a.auth(a.addToAllowlist))
-	mux.HandleFunc("DELETE /api/v1/allowlist", a.auth(a.removeFromAllowlist))
-	mux.HandleFunc("DELETE /api/v1/allowlist/clear", a.auth(a.clearAllowlist))
+	mux.HandleFunc("GET /api/v1/allowlist", a.authz("REST:GET /api/v1/allowlist", a.listAllowlist))
+	mux.HandleFunc("POST /api/v1/allowlist", a.authz("REST:POST /api/v1/allowlist", a.addToAllowlist))
+	mux.HandleFunc("DELETE /api/v1/allowlist", a.authz("REST:DELETE /api/v1/allowlist", a.removeFromAllowlist))
+	mux.HandleFunc("DELETE /api/v1/allowlist/clear", a.authz("REST:DELETE /api/v1/allowlist/clear", a.clearAllowlist))
 
 	// Notifications
-	mux.HandleFunc("POST /api/v1/notifications", a.auth(a.configureNotification))
-	mux.HandleFunc("GET /api/v1/notifications", a.auth(a.listNotificationConfigs))
-	mux.HandleFunc("POST /api/v1/notifications/{id}/test", a.auth(a.testNotification))
-	mux.HandleFunc("DELETE /api/v1/notifications/{id}", a.auth(a.deleteNotificationConfig))
+	mux.HandleFunc("POST /api/v1/notifications", a.authz("/hermes.v1.HermesGateway/ConfigureNotification", a.configureNotification))
+	mux.HandleFunc("GET /api/v1/notifications", a.authz("/hermes.v1.HermesGateway/ListNotificationConfigs", a.listNotificationConfigs))
+	mux.HandleFunc("POST /api/v1/notifications/{id}/test", a.authz("/hermes.v1.HermesGateway/TestNotification", a.testNotification))
+	mux.HandleFunc("DELETE /api/v1/notifications/{id}", a.authz("/hermes.v1.HermesGateway/DeleteNotificationConfig", a.deleteNotificationConfig))
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -329,6 +329,26 @@ func (a *Adapter) auth(next http.HandlerFunc) http.HandlerFunc {
 
 		next(w, r.WithContext(ctx))
 	}
+}
+
+// authz wraps a handler with JWT authentication (via auth) PLUS role-tier RBAC
+// for the given logical method key. It delegates to middleware.AuthorizeMethod
+// — the SAME rpcRoles policy the gRPC RBACInterceptor enforces — so REST and
+// gRPC apply identical authorization from one source of truth.
+//
+// method is either a HermesGateway/HermesMbs full-method path (e.g.
+// "/hermes.v1.HermesGateway/CreateUser") or a synthetic "REST:METHOD /path"
+// key for REST-only routes with no gRPC equivalent. Every authenticated route
+// MUST pass a key present in rpcRoles or it fails closed (403).
+func (a *Adapter) authz(method string, next http.HandlerFunc) http.HandlerFunc {
+	return a.auth(func(w http.ResponseWriter, r *http.Request) {
+		role, _ := r.Context().Value(middleware.CtxRole).(string)
+		if err := middleware.AuthorizeMethod(role, method); err != nil {
+			a.grpcError(w, err) // PermissionDenied -> 403 via grpcToHTTP
+			return
+		}
+		next(w, r)
+	})
 }
 
 // CORS middleware for dev.
