@@ -178,7 +178,7 @@ git submodule update --init --recursive
 Current submodule heads observed in this checkout:
 
 - `third_party/mbs-native`: `361ac98` (`fb: authoritative per-thread inbound attribution + self-FBID hinting`)
-- `third_party/mautrix-meta-patched`: `316e495` (patched on top of upstream `2313d20`; adds `LastLoginPayload` + `GetLoginIdentity` for the mbs-native bridge)
+- `third_party/mautrix-meta-patched`: `5db5641` (rebased onto upstream `v0.2605.1`; adds `LastLoginPayload` + `GetLoginIdentity` for the mbs-native bridge)
 
 > Submodule heads move as the forks evolve. Treat the lines above as the
 > last-documented pointers, not a lock — run `git submodule status` for the
