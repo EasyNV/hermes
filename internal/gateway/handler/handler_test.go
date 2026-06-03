@@ -309,6 +309,12 @@ func (m *mockStore) ListAllowlist(ctx context.Context, workspaceID string, page,
 type mockInboxClient struct {
 	hermesv1.HermesInboxClient // embed for default methods
 	listConversationsFn func(ctx context.Context, req *hermesv1.InboxListConversationsRequest, opts ...grpc.CallOption) (*hermesv1.InboxListConversationsResponse, error)
+	getConversationFn   func(ctx context.Context, req *hermesv1.InboxGetConversationRequest, opts ...grpc.CallOption) (*hermesv1.InboxGetConversationResponse, error)
+	listMessagesFn      func(ctx context.Context, req *hermesv1.InboxListMessagesRequest, opts ...grpc.CallOption) (*hermesv1.InboxListMessagesResponse, error)
+	sendMessageFn       func(ctx context.Context, req *hermesv1.InboxSendMessageRequest, opts ...grpc.CallOption) (*hermesv1.InboxSendMessageResponse, error)
+	transferFn          func(ctx context.Context, req *hermesv1.InboxTransferConversationRequest, opts ...grpc.CallOption) (*hermesv1.InboxTransferConversationResponse, error)
+	closeFn             func(ctx context.Context, req *hermesv1.InboxCloseConversationRequest, opts ...grpc.CallOption) (*hermesv1.InboxCloseConversationResponse, error)
+	searchMessagesFn    func(ctx context.Context, req *hermesv1.InboxSearchMessagesRequest, opts ...grpc.CallOption) (*hermesv1.InboxSearchMessagesResponse, error)
 }
 
 func (m *mockInboxClient) ListConversations(ctx context.Context, req *hermesv1.InboxListConversationsRequest, opts ...grpc.CallOption) (*hermesv1.InboxListConversationsResponse, error) {
@@ -316,6 +322,48 @@ func (m *mockInboxClient) ListConversations(ctx context.Context, req *hermesv1.I
 		return m.listConversationsFn(ctx, req, opts...)
 	}
 	return &hermesv1.InboxListConversationsResponse{}, nil
+}
+
+func (m *mockInboxClient) GetConversation(ctx context.Context, req *hermesv1.InboxGetConversationRequest, opts ...grpc.CallOption) (*hermesv1.InboxGetConversationResponse, error) {
+	if m.getConversationFn != nil {
+		return m.getConversationFn(ctx, req, opts...)
+	}
+	return &hermesv1.InboxGetConversationResponse{}, nil
+}
+
+func (m *mockInboxClient) ListMessages(ctx context.Context, req *hermesv1.InboxListMessagesRequest, opts ...grpc.CallOption) (*hermesv1.InboxListMessagesResponse, error) {
+	if m.listMessagesFn != nil {
+		return m.listMessagesFn(ctx, req, opts...)
+	}
+	return &hermesv1.InboxListMessagesResponse{}, nil
+}
+
+func (m *mockInboxClient) SendMessage(ctx context.Context, req *hermesv1.InboxSendMessageRequest, opts ...grpc.CallOption) (*hermesv1.InboxSendMessageResponse, error) {
+	if m.sendMessageFn != nil {
+		return m.sendMessageFn(ctx, req, opts...)
+	}
+	return &hermesv1.InboxSendMessageResponse{}, nil
+}
+
+func (m *mockInboxClient) TransferConversation(ctx context.Context, req *hermesv1.InboxTransferConversationRequest, opts ...grpc.CallOption) (*hermesv1.InboxTransferConversationResponse, error) {
+	if m.transferFn != nil {
+		return m.transferFn(ctx, req, opts...)
+	}
+	return &hermesv1.InboxTransferConversationResponse{}, nil
+}
+
+func (m *mockInboxClient) CloseConversation(ctx context.Context, req *hermesv1.InboxCloseConversationRequest, opts ...grpc.CallOption) (*hermesv1.InboxCloseConversationResponse, error) {
+	if m.closeFn != nil {
+		return m.closeFn(ctx, req, opts...)
+	}
+	return &hermesv1.InboxCloseConversationResponse{}, nil
+}
+
+func (m *mockInboxClient) SearchMessages(ctx context.Context, req *hermesv1.InboxSearchMessagesRequest, opts ...grpc.CallOption) (*hermesv1.InboxSearchMessagesResponse, error) {
+	if m.searchMessagesFn != nil {
+		return m.searchMessagesFn(ctx, req, opts...)
+	}
+	return &hermesv1.InboxSearchMessagesResponse{}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -561,7 +609,7 @@ func TestListConversationsCSAgentFilter(t *testing.T) {
 		check    func(t *testing.T, captured *hermesv1.InboxListConversationsRequest)
 	}{
 		{
-			name:   "cs_agent gets assigned_to injected",
+			name:   "cs_agent gets assigned_to injected with include_unassigned",
 			role:   "cs_agent",
 			userID: "agent-1",
 			req: &hermesv1.ListConversationsRequest{
@@ -570,6 +618,9 @@ func TestListConversationsCSAgentFilter(t *testing.T) {
 			check: func(t *testing.T, captured *hermesv1.InboxListConversationsRequest) {
 				if captured.AssignedTo != "agent-1" {
 					t.Errorf("expected AssignedTo=agent-1, got %q", captured.AssignedTo)
+				}
+				if !captured.IncludeUnassigned {
+					t.Errorf("expected IncludeUnassigned=true for cs_agent, got false")
 				}
 			},
 		},
@@ -594,6 +645,9 @@ func TestListConversationsCSAgentFilter(t *testing.T) {
 			check: func(t *testing.T, captured *hermesv1.InboxListConversationsRequest) {
 				if captured.AssignedTo != "" {
 					t.Errorf("expected AssignedTo empty for admin, got %q", captured.AssignedTo)
+				}
+				if captured.IncludeUnassigned {
+					t.Errorf("expected IncludeUnassigned=false for admin, got true")
 				}
 			},
 		},
@@ -705,6 +759,185 @@ func TestCreateTenant(t *testing.T) {
 			}
 			if tt.check != nil {
 				tt.check(t, resp)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestConversationAccessRBAC — per-conversation read/write ownership for cs_agent
+//
+// Ownership model:
+//   - unassigned conversation  -> any cs_agent may read + act
+//   - assigned to a cs_agent    -> only that agent + higher roles
+// ---------------------------------------------------------------------------
+
+func TestCanAccessConversation(t *testing.T) {
+	cases := []struct {
+		name       string
+		role       string
+		callerID   string
+		assignedTo string
+		want       bool
+	}{
+		{"cs unassigned", "cs_agent", "agent-1", "", true},
+		{"cs own", "cs_agent", "agent-1", "agent-1", true},
+		{"cs other", "cs_agent", "agent-1", "agent-2", false},
+		{"workspace_admin other", "workspace_admin", "admin-1", "agent-2", true},
+		{"tenant_admin other", "tenant_admin", "ta-1", "agent-2", true},
+		{"superadmin other", "superadmin", "su-1", "agent-2", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := canAccessConversation(c.role, c.callerID, c.assignedTo); got != c.want {
+				t.Errorf("canAccessConversation(%q,%q,%q) = %v, want %v",
+					c.role, c.callerID, c.assignedTo, got, c.want)
+			}
+		})
+	}
+}
+
+// ctxFor builds a request context with role + user id like AuthInterceptor would.
+func ctxFor(role, userID string) context.Context {
+	ctx := context.WithValue(context.Background(), middleware.CtxRole, role)
+	return context.WithValue(ctx, middleware.CtxUserID, userID)
+}
+
+type matrixCase struct {
+	name        string
+	role        string
+	callerID    string
+	assignedTo  string
+	wantCode    codes.Code // codes.OK = allowed
+	wantNoFetch bool       // privileged path must skip the authorize round-trip
+}
+
+func accessMatrix() []matrixCase {
+	return []matrixCase{
+		{"cs unassigned -> ok", "cs_agent", "agent-1", "", codes.OK, false},
+		{"cs own -> ok", "cs_agent", "agent-1", "agent-1", codes.OK, false},
+		{"cs other -> denied", "cs_agent", "agent-1", "agent-2", codes.PermissionDenied, false},
+		{"workspace_admin other -> ok", "workspace_admin", "admin-1", "agent-2", codes.OK, true},
+		{"tenant_admin other -> ok", "tenant_admin", "ta-1", "agent-2", codes.OK, true},
+		{"superadmin other -> ok", "superadmin", "su-1", "agent-2", codes.OK, true},
+	}
+}
+
+func TestConversationAccessRBAC(t *testing.T) {
+	endpoints := []struct {
+		name   string
+		invoke func(h *Handler, ctx context.Context) error
+	}{
+		{
+			name: "GetConversation",
+			invoke: func(h *Handler, ctx context.Context) error {
+				_, err := h.GetConversation(ctx, &hermesv1.GetConversationRequest{Id: "conv-1"})
+				return err
+			},
+		},
+		{
+			name: "ListMessages",
+			invoke: func(h *Handler, ctx context.Context) error {
+				_, err := h.ListMessages(ctx, &hermesv1.ListMessagesRequest{ConversationId: "conv-1"})
+				return err
+			},
+		},
+		{
+			name: "SendMessage",
+			invoke: func(h *Handler, ctx context.Context) error {
+				_, err := h.SendMessage(ctx, &hermesv1.SendMessageRequest{ConversationId: "conv-1", Body: "hi"})
+				return err
+			},
+		},
+		{
+			name: "TransferConversation",
+			invoke: func(h *Handler, ctx context.Context) error {
+				_, err := h.TransferConversation(ctx, &hermesv1.TransferConversationRequest{Id: "conv-1", TargetUserId: "agent-9"})
+				return err
+			},
+		},
+		{
+			name: "CloseConversation",
+			invoke: func(h *Handler, ctx context.Context) error {
+				_, err := h.CloseConversation(ctx, &hermesv1.CloseConversationRequest{Id: "conv-1"})
+				return err
+			},
+		},
+	}
+
+	for _, ep := range endpoints {
+		for _, mc := range accessMatrix() {
+			t.Run(ep.name+"/"+mc.name, func(t *testing.T) {
+				fetched := false
+				mockInbox := &mockInboxClient{
+					getConversationFn: func(_ context.Context, _ *hermesv1.InboxGetConversationRequest, _ ...grpc.CallOption) (*hermesv1.InboxGetConversationResponse, error) {
+						fetched = true
+						return &hermesv1.InboxGetConversationResponse{
+							Conversation: &hermesv1.Conversation{Id: "conv-1", AssignedTo: mc.assignedTo},
+						}, nil
+					},
+				}
+				h := newTestHandlerWithInbox(&mockStore{}, mockInbox)
+				err := ep.invoke(h, ctxFor(mc.role, mc.callerID))
+
+				if mc.wantCode == codes.OK {
+					if err != nil {
+						t.Fatalf("expected OK, got %v", err)
+					}
+				} else {
+					if status.Code(err) != mc.wantCode {
+						t.Fatalf("expected %v, got %v (%v)", mc.wantCode, status.Code(err), err)
+					}
+				}
+
+				// GetConversation always fetches (it IS the data call). The no-fetch
+				// invariant only applies to the authorize-wrapper endpoints.
+				if ep.name != "GetConversation" && mc.wantNoFetch && fetched {
+					t.Errorf("privileged role should skip authorize fetch, but GetConversation was called")
+				}
+			})
+		}
+	}
+}
+
+// TestSearchMessagesRBACScope asserts the gateway sets requester scope for
+// cs_agent and leaves it empty for admins.
+func TestSearchMessagesRBACScope(t *testing.T) {
+	cases := []struct {
+		name              string
+		role              string
+		userID            string
+		wantRequester     string
+		wantIncludeUnassd bool
+	}{
+		{"cs_agent scoped", "cs_agent", "agent-1", "agent-1", true},
+		{"admin unscoped", "workspace_admin", "admin-1", "", false},
+		{"superadmin unscoped", "superadmin", "su-1", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var captured *hermesv1.InboxSearchMessagesRequest
+			mockInbox := &mockInboxClient{
+				searchMessagesFn: func(_ context.Context, req *hermesv1.InboxSearchMessagesRequest, _ ...grpc.CallOption) (*hermesv1.InboxSearchMessagesResponse, error) {
+					captured = req
+					return &hermesv1.InboxSearchMessagesResponse{}, nil
+				},
+			}
+			h := newTestHandlerWithInbox(&mockStore{}, mockInbox)
+			_, err := h.SearchMessages(ctxFor(c.role, c.userID), &hermesv1.SearchMessagesRequest{
+				WorkspaceId: "ws1", Query: "hello",
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if captured == nil {
+				t.Fatal("inbox SearchMessages not called")
+			}
+			if captured.RequesterUserId != c.wantRequester {
+				t.Errorf("RequesterUserId = %q, want %q", captured.RequesterUserId, c.wantRequester)
+			}
+			if captured.IncludeUnassigned != c.wantIncludeUnassd {
+				t.Errorf("IncludeUnassigned = %v, want %v", captured.IncludeUnassigned, c.wantIncludeUnassd)
 			}
 		})
 	}

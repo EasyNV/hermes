@@ -1448,10 +1448,56 @@ func (h *Handler) ListCampaignNumbers(ctx context.Context, req *hermesv1.ListCam
 //
 //  9. INBOX -- CONVERSATION RPCs (forward to inbox service)
 //
-//     CRITICAL: ListConversations injects RBAC filter for cs_agent callers.
-//     CS agents see ONLY unassigned + own assigned conversations.
+//     CRITICAL: conversation read/write is scoped per CS agent.
+//     Ownership model (operator-defined):
+//       - unassigned conversation  -> any cs_agent may read + claim
+//       - assigned to a cs_agent    -> only that agent + higher roles
+//
+//     Enforcement lives HERE in the gateway handler (not the gRPC interceptor)
+//     so it applies on BOTH transports: gRPC (interceptor chain) AND the REST
+//     adapter, which dispatches in-process to these same handler methods and
+//     bypasses the interceptor.
 //
 // ===========================================================================
+
+// canAccessConversation reports whether a caller with the given role and user ID
+// may read/act on a conversation with the given assigned_to value.
+//
+//	privileged (role != cs_agent)        -> true   (admins see everything)
+//	cs_agent, assignedTo == ""           -> true   (unassigned: open to all CS)
+//	cs_agent, assignedTo == callerUserID -> true   (own)
+//	cs_agent, otherwise                  -> false  (someone else's)
+func canAccessConversation(role, callerUserID, assignedTo string) bool {
+	if role != "cs_agent" {
+		return true
+	}
+	return assignedTo == "" || assignedTo == callerUserID
+}
+
+// authorizeConversationAccess resolves a conversation's assigned_to via the inbox
+// service and enforces canAccessConversation for cs_agent callers. Privileged
+// roles skip the round trip entirely.
+//
+// Returns nil when access is allowed, codes.PermissionDenied when a cs_agent
+// lacks access, or a propagated inbox error (NotFound / Unavailable / Internal).
+func (h *Handler) authorizeConversationAccess(ctx context.Context, convID string) error {
+	role := middleware.RoleFromCtx(ctx)
+	if role != "cs_agent" {
+		return nil // privileged: full access, no extra fetch
+	}
+	if h.inboxClient == nil {
+		return status.Error(codes.Unavailable, "inbox service not available")
+	}
+	resp, err := h.inboxClient.GetConversation(ctx, &hermesv1.InboxGetConversationRequest{Id: convID})
+	if err != nil {
+		return err // propagate NotFound etc. unchanged
+	}
+	userID := middleware.UserIDFromCtx(ctx)
+	if !canAccessConversation(role, userID, resp.GetConversation().GetAssignedTo()) {
+		return status.Error(codes.PermissionDenied, "conversation assigned to another agent")
+	}
+	return nil
+}
 
 func (h *Handler) ListConversations(ctx context.Context, req *hermesv1.ListConversationsRequest) (*hermesv1.ListConversationsResponse, error) {
 	if h.inboxClient == nil {
@@ -1477,14 +1523,13 @@ func (h *Handler) ListConversations(ctx context.Context, req *hermesv1.ListConve
 	}
 
 	if role == "cs_agent" {
-		// If the agent is not explicitly filtering by status, the inbox service
-		// needs to know to scope results. We set assigned_to to the agent's own
-		// user ID so the backend returns only their conversations + unassigned.
-		// The inbox service interprets assigned_to combined with the implicit
-		// UNASSIGNED inclusion for cs_agent callers. We pass the user_id so the
-		// backend can apply the filter.
+		// RBAC scope: a cs_agent sees their own conversations OR any unassigned
+		// one. We set assigned_to to the agent's own user ID and flip
+		// include_unassigned so the inbox store emits
+		// (assigned_to = self OR assigned_to IS NULL).
 		if inboxReq.AssignedTo == "" {
 			inboxReq.AssignedTo = userID
+			inboxReq.IncludeUnassigned = true
 		}
 		// If the agent explicitly requested a specific status that is not
 		// UNASSIGNED and a different agent's conversations, block it.
@@ -1518,6 +1563,14 @@ func (h *Handler) GetConversation(ctx context.Context, req *hermesv1.GetConversa
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	// RBAC scope: cs_agent may only read own or unassigned conversations.
+	// Inline predicate on the already-fetched row (no extra round trip).
+	role := middleware.RoleFromCtx(ctx)
+	userID := middleware.UserIDFromCtx(ctx)
+	if !canAccessConversation(role, userID, resp.GetConversation().GetAssignedTo()) {
+		return nil, status.Error(codes.PermissionDenied, "conversation assigned to another agent")
 	}
 
 	return &hermesv1.GetConversationResponse{
@@ -1559,6 +1612,11 @@ func (h *Handler) TransferConversation(ctx context.Context, req *hermesv1.Transf
 		return nil, status.Error(codes.InvalidArgument, "target_user_id is required")
 	}
 
+	// RBAC scope: cs_agent may only transfer own or unassigned conversations.
+	if err := h.authorizeConversationAccess(ctx, req.GetId()); err != nil {
+		return nil, err
+	}
+
 	userID := middleware.UserIDFromCtx(ctx)
 
 	resp, err := h.inboxClient.TransferConversation(ctx, &hermesv1.InboxTransferConversationRequest{
@@ -1579,6 +1637,11 @@ func (h *Handler) CloseConversation(ctx context.Context, req *hermesv1.CloseConv
 	}
 	if req.GetId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+
+	// RBAC scope: cs_agent may only close own or unassigned conversations.
+	if err := h.authorizeConversationAccess(ctx, req.GetId()); err != nil {
+		return nil, err
 	}
 
 	userID := middleware.UserIDFromCtx(ctx)
@@ -1608,6 +1671,11 @@ func (h *Handler) ListMessages(ctx context.Context, req *hermesv1.ListMessagesRe
 		return nil, status.Error(codes.InvalidArgument, "conversation_id is required")
 	}
 
+	// RBAC scope: cs_agent may only read messages of own or unassigned conversations.
+	if err := h.authorizeConversationAccess(ctx, req.GetConversationId()); err != nil {
+		return nil, err
+	}
+
 	resp, err := h.inboxClient.ListMessages(ctx, &hermesv1.InboxListMessagesRequest{
 		ConversationId: req.GetConversationId(),
 		Pagination:     req.GetPagination(),
@@ -1628,6 +1696,11 @@ func (h *Handler) SendMessage(ctx context.Context, req *hermesv1.SendMessageRequ
 	}
 	if req.GetConversationId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "conversation_id is required")
+	}
+
+	// RBAC scope: cs_agent may only send into own or unassigned conversations.
+	if err := h.authorizeConversationAccess(ctx, req.GetConversationId()); err != nil {
+		return nil, err
 	}
 
 	userID := middleware.UserIDFromCtx(ctx)
@@ -1657,12 +1730,20 @@ func (h *Handler) SearchMessages(ctx context.Context, req *hermesv1.SearchMessag
 		return nil, status.Error(codes.InvalidArgument, "query is required")
 	}
 
-	resp, err := h.inboxClient.SearchMessages(ctx, &hermesv1.InboxSearchMessagesRequest{
+	inboxReq := &hermesv1.InboxSearchMessagesRequest{
 		WorkspaceId:    req.GetWorkspaceId(),
 		Query:          req.GetQuery(),
 		ConversationId: req.GetConversationId(),
 		Pagination:     req.GetPagination(),
-	})
+	}
+	// RBAC scope: a cs_agent's search is restricted to conversations they may
+	// read (own + unassigned). Admins search the whole workspace.
+	if middleware.RoleFromCtx(ctx) == "cs_agent" {
+		inboxReq.RequesterUserId = middleware.UserIDFromCtx(ctx)
+		inboxReq.IncludeUnassigned = true
+	}
+
+	resp, err := h.inboxClient.SearchMessages(ctx, inboxReq)
 	if err != nil {
 		return nil, err
 	}

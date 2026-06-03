@@ -118,7 +118,7 @@ func (f *fakeStore) UpdateLastMessage(ctx context.Context, convID, preview strin
 
 // ---- Stub methods (unused by processMbsInbound) ------------------------------
 
-func (f *fakeStore) ListConversations(ctx context.Context, _, _, _, _, _, _ string, _ int32, _, _ int32) ([]*handler.ConversationRow, int64, error) {
+func (f *fakeStore) ListConversations(ctx context.Context, _, _, _, _, _, _ string, _ int32, _ bool, _, _ int32) ([]*handler.ConversationRow, int64, error) {
 	return nil, 0, errors.New("not implemented in fakeStore")
 }
 func (f *fakeStore) GetConversation(ctx context.Context, _ string) (*handler.ConversationRow, error) {
@@ -145,7 +145,7 @@ func (f *fakeStore) ListMessages(ctx context.Context, _, _ string, _, _ int32) (
 func (f *fakeStore) CreateMessage(ctx context.Context, _, _, _ string, _, _ *string, _ string) (*handler.MessageRow, error) {
 	return nil, errors.New("WA path not used by MBS consumer")
 }
-func (f *fakeStore) SearchMessages(ctx context.Context, _, _, _ string, _, _ *time.Time, _, _ int32) ([]*handler.SearchHitRow, int64, error) {
+func (f *fakeStore) SearchMessages(ctx context.Context, _, _, _, _ string, _ bool, _, _ *time.Time, _, _ int32) ([]*handler.SearchHitRow, int64, error) {
 	return nil, 0, nil
 }
 func (f *fakeStore) UpdateMessageStatus(ctx context.Context, _, _ string) error { return nil }

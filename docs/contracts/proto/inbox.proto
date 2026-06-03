@@ -114,6 +114,11 @@ message InboxListConversationsRequest {
   PageRequest pagination = 7;
   // E3 chunk 5: filter by channel. UNSPECIFIED = all channels.
   InboxChannel channel = 8;
+  // RBAC scope: when true AND assigned_to is set, the store returns conversations
+  // assigned to `assigned_to` OR unassigned (assigned_to IS NULL). The gateway sets
+  // this for cs_agent callers so they see their own + all unassigned conversations.
+  // Admins leave this false so an explicit assigned_to filter stays an exact match.
+  bool include_unassigned = 9;
 }
 
 // ConversationSortOrder controls the list order.
@@ -221,6 +226,11 @@ message InboxSearchMessagesRequest {
   google.protobuf.Timestamp from_date = 4;
   google.protobuf.Timestamp to_date = 5;
   PageRequest pagination = 6;
+  // RBAC scope: when set, restrict hits to conversations assigned to this user
+  // (a cs_agent's own). Empty = no assignee restriction (admin/privileged).
+  string requester_user_id = 7;
+  // When true AND requester_user_id is set, also include unassigned conversations.
+  bool include_unassigned = 8;
 }
 
 // InboxSearchHit is a message matched by full-text search with context.

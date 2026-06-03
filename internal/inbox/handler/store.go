@@ -122,7 +122,7 @@ type AgentPerfRow struct {
 type Store interface {
 	// Conversations
 	// E3 chunk 2: ListConversations gains `channel` filter ("" = both).
-	ListConversations(ctx context.Context, workspaceID, status, assignedTo, waNumberID, search, channel string, sortOrder int32, page, pageSize int32) ([]*ConversationRow, int64, error)
+	ListConversations(ctx context.Context, workspaceID, status, assignedTo, waNumberID, search, channel string, sortOrder int32, includeUnassigned bool, page, pageSize int32) ([]*ConversationRow, int64, error)
 	GetConversation(ctx context.Context, id string) (*ConversationRow, error)
 	GetConversationContact(ctx context.Context, contactID string) (*ContactRow, error)
 	GetConversationWaNumber(ctx context.Context, waNumberID string) (*WaNumberRow, error)
@@ -133,7 +133,7 @@ type Store interface {
 	// Messages
 	ListMessages(ctx context.Context, conversationID string, beforeMessageID string, page, pageSize int32) ([]*MessageRow, bool, int64, error)
 	CreateMessage(ctx context.Context, conversationID, direction, contentType string, body, mediaURL *string, waMessageID string) (*MessageRow, error)
-	SearchMessages(ctx context.Context, workspaceID, query, conversationID string, fromDate, toDate *time.Time, page, pageSize int32) ([]*SearchHitRow, int64, error)
+	SearchMessages(ctx context.Context, workspaceID, query, conversationID, requesterUserID string, includeUnassigned bool, fromDate, toDate *time.Time, page, pageSize int32) ([]*SearchHitRow, int64, error)
 	UpdateMessageStatus(ctx context.Context, waMessageID, newStatus string) error
 	GetMessageByWaMessageID(ctx context.Context, waMessageID string) (*MessageRow, error)
 
@@ -204,7 +204,7 @@ func NewPgStore(pool *pgxpool.Pool) *PgStore {
 // Conversations
 // ---------------------------------------------------------------------------
 
-func (s *PgStore) ListConversations(ctx context.Context, workspaceID, statusFilter, assignedTo, waNumberID, search, channel string, sortOrder int32, page, pageSize int32) ([]*ConversationRow, int64, error) {
+func (s *PgStore) ListConversations(ctx context.Context, workspaceID, statusFilter, assignedTo, waNumberID, search, channel string, sortOrder int32, includeUnassigned bool, page, pageSize int32) ([]*ConversationRow, int64, error) {
 	where := "WHERE c.workspace_id = $1"
 	args := []any{workspaceID}
 	idx := 2
@@ -215,7 +215,14 @@ func (s *PgStore) ListConversations(ctx context.Context, workspaceID, statusFilt
 		idx++
 	}
 	if assignedTo != "" {
-		where += fmt.Sprintf(" AND c.assigned_to = $%d", idx)
+		// RBAC scope: cs_agent callers pass includeUnassigned=true so they see their
+		// own conversations OR any unassigned one. Admins leave it false so an
+		// explicit assigned_to filter remains an exact match.
+		if includeUnassigned {
+			where += fmt.Sprintf(" AND (c.assigned_to = $%d OR c.assigned_to IS NULL)", idx)
+		} else {
+			where += fmt.Sprintf(" AND c.assigned_to = $%d", idx)
+		}
 		args = append(args, assignedTo)
 		idx++
 	}
@@ -517,7 +524,7 @@ func (s *PgStore) CreateMessage(ctx context.Context, conversationID, direction, 
 	return m, nil
 }
 
-func (s *PgStore) SearchMessages(ctx context.Context, workspaceID, query, conversationID string, fromDate, toDate *time.Time, page, pageSize int32) ([]*SearchHitRow, int64, error) {
+func (s *PgStore) SearchMessages(ctx context.Context, workspaceID, query, conversationID, requesterUserID string, includeUnassigned bool, fromDate, toDate *time.Time, page, pageSize int32) ([]*SearchHitRow, int64, error) {
 	where := "WHERE c.workspace_id = $1 AND m.body IS NOT NULL AND to_tsvector('simple', m.body) @@ plainto_tsquery('simple', $2)"
 	args := []any{workspaceID, query}
 	idx := 3
@@ -525,6 +532,18 @@ func (s *PgStore) SearchMessages(ctx context.Context, workspaceID, query, conver
 	if conversationID != "" {
 		where += fmt.Sprintf(" AND m.conversation_id = $%d", idx)
 		args = append(args, conversationID)
+		idx++
+	}
+	// RBAC scope: cs_agent callers pass requesterUserID so search hits are limited
+	// to conversations they may read (own, plus unassigned when includeUnassigned).
+	// Admins leave requesterUserID empty for an unrestricted workspace search.
+	if requesterUserID != "" {
+		if includeUnassigned {
+			where += fmt.Sprintf(" AND (c.assigned_to = $%d OR c.assigned_to IS NULL)", idx)
+		} else {
+			where += fmt.Sprintf(" AND c.assigned_to = $%d", idx)
+		}
+		args = append(args, requesterUserID)
 		idx++
 	}
 	if fromDate != nil {

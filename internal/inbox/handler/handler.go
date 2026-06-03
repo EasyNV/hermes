@@ -302,6 +302,7 @@ func (h *Handler) ListConversations(ctx context.Context, req *hermesv1.InboxList
 		req.Search,
 		inboxChannelToStr(req.Channel), // E3 chunk 5: channel filter
 		int32(req.SortOrder),
+		req.IncludeUnassigned, // RBAC scope: cs_agent own + unassigned
 		page, pageSize,
 	)
 	if err != nil {
@@ -755,7 +756,7 @@ func (h *Handler) SearchMessages(ctx context.Context, req *hermesv1.InboxSearchM
 		toDate = &t
 	}
 
-	hits, total, err := h.store.SearchMessages(ctx, req.WorkspaceId, req.Query, req.ConversationId, fromDate, toDate, page, pageSize)
+	hits, total, err := h.store.SearchMessages(ctx, req.WorkspaceId, req.Query, req.ConversationId, req.RequesterUserId, req.IncludeUnassigned, fromDate, toDate, page, pageSize)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "searching messages: %v", err)
 	}

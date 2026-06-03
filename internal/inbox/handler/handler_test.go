@@ -17,7 +17,7 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockStore struct {
-	listConversationsFn        func(ctx context.Context, workspaceID, status, assignedTo, waNumberID, search, channel string, sortOrder int32, page, pageSize int32) ([]*ConversationRow, int64, error)
+	listConversationsFn        func(ctx context.Context, workspaceID, status, assignedTo, waNumberID, search, channel string, sortOrder int32, includeUnassigned bool, page, pageSize int32) ([]*ConversationRow, int64, error)
 	getConversationFn          func(ctx context.Context, id string) (*ConversationRow, error)
 	getConversationContactFn   func(ctx context.Context, contactID string) (*ContactRow, error)
 	getConversationWaNumberFn  func(ctx context.Context, waNumberID string) (*WaNumberRow, error)
@@ -26,7 +26,7 @@ type mockStore struct {
 	closeConversationFn        func(ctx context.Context, id string) (*ConversationRow, error)
 	listMessagesFn             func(ctx context.Context, conversationID, beforeMessageID string, page, pageSize int32) ([]*MessageRow, bool, int64, error)
 	createMessageFn            func(ctx context.Context, conversationID, direction, contentType string, body, mediaURL *string, waMessageID string) (*MessageRow, error)
-	searchMessagesFn           func(ctx context.Context, workspaceID, query, conversationID string, fromDate, toDate *time.Time, page, pageSize int32) ([]*SearchHitRow, int64, error)
+	searchMessagesFn           func(ctx context.Context, workspaceID, query, conversationID, requesterUserID string, includeUnassigned bool, fromDate, toDate *time.Time, page, pageSize int32) ([]*SearchHitRow, int64, error)
 	updateMessageStatusFn      func(ctx context.Context, waMessageID, newStatus string) error
 	getMessageByWaMessageIDFn  func(ctx context.Context, waMessageID string) (*MessageRow, error)
 	findOrCreateConversationFn func(ctx context.Context, workspaceID, contactID, waNumberID string, campaignID *string) (*ConversationRow, bool, error)
@@ -60,9 +60,9 @@ type mockStore struct {
 	markOutboundFailedByIDFn      func(ctx context.Context, messageID string) error
 }
 
-func (m *mockStore) ListConversations(ctx context.Context, workspaceID, st, assignedTo, waNumberID, search, channel string, sortOrder int32, page, pageSize int32) ([]*ConversationRow, int64, error) {
+func (m *mockStore) ListConversations(ctx context.Context, workspaceID, st, assignedTo, waNumberID, search, channel string, sortOrder int32, includeUnassigned bool, page, pageSize int32) ([]*ConversationRow, int64, error) {
 	if m.listConversationsFn != nil {
-		return m.listConversationsFn(ctx, workspaceID, st, assignedTo, waNumberID, search, channel, sortOrder, page, pageSize)
+		return m.listConversationsFn(ctx, workspaceID, st, assignedTo, waNumberID, search, channel, sortOrder, includeUnassigned, page, pageSize)
 	}
 	return nil, 0, fmt.Errorf("ListConversations not mocked")
 }
@@ -114,9 +114,9 @@ func (m *mockStore) CreateMessage(ctx context.Context, conversationID, direction
 	}
 	return nil, fmt.Errorf("CreateMessage not mocked")
 }
-func (m *mockStore) SearchMessages(ctx context.Context, workspaceID, query, conversationID string, fromDate, toDate *time.Time, page, pageSize int32) ([]*SearchHitRow, int64, error) {
+func (m *mockStore) SearchMessages(ctx context.Context, workspaceID, query, conversationID, requesterUserID string, includeUnassigned bool, fromDate, toDate *time.Time, page, pageSize int32) ([]*SearchHitRow, int64, error) {
 	if m.searchMessagesFn != nil {
-		return m.searchMessagesFn(ctx, workspaceID, query, conversationID, fromDate, toDate, page, pageSize)
+		return m.searchMessagesFn(ctx, workspaceID, query, conversationID, requesterUserID, includeUnassigned, fromDate, toDate, page, pageSize)
 	}
 	return nil, 0, fmt.Errorf("SearchMessages not mocked")
 }
@@ -395,7 +395,7 @@ func TestListConversations(t *testing.T) {
 			name: "success returns conversations",
 			req:  &hermesv1.InboxListConversationsRequest{WorkspaceId: "ws-1"},
 			store: &mockStore{
-				listConversationsFn: func(_ context.Context, _, _, _, _, _, _ string, _ int32, _, _ int32) ([]*ConversationRow, int64, error) {
+				listConversationsFn: func(_ context.Context, _, _, _, _, _, _ string, _ int32, _ bool, _, _ int32) ([]*ConversationRow, int64, error) {
 					return []*ConversationRow{testConversation("unassigned")}, 1, nil
 				},
 			},
@@ -406,7 +406,7 @@ func TestListConversations(t *testing.T) {
 			name: "empty result",
 			req:  &hermesv1.InboxListConversationsRequest{WorkspaceId: "ws-1"},
 			store: &mockStore{
-				listConversationsFn: func(_ context.Context, _, _, _, _, _, _ string, _ int32, _, _ int32) ([]*ConversationRow, int64, error) {
+				listConversationsFn: func(_ context.Context, _, _, _, _, _, _ string, _ int32, _ bool, _, _ int32) ([]*ConversationRow, int64, error) {
 					return nil, 0, nil
 				},
 			},
@@ -449,7 +449,7 @@ func TestListConversations_ChannelFilter(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var capturedChannel string
 			store := &mockStore{
-				listConversationsFn: func(_ context.Context, _, _, _, _, _, channelArg string, _ int32, _, _ int32) ([]*ConversationRow, int64, error) {
+				listConversationsFn: func(_ context.Context, _, _, _, _, _, channelArg string, _ int32, _ bool, _, _ int32) ([]*ConversationRow, int64, error) {
 					capturedChannel = channelArg
 					return nil, 0, nil
 				},
@@ -902,7 +902,7 @@ func TestSearchMessages(t *testing.T) {
 			name: "success",
 			req:  &hermesv1.InboxSearchMessagesRequest{WorkspaceId: "ws-1", Query: "hello"},
 			store: &mockStore{
-				searchMessagesFn: func(_ context.Context, _, _, _ string, _, _ *time.Time, _, _ int32) ([]*SearchHitRow, int64, error) {
+				searchMessagesFn: func(_ context.Context, _, _, _, _ string, _ bool, _, _ *time.Time, _, _ int32) ([]*SearchHitRow, int64, error) {
 					body := "hello world"
 					return []*SearchHitRow{{
 						MessageRow: MessageRow{
