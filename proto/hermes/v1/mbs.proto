@@ -69,6 +69,13 @@ service HermesMbs {
   // account / GDPR / test teardown).
   rpc RemoveSession(RemoveMbsSessionRequest) returns (RemoveMbsSessionResponse);
 
+  // Assign (or change) the proxy a session connects through. proxy_id empty =
+  // auto-pick the best available proxy from the shared pool. Sticky: the proxy
+  // is pinned for the session lifetime and reused across reconnect/self-heal.
+  // Admins only (superadmin/tenant_admin/workspace_admin).
+  // Called by: gateway (on behalf of an admin via the MBS Pages UI)
+  rpc SetSessionProxy(SetMbsSessionProxyRequest) returns (SetMbsSessionProxyResponse);
+
   // ─── Phone resolution ─────────────────────────────────────────
 
   // Resolve a phone number to a thread_id (customer_id). Cheap: uses
@@ -119,6 +126,11 @@ message BridgeLoginStart {
   // If true, persist totp_secret encrypted into mbs_sessions for
   // future unattended re-bridge.
   bool persist_totp_secret = 6;
+  // Optional explicit proxy to route the login HTTP through and pin onto
+  // the new session. Empty = auto-pick the best proxy from the tenant's
+  // shared pool (when MBS_PROXY_AUTO_ASSIGN is on) or connect direct.
+  // The chosen proxy becomes the session's sticky pin (mbs_sessions.proxy_id).
+  string proxy_id = 7;
 }
 
 message BridgeLoginInput {
@@ -237,6 +249,15 @@ message MbsSessionInfo {
   // display-only — lets the UI show "which account" instead of a bare uid.
   // Empty for sessions bridged before 2026-06-02 until backfilled.
   string login_email = 12;
+
+  // ── Proxy (anti-ban, 2026-06-03) ──
+  // The proxy assigned to this session (sticky for the session lifetime).
+  // proxy_id empty = no proxy (direct connection). proxy_label is a
+  // display-only "host:port (type)" string with NO credentials. proxy_status
+  // is a passthrough of the pool proxy's health for the UI status dot.
+  string proxy_id = 13;
+  string proxy_label = 14;
+  ProxyStatus proxy_status = 15;
 }
 
 message MbsAsset {
@@ -302,6 +323,18 @@ message RemoveMbsSessionResponse {
   // Echoes the removed uid for client-side reconciliation. The row no
   // longer exists, so there is no session to return.
   int64 uid = 1;
+}
+
+message SetMbsSessionProxyRequest {
+  int64 uid = 1;
+  // Explicit proxy to pin. Empty = auto-pick the best available proxy from the
+  // tenant's shared pool (cleanest + least loaded). The chosen proxy is written
+  // to mbs_sessions.proxy_id and reused for the session lifetime.
+  string proxy_id = 2;
+}
+
+message SetMbsSessionProxyResponse {
+  MbsSessionInfo session = 1;
 }
 
 

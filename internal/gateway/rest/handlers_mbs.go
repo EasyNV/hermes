@@ -176,6 +176,35 @@ func (a *Adapter) removeMbsSession(w http.ResponseWriter, r *http.Request) {
 	a.writeProto(w, resp)
 }
 
+// setMbsSessionProxy
+//
+//	POST /api/v1/mbs-sessions/{uid}/proxy
+//	body: {"proxyId":"..."}  — optional; empty = auto-pick best from pool
+//
+// Assigns (or changes) the sticky proxy this session connects through. The
+// {uid} path param is the source of truth. Admins only (enforced at the authz
+// layer via the /hermes.v1.HermesMbs/SetSessionProxy key).
+func (a *Adapter) setMbsSessionProxy(w http.ResponseWriter, r *http.Request) {
+	uid, ok := parseUIDPath(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		ProxyID string `json:"proxyId"`
+	}
+	// Empty body is OK → auto-pick. readJSON tolerates zero-length input.
+	_ = readJSON(r, &body)
+	resp, err := a.mbs.SetMbsSessionProxy(r.Context(), &hermesv1.SetMbsSessionProxyRequest{
+		Uid:     uid,
+		ProxyId: body.ProxyID,
+	})
+	if err != nil {
+		a.grpcError(w, err)
+		return
+	}
+	a.writeProto(w, resp)
+}
+
 // resolveMbsPhone
 //
 //	POST /api/v1/mbs-sessions/{uid}/resolve-phone

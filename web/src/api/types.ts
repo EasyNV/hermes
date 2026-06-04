@@ -337,6 +337,15 @@ export interface MbsSession {
   // lets the operator tell which Meta account a session row corresponds to.
   // Empty for sessions bridged before 2026-06-02 until backfilled.
   loginEmail?: string
+  // Proxy (anti-ban, 2026-06-03). The sticky proxy this session connects
+  // through. proxyId empty = direct (no proxy). proxyLabel is a display-only
+  // "host:port (type)" string with NO credentials. proxyStatus is the pool
+  // proxy's health passthrough for the UI status dot. proxyLabel/proxyStatus
+  // are only enriched on responses that resolve the proxy (e.g. SetSessionProxy);
+  // list responses carry proxyId only.
+  proxyId?: string
+  proxyLabel?: string
+  proxyStatus?: ProxyStatus
   // Primary asset embedded inline by listMbsSessions / getMbsSessionStatus.
   // Added Stage F follow-up chunk 8 (2026-05-30) — campaign picker reads
   // wecPhoneNumber + wecAccountRegistered to decide pickability.
@@ -379,6 +388,7 @@ export interface MbsGetSessionStatusResponse { session: MbsSession }
 export interface MbsListSessionAssetsResponse { assets: MbsAsset[] }
 export interface MbsBurnSessionResponse { session: MbsSession }
 export interface MbsRemoveSessionResponse { uid: string }
+export interface MbsSetSessionProxyResponse { session: MbsSession }
 export interface MbsResolvePhoneResponse {
   threadId: string         // FBID-keyed thread id; empty if exists=false
   pageId: string

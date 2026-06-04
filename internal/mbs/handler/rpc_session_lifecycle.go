@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	hermesv1 "github.com/hermes-waba/hermes/gen/go/hermes/v1"
 	"github.com/hermes-waba/hermes/internal/mbs/store"
@@ -274,6 +275,128 @@ func (h *Handler) RemoveSession(ctx context.Context, req *hermesv1.RemoveMbsSess
 	)
 
 	return &hermesv1.RemoveMbsSessionResponse{Uid: req.Uid}, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SetSessionProxy
+// ─────────────────────────────────────────────────────────────────────
+
+// SetSessionProxy assigns (or changes) the proxy a session connects through.
+// Sticky: the chosen proxy is written to mbs_sessions.proxy_id and reused on
+// every reconnect + self-heal. Flow:
+//
+//  1. requireTenant + ownership cross-check (GetSessionByTenant)
+//  2. Resolve the proxy: explicit req.proxy_id → validate via GetProxy;
+//     empty → GetBestProxy auto-pick from the tenant's shared pool
+//  3. AssignProxy(target=MBS, uid) — writes proxy_id + bumps assigned_count
+//  4. Disconnect — force the next connect to re-dial through the new proxy
+//     (GetOrConnect re-reads proxy_id; the manager rebuilds the dialer)
+//  5. Re-read the row + enrich display fields, return the updated session
+//
+// RBAC (admins only) is enforced at the gateway interceptor layer; this
+// handler is the data-plane authority (tenant ownership) only.
+func (h *Handler) SetSessionProxy(ctx context.Context, req *hermesv1.SetMbsSessionProxyRequest) (*hermesv1.SetMbsSessionProxyResponse, error) {
+	tenantID, err := requireTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if req.Uid == 0 {
+		return nil, status.Error(codes.InvalidArgument, "uid is required")
+	}
+	if h.proxyClient == nil {
+		return nil, status.Error(codes.FailedPrecondition, "proxy service not configured")
+	}
+
+	// 1. Ownership cross-check.
+	row, err := h.store.GetSessionByTenant(ctx, tenantID, req.Uid)
+	if err != nil {
+		return nil, mapStoreErr(err)
+	}
+
+	// 2. Resolve the proxy to pin.
+	var chosen *hermesv1.Proxy
+	if req.ProxyId != "" {
+		resp, gerr := h.proxyClient.GetProxy(ctx, &hermesv1.ProxyGetRequest{Id: req.ProxyId})
+		if gerr != nil {
+			return nil, status.Errorf(codes.Internal, "lookup proxy: %v", gerr)
+		}
+		if resp.GetProxy() == nil {
+			return nil, status.Errorf(codes.NotFound, "proxy %q not found", req.ProxyId)
+		}
+		chosen = resp.GetProxy()
+		// Defense in depth: the chosen proxy must belong to the caller's
+		// tenant (the shared pool is tenant-scoped). Don't let an admin pin
+		// another tenant's proxy.
+		if chosen.TenantId != "" && chosen.TenantId != tenantID {
+			return nil, status.Error(codes.PermissionDenied, "proxy belongs to a different tenant")
+		}
+	} else {
+		best, gerr := h.proxyClient.GetBestProxy(ctx, &hermesv1.ProxyGetBestRequest{TenantId: tenantID})
+		if gerr != nil {
+			return nil, status.Errorf(codes.Internal, "pick best proxy: %v", gerr)
+		}
+		if best.GetProxy() == nil {
+			return nil, status.Error(codes.FailedPrecondition, "no proxy available in pool")
+		}
+		chosen = best.GetProxy()
+	}
+
+	// 3. Pin it (writes mbs_sessions.proxy_id + bumps assigned_count; the
+	// proxy store decrements any previously-pinned proxy in the same txn).
+	if _, err := h.proxyClient.AssignProxy(ctx, &hermesv1.ProxyAssignRequest{
+		ProxyId:    chosen.Id,
+		TargetType: hermesv1.ProxyTargetType_PROXY_TARGET_TYPE_MBS,
+		TargetId:   fmt.Sprintf("%d", req.Uid),
+	}); err != nil {
+		return nil, status.Errorf(codes.Internal, "assign proxy: %v", err)
+	}
+
+	// 4. Force a reconnect through the new proxy. Disconnect is idempotent
+	// and no-ops if the uid isn't currently connected; the next GetOrConnect
+	// (send / listen / campaign) re-reads proxy_id and dials through it.
+	if h.manager != nil {
+		_ = h.manager.Disconnect(req.Uid)
+	}
+
+	// 5. Re-read + enrich display. Reflect the new pin on the returned row
+	// even if the re-read lags (best-effort).
+	updated, rerr := h.store.GetSession(ctx, req.Uid)
+	if rerr != nil {
+		row.ProxyID = &chosen.Id
+		updated = row
+	}
+	primary := h.lookupPrimaryAsset(ctx, req.Uid)
+	info := sessionRowToProto(updated, primary)
+	enrichProxyFromProto(info, chosen)
+
+	h.log.Info().Int64("uid", req.Uid).Str("proxy_id", chosen.Id).
+		Msg("SetSessionProxy: pinned proxy + triggered reconnect")
+
+	return &hermesv1.SetMbsSessionProxyResponse{Session: info}, nil
+}
+
+// enrichProxyFromProto fills the display-only proxy_label + proxy_status on a
+// MbsSessionInfo from a resolved pool Proxy. proxy_label is "host:port (type)"
+// with NO credentials. nil-safe on both args.
+func enrichProxyFromProto(info *hermesv1.MbsSessionInfo, p *hermesv1.Proxy) {
+	if info == nil || p == nil {
+		return
+	}
+	info.ProxyId = p.Id
+	info.ProxyLabel = proxyDisplayLabel(p)
+	info.ProxyStatus = p.Status
+}
+
+// proxyDisplayLabel formats a credential-free "host:port (type)" label.
+func proxyDisplayLabel(p *hermesv1.Proxy) string {
+	if p == nil || p.Host == "" {
+		return ""
+	}
+	scheme := "socks5"
+	if p.Type == hermesv1.ProxyType_PROXY_TYPE_HTTP {
+		scheme = "http"
+	}
+	return fmt.Sprintf("%s:%d (%s)", p.Host, p.Port, scheme)
 }
 
 // ─────────────────────────────────────────────────────────────────────

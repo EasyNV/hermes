@@ -84,6 +84,16 @@ enum ProxyType {
   PROXY_TYPE_HTTP = 2;
 }
 
+// ProxyTargetType is the channel a proxy assignment targets. The proxy pool is
+// shared across WA and MBS; this discriminates which table the assignment link
+// is written to (wa_numbers.proxy_id vs mbs_sessions.proxy_id).
+enum ProxyTargetType {
+  // Legacy/unspecified — handlers treat this as WA when wa_number_id is set.
+  PROXY_TARGET_TYPE_UNSPECIFIED = 0;
+  PROXY_TARGET_TYPE_WA = 1;
+  PROXY_TARGET_TYPE_MBS = 2;
+}
+
 // ProxyStatus reflects the health state of a proxy.
 enum ProxyStatus {
   PROXY_STATUS_UNSPECIFIED = 0;

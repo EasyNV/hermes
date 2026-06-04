@@ -13,6 +13,7 @@ import (
 	"mbs-native/auth"
 
 	hermesv1 "github.com/hermes-waba/hermes/gen/go/hermes/v1"
+	"github.com/hermes-waba/hermes/internal/mbs/session"
 	"github.com/hermes-waba/hermes/internal/mbs/store"
 	"github.com/hermes-waba/hermes/pkg/crypto"
 	"github.com/pquerna/otp/totp"
@@ -83,6 +84,16 @@ func (h *Handler) BridgeLogin(stream hermesv1.HermesMbs_BridgeLoginServer) error
 	}
 	effectiveTenant := tenantID
 
+	// Resolve a proxy for the login HTTP BEFORE building the driver, so
+	// messagix.SetProxy routes the CAA/bloks login through the same IP the
+	// session will later send from. Read-only against the pool (GetBestProxy
+	// doesn't bump assigned_count); the actual pin happens post-CreateSession
+	// in persistLoginProxy. Under PROXY_REQUIRED, a missing proxy fails login.
+	loginProxyURL, loginProxyID, perr := h.resolveLoginProxy(ctx, effectiveTenant, start.ProxyId)
+	if perr != nil {
+		return perr
+	}
+
 	// Build per-invocation driver via factory. Logger carries tenant
 	// + email for the duration of one attempt.
 	driverLog := h.log.With().
@@ -94,6 +105,7 @@ func (h *Handler) BridgeLogin(stream hermesv1.HermesMbs_BridgeLoginServer) error
 		Logger:          driverLog,
 		Timeout:         180 * time.Second,
 		Await2FATimeout: 120 * time.Second,
+		ProxyURL:        loginProxyURL,
 	})
 	if driver == nil {
 		return status.Error(codes.Internal, "driver factory returned nil")
@@ -145,7 +157,7 @@ func (h *Handler) BridgeLogin(stream hermesv1.HermesMbs_BridgeLoginServer) error
 				return mapBridgeErr(hermesv1.BridgeLoginErrorCode_BRIDGE_ERR_INTERNAL,
 					"driver closed update channel unexpectedly")
 			}
-			done, err := h.handleDriverUpdate(stream, driver, start, effectiveTenant, upd)
+			done, err := h.handleDriverUpdate(stream, driver, start, effectiveTenant, loginProxyID, upd)
 			if done {
 				return err
 			}
@@ -161,6 +173,7 @@ func (h *Handler) handleDriverUpdate(
 	driver Driver,
 	start *hermesv1.BridgeLoginStart,
 	tenantID string,
+	loginProxyID string,
 	upd DriverUpdate,
 ) (done bool, err error) {
 	switch upd.Kind {
@@ -204,7 +217,7 @@ func (h *Handler) handleDriverUpdate(
 			return true, mapBridgeErr(hermesv1.BridgeLoginErrorCode_BRIDGE_ERR_INTERNAL,
 				"driver Success.Creds is nil")
 		}
-		if err := h.persistBridgeSuccess(stream.Context(), tenantID, start, upd.Success); err != nil {
+		if err := h.persistBridgeSuccess(stream.Context(), tenantID, start, loginProxyID, upd.Success); err != nil {
 			// Distinguish security-relevant tenant collision from
 			// generic persist failure. Tenant collision → fail
 			// closed with PermissionDenied + a distinct outcome
@@ -385,6 +398,7 @@ func (h *Handler) persistBridgeSuccess(
 	ctx context.Context,
 	tenantID string,
 	start *hermesv1.BridgeLoginStart,
+	loginProxyID string,
 	success *DriverSuccess,
 ) error {
 	uid := success.Creds.UserID
@@ -475,6 +489,14 @@ func (h *Handler) persistBridgeSuccess(
 	// fall through to UpdateSessionTokens + UpdateSessionCookies.
 	// This handles the re-bridge case (Sam re-runs BridgeLogin on the
 	// same uid to refresh creds after a burn).
+	//
+	// pinLoginProxy decides whether to pin the proxy resolved at login
+	// start onto this session. On a FRESH create we always pin (the
+	// session inherits the IP its login used). On a RE-bridge we pin only
+	// if the session has no existing proxy — otherwise we keep the sticky
+	// pin (D4) and don't rotate the IP just because login pulled a fresh
+	// pool proxy (we can't know the uid's existing proxy until after login).
+	pinLoginProxy := true
 	if err := h.store.CreateSession(ctx, row); err != nil {
 		// CreateSession failed. Three cases:
 		//   1. Row already exists, same tenant  → legitimate re-bridge
@@ -503,6 +525,11 @@ func (h *Handler) persistBridgeSuccess(
 			return fmt.Errorf("uid %d is owned by a different tenant: %w",
 				uid, store.ErrTenantMismatch)
 		}
+		// Re-bridge: only pin the freshly-pulled login proxy if the
+		// existing session has no proxy yet. Keep the sticky pin otherwise.
+		if existing.ProxyID != nil && *existing.ProxyID != "" {
+			pinLoginProxy = false
+		}
 		// Case 1: legitimate re-bridge. Update tokens + cookies.
 		// We don't refresh every plaintext identity field — those
 		// are mostly stable.
@@ -516,6 +543,15 @@ func (h *Handler) persistBridgeSuccess(
 		}
 		// Reset state to active in case the prior session was burned.
 		_ = h.store.UpdateSessionState(ctx, uid, "active", nil)
+	}
+
+	// 5b. Pin the login-leg proxy onto the session (sticky D4). Now that
+	// the row exists and uid is known, AssignProxy writes mbs_sessions
+	// .proxy_id + bumps assigned_count. Non-fatal: the manager's
+	// auto-assign-on-connect is the backstop. Skipped on re-bridge when a
+	// proxy is already pinned (don't rotate a healthy IP).
+	if pinLoginProxy {
+		h.persistLoginProxy(ctx, uid, loginProxyID)
 	}
 
 	// 6. UpsertAssets.
@@ -649,6 +685,97 @@ func (h *Handler) recordBridgeOutcome(outcome string) {
 		return
 	}
 	h.metrics.BridgeLogins.WithLabelValues(outcome).Inc()
+}
+
+// resolveLoginProxy pulls a proxy from the shared pool at the START of a
+// bridge login — before any session row (or uid) exists — so the login HTTP
+// (messagix.SetProxy) goes out the same IP the session will later send from.
+//
+// It is READ-ONLY against the pool: GetBestProxy does NOT bump assigned_count,
+// so a login that ultimately fails leaks no assignment (§6 "Login-before-session
+// ordering"). The actual pin (AssignProxy → assigned_count++ +
+// mbs_sessions.proxy_id) happens in persistLoginProxy, only AFTER CreateSession
+// succeeds and a uid exists.
+//
+// Returns (proxyURL, proxyID). proxyURL == "" means "connect direct". When
+// proxyRequired is set and no proxy can be resolved, returns an error so the
+// caller can fail the login (global PROXY_REQUIRED, MBS leg).
+//
+// explicitProxyID, when non-empty, pins that specific pool proxy (operator
+// chose it in the bridge-login dialog) instead of auto-picking. It is
+// validated via GetProxy; an invalid/missing id is treated as "no usable
+// explicit choice" and falls through to auto-pick (or direct/required).
+func (h *Handler) resolveLoginProxy(ctx context.Context, tenantID, explicitProxyID string) (proxyURL, proxyID string, err error) {
+	if h.proxyClient == nil {
+		if h.proxyRequired {
+			return "", "", status.Error(codes.FailedPrecondition,
+				"PROXY_REQUIRED: no proxy source configured for bridge login")
+		}
+		return "", "", nil
+	}
+
+	// Operator picked an explicit proxy in the dialog — honor it (validate first).
+	if explicitProxyID != "" {
+		resp, gerr := h.proxyClient.GetProxy(ctx, &hermesv1.ProxyGetRequest{Id: explicitProxyID})
+		if gerr == nil && resp.GetProxy() != nil {
+			p := resp.GetProxy()
+			// Tenant-scope guard: don't let a caller pin another tenant's proxy.
+			if p.TenantId == "" || p.TenantId == tenantID {
+				return session.ProxyURLFromProto(p), p.GetId(), nil
+			}
+			h.log.Warn().Str("tenant_id", tenantID).Str("proxy_id", explicitProxyID).
+				Msg("BridgeLogin: explicit proxy belongs to another tenant, ignoring")
+		} else {
+			h.log.Warn().Str("tenant_id", tenantID).Str("proxy_id", explicitProxyID).Err(gerr).
+				Msg("BridgeLogin: explicit proxy unresolvable, falling back to auto/direct")
+		}
+		// fall through to auto-pick / direct
+	}
+
+	// No explicit (usable) choice. Auto-pick only when enabled.
+	if !h.proxyAutoAssign {
+		if h.proxyRequired {
+			return "", "", status.Error(codes.FailedPrecondition,
+				"PROXY_REQUIRED: no proxy source configured for bridge login")
+		}
+		return "", "", nil
+	}
+	best, gerr := h.proxyClient.GetBestProxy(ctx, &hermesv1.ProxyGetBestRequest{TenantId: tenantID})
+	if gerr != nil || best.GetProxy() == nil {
+		if h.proxyRequired {
+			return "", "", status.Errorf(codes.FailedPrecondition,
+				"PROXY_REQUIRED: no proxy available in pool for bridge login: %v", gerr)
+		}
+		h.log.Warn().Str("tenant_id", tenantID).Err(gerr).
+			Msg("BridgeLogin: no proxy available, login will connect direct")
+		return "", "", nil
+	}
+	chosen := best.GetProxy()
+	return session.ProxyURLFromProto(chosen), chosen.GetId(), nil
+}
+
+// persistLoginProxy pins the proxy resolved at login start onto the freshly
+// created session row (mbs_sessions.proxy_id) and bumps the pool's
+// assigned_count — completing the sticky assignment so every later connect /
+// reconnect / self-heal reuses the SAME IP. Best-effort + non-fatal: a pin
+// failure logs but does not fail the login (the session is already persisted;
+// the manager's auto-assign-on-connect is the backstop). No-op when proxyID is
+// empty (login went direct).
+func (h *Handler) persistLoginProxy(ctx context.Context, uid int64, proxyID string) {
+	if h.proxyClient == nil || proxyID == "" {
+		return
+	}
+	if _, err := h.proxyClient.AssignProxy(ctx, &hermesv1.ProxyAssignRequest{
+		ProxyId:    proxyID,
+		TargetType: hermesv1.ProxyTargetType_PROXY_TARGET_TYPE_MBS,
+		TargetId:   fmt.Sprintf("%d", uid),
+	}); err != nil {
+		h.log.Warn().Int64("uid", uid).Str("proxy_id", proxyID).Err(err).
+			Msg("BridgeLogin: failed to pin login proxy onto session (manager auto-assign is the backstop)")
+		return
+	}
+	h.log.Info().Int64("uid", uid).Str("proxy_id", proxyID).
+		Msg("BridgeLogin: pinned login proxy onto session")
 }
 
 // Force-import auth so the package is in the dep graph for tests that

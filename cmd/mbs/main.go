@@ -48,6 +48,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	grpchealth "google.golang.org/grpc/health"
 	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
@@ -101,6 +102,25 @@ func main() {
 	defer pool.Close()
 	st := store.NewPgStore(pool)
 	log.Info().Msg("postgres connected")
+
+	// ── 2b. Proxy gRPC client (optional — anti-ban proxy resolution).
+	// Won't fail boot if the proxy service is down: sessions then connect
+	// direct (soft policy). PROXY_REQUIRED enforcement happens per-connect.
+	var proxyClient session.ProxyClient
+	proxyConn, perr := grpc.NewClient(cfg.ProxyServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if perr != nil {
+		log.Warn().Err(perr).Str("addr", cfg.ProxyServiceAddr).
+			Msg("proxy service unavailable, MBS sessions will connect without proxy")
+	} else {
+		proxyClient = hermesv1.NewHermesProxyClient(proxyConn)
+		defer proxyConn.Close()
+		log.Info().Str("addr", cfg.ProxyServiceAddr).Bool("auto_assign", cfg.ProxyAutoAssign).
+			Bool("required", cfg.ProxyRequired).Msg("proxy resolution enabled for MBS")
+	}
+	proxyResolver := session.NewProxyResolver(proxyClient, session.ProxyResolverConfig{
+		AutoAssign: cfg.ProxyAutoAssign,
+		Required:   cfg.ProxyRequired,
+	}, log)
 
 	// ── 3. NATS JetStream
 	js, nc, err := hermesnats.NewJetStream(cfg.NatsURL)
@@ -176,10 +196,12 @@ func main() {
 	// so non-message deltas are skipped here. (MBS read/delivered status
 	// is a separate, not-yet-built concern.)
 	mgr := session.NewManager(session.Opts{
-		Store:  st,
-		DEK:    dek,
-		PodID:  cfg.PodID,
-		Logger: log,
+		Store:         st,
+		DEK:           dek,
+		PodID:         cfg.PodID,
+		Logger:        log,
+		ProxyResolver: proxyResolver,
+		ProxyRequired: cfg.ProxyRequired,
 		OnDelta: func(d *session.InboundDelta) {
 			if d == nil || d.Text == "" {
 				return
@@ -227,6 +249,10 @@ func main() {
 		DEK:                       dek,
 		PodID:                     cfg.PodID,
 		Logger:                    log,
+		ProxyResolver:             proxyResolver,
+		ProxyClient:               proxyClient,
+		ProxyAutoAssign:           cfg.ProxyAutoAssign,
+		ProxyRequired:             cfg.ProxyRequired,
 		MaxConcurrentBridgeLogins: cfg.BridgeMaxConcurrent,
 	})
 	if err != nil {

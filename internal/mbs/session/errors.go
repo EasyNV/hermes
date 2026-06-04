@@ -43,3 +43,9 @@ var ErrDrained = errors.New("session: manager drained, not accepting new connect
 // manager (post-Shutdown). Distinct from ErrDrained so callers can
 // distinguish "shutting down" from "shut down".
 var ErrShutdown = errors.New("session: manager already shut down")
+
+// ErrProxyRequired is returned by connect when PROXY_REQUIRED is set but no
+// proxy could be resolved for the session. The connect is refused rather than
+// falling back to a direct (datacenter-IP) connection — the hard anti-ban
+// policy (D3). The pod_id claim is released before returning.
+var ErrProxyRequired = errors.New("session: proxy required but none could be resolved")

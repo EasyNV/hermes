@@ -92,6 +92,13 @@ func sessionRowToProto(row *store.SessionRow, primary *store.AssetRow) *hermesv1
 	if row.LastConnackAt != nil {
 		out.LastConnackAt = timestamppb.New(*row.LastConnackAt)
 	}
+	// proxy_id is stored directly on the session row (sticky pin). The
+	// display-only proxy_label + proxy_status require a proxy-service
+	// lookup and are enriched separately (enrichProxyDisplay) on the RPCs
+	// that have a proxy client + ctx — keeping this converter pure.
+	if row.ProxyID != nil {
+		out.ProxyId = *row.ProxyID
+	}
 	if primary != nil {
 		out.PrimaryAsset = assetRowToProto(primary)
 	}

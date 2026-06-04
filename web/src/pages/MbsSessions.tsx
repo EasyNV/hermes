@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Loader2,
   Building2,
+  Network,
 } from 'lucide-react'
 import { useAuthStore } from '@/stores/auth'
 import { useMbsStore, selectSessions, sortSessionsByLastSeen } from '@/stores/mbs'
@@ -20,14 +21,15 @@ import {
   burnMbsSession,
   removeMbsSession,
 } from '@/api/mbs'
-import { MbsSessionState } from '@/api/types'
-import type { MbsSessionState as MbsSessionStateT } from '@/api/types'
+import { MbsSessionState, ProxyStatus } from '@/api/types'
+import type { MbsSessionState as MbsSessionStateT, ProxyStatus as ProxyStatusT } from '@/api/types'
 import { MBS_STATUS } from '@/lib/constants'
 import { ApiError } from '@/api/client'
 import { StatusBadge } from '@/components/shared/StatusBadge'
 import { Pagination } from '@/components/shared/Pagination'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { BridgeLoginDialog } from '@/components/mbs/BridgeLoginDialog'
+import { ChangeProxyDialog } from '@/components/mbs/ChangeProxyDialog'
 import { ColdComposeForm } from '@/components/mbs/ColdComposeForm'
 import {
   Table,
@@ -90,6 +92,21 @@ function cookieFreshness(iso: string): string {
   return `in ${days}d`
 }
 
+// proxyStatusDot maps a proxy's health passthrough to a status-dot color.
+// Undefined (list responses don't enrich status) falls back to neutral.
+function proxyStatusDot(status?: ProxyStatusT): string {
+  switch (status) {
+    case ProxyStatus.ACTIVE:
+      return 'bg-emerald-500'
+    case ProxyStatus.DEAD:
+      return 'bg-red-500'
+    case ProxyStatus.FLAGGED:
+      return 'bg-amber-500'
+    default:
+      return 'bg-muted-foreground'
+  }
+}
+
 export default function MbsSessions() {
   const tenantId = useAuthStore((s) => s.tenant?.id) ?? ''
   const queryClient = useQueryClient()
@@ -107,6 +124,11 @@ export default function MbsSessions() {
   const [confirmRemove, setConfirmRemove] = useState<{ open: boolean; uid: string }>({
     open: false,
     uid: '',
+  })
+  const [changeProxy, setChangeProxy] = useState<{ open: boolean; uid: string; proxyId?: string }>({
+    open: false,
+    uid: '',
+    proxyId: undefined,
   })
   const [expandedUid, setExpandedUid] = useState<string>('')
 
@@ -274,19 +296,20 @@ export default function MbsSessions() {
               <TableHead>Pod</TableHead>
               <TableHead>Last seen</TableHead>
               <TableHead>Cookie</TableHead>
+              <TableHead>Proxy</TableHead>
               <TableHead className="w-10 text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {sessionsQuery.isLoading ? (
               <TableRow>
-                <TableCell colSpan={7} className="py-8 text-center text-sm text-muted-foreground">
+                <TableCell colSpan={8} className="py-8 text-center text-sm text-muted-foreground">
                   <Loader2 className="mx-auto h-5 w-5 animate-spin" />
                 </TableCell>
               </TableRow>
             ) : visibleSessions.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className="py-12 text-center text-sm text-muted-foreground">
+                <TableCell colSpan={8} className="py-12 text-center text-sm text-muted-foreground">
                   <Building2 className="mx-auto mb-2 h-8 w-8 opacity-40" />
                   No MBS sessions yet. Click <span className="font-medium">Login new account</span> to begin.
                 </TableCell>
@@ -342,6 +365,22 @@ export default function MbsSessions() {
                       <TableCell className="text-xs">
                         {cookieFreshness(s.cookieExpiresAt)}
                       </TableCell>
+                      <TableCell className="text-xs">
+                        {s.proxyId ? (
+                          <span className="flex items-center gap-1.5">
+                            <span
+                              className={`inline-block h-2 w-2 shrink-0 rounded-full ${proxyStatusDot(
+                                s.proxyStatus,
+                              )}`}
+                            />
+                            <span className="font-mono text-[11px]" title={s.proxyId}>
+                              {s.proxyLabel || s.proxyId}
+                            </span>
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">direct</span>
+                        )}
+                      </TableCell>
                       <TableCell className="text-right">
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
@@ -354,6 +393,14 @@ export default function MbsSessions() {
                               onClick={() => setExpandedUid(isExpanded ? '' : s.uid)}
                             >
                               {isExpanded ? 'Hide assets' : 'Show assets'}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={() =>
+                                setChangeProxy({ open: true, uid: s.uid, proxyId: s.proxyId })
+                              }
+                            >
+                              <Network className="mr-2 h-4 w-4" />
+                              Change proxy
                             </DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
@@ -377,7 +424,7 @@ export default function MbsSessions() {
                     </TableRow>
                     {isExpanded && (
                       <TableRow key={`${s.uid}-assets`}>
-                        <TableCell colSpan={7} className="bg-muted/40 p-4">
+                        <TableCell colSpan={8} className="bg-muted/40 p-4">
                           {s.state === MbsSessionState.BURNED && s.burnedReason && (
                             <div className="mb-3 rounded-md bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-950/30 dark:text-red-300">
                               <span className="font-medium">Burned:</span>{' '}
@@ -508,6 +555,16 @@ export default function MbsSessions() {
         open={bridgeOpen}
         onOpenChange={setBridgeOpen}
         onSuccess={handleBridgeSuccess}
+      />
+
+      {/* Change-proxy dialog */}
+      <ChangeProxyDialog
+        open={changeProxy.open}
+        uid={changeProxy.uid}
+        currentProxyId={changeProxy.proxyId}
+        onOpenChange={(open) =>
+          setChangeProxy((prev) => ({ ...prev, open }))
+        }
       />
 
       {/* Burn confirm */}

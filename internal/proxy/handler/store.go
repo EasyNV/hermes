@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +16,19 @@ import (
 var (
 	ErrNotFound       = errors.New("not found")
 	ErrHasAssignments = errors.New("proxy has assigned numbers")
+	ErrInvalidTarget  = errors.New("invalid proxy assignment target")
+)
+
+// ProxyTargetKind discriminates which channel a proxy assignment targets. The
+// proxy pool is shared; this routes the assignment link to the right table
+// (wa_numbers vs mbs_sessions).
+type ProxyTargetKind int
+
+const (
+	// TargetWA assigns to wa_numbers.id (UUID).
+	TargetWA ProxyTargetKind = iota
+	// TargetMBS assigns to mbs_sessions.uid (BIGINT, passed as decimal string).
+	TargetMBS
 )
 
 // ProxyRow is a database row from the proxies table.
@@ -53,7 +67,9 @@ type Store interface {
 	DeleteProxy(ctx context.Context, id string, force bool) (int32, error)
 	GetAssignedNumbers(ctx context.Context, proxyID string) ([]*WaNumberRow, error)
 	AssignProxy(ctx context.Context, waNumberID, proxyID string) (*ProxyRow, error)
+	AssignProxyTarget(ctx context.Context, kind ProxyTargetKind, targetID, proxyID string) (*ProxyRow, error)
 	UnassignProxy(ctx context.Context, waNumberID string) error
+	UnassignProxyTarget(ctx context.Context, kind ProxyTargetKind, targetID string) error
 	GetBestProxy(ctx context.Context, tenantID, proxyType string) (*ProxyRow, bool, error)
 	FlagProxy(ctx context.Context, id string) (*ProxyRow, error)
 	IncrementBanCount(ctx context.Context, proxyID string) (int32, error)
@@ -230,11 +246,18 @@ func (s *PgStore) DeleteProxy(ctx context.Context, id string, force bool) (int32
 		if !force {
 			return 0, ErrHasAssignments
 		}
-		tag, err := tx.Exec(ctx, "UPDATE wa_numbers SET proxy_id = NULL WHERE proxy_id = $1", id)
+		// The proxy pool is shared across channels: a proxy may be referenced by
+		// wa_numbers AND mbs_sessions. Force-delete must clear BOTH, or the other
+		// table is left with a dangling proxy_id pointing at a deleted row.
+		waTag, err := tx.Exec(ctx, "UPDATE wa_numbers SET proxy_id = NULL WHERE proxy_id = $1", id)
 		if err != nil {
-			return 0, fmt.Errorf("unassigning numbers: %w", err)
+			return 0, fmt.Errorf("unassigning wa numbers: %w", err)
 		}
-		unassigned = int32(tag.RowsAffected())
+		mbsTag, err := tx.Exec(ctx, "UPDATE mbs_sessions SET proxy_id = NULL, proxy_assigned_at = NULL WHERE proxy_id = $1", id)
+		if err != nil {
+			return 0, fmt.Errorf("unassigning mbs sessions: %w", err)
+		}
+		unassigned = int32(waTag.RowsAffected() + mbsTag.RowsAffected())
 	}
 
 	if _, err := tx.Exec(ctx, "DELETE FROM proxies WHERE id=$1", id); err != nil {
@@ -267,6 +290,21 @@ func (s *PgStore) GetAssignedNumbers(ctx context.Context, proxyID string) ([]*Wa
 }
 
 func (s *PgStore) AssignProxy(ctx context.Context, waNumberID, proxyID string) (*ProxyRow, error) {
+	// Legacy WA path preserved: delegate to the generalized implementation.
+	return s.AssignProxyTarget(ctx, TargetWA, waNumberID, proxyID)
+}
+
+// AssignProxyTarget assigns a proxy to either a WA number (wa_numbers.id, UUID)
+// or an MBS session (mbs_sessions.uid, BIGINT), routed by kind. The proxy load
+// counter (proxies.assigned_count) is shared across both channels. For MBS
+// targets it also stamps proxy_assigned_at. The decrement-old / increment-new
+// accounting is identical to the original WA-only path.
+func (s *PgStore) AssignProxyTarget(ctx context.Context, kind ProxyTargetKind, targetID, proxyID string) (*ProxyRow, error) {
+	tbl, idCol, hasAssignedAt, idVal, err := resolveTarget(kind, targetID)
+	if err != nil {
+		return nil, err
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("beginning transaction: %w", err)
@@ -282,14 +320,15 @@ func (s *PgStore) AssignProxy(ctx context.Context, waNumberID, proxyID string) (
 		return nil, ErrNotFound
 	}
 
-	// Get WA number's current proxy assignment.
+	// Get the target's current proxy assignment (row-locked).
 	var oldProxyID *string
-	err = tx.QueryRow(ctx, "SELECT proxy_id FROM wa_numbers WHERE id=$1 FOR UPDATE", waNumberID).Scan(&oldProxyID)
+	err = tx.QueryRow(ctx,
+		fmt.Sprintf("SELECT proxy_id FROM %s WHERE %s=$1 FOR UPDATE", tbl, idCol), idVal).Scan(&oldProxyID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("getting wa_number: %w", err)
+		return nil, fmt.Errorf("getting target %s: %w", tbl, err)
 	}
 
 	// Decrement old proxy count if reassigning.
@@ -299,8 +338,14 @@ func (s *PgStore) AssignProxy(ctx context.Context, waNumberID, proxyID string) (
 		}
 	}
 
-	// Set new proxy on wa_number.
-	if _, err := tx.Exec(ctx, "UPDATE wa_numbers SET proxy_id=$1 WHERE id=$2", proxyID, waNumberID); err != nil {
+	// Set new proxy on the target (+ stamp assigned_at for MBS).
+	var setSQL string
+	if hasAssignedAt {
+		setSQL = fmt.Sprintf("UPDATE %s SET proxy_id=$1, proxy_assigned_at=now() WHERE %s=$2", tbl, idCol)
+	} else {
+		setSQL = fmt.Sprintf("UPDATE %s SET proxy_id=$1 WHERE %s=$2", tbl, idCol)
+	}
+	if _, err := tx.Exec(ctx, setSQL, proxyID, idVal); err != nil {
 		return nil, fmt.Errorf("assigning proxy: %w", err)
 	}
 
@@ -327,6 +372,19 @@ func (s *PgStore) AssignProxy(ctx context.Context, waNumberID, proxyID string) (
 }
 
 func (s *PgStore) UnassignProxy(ctx context.Context, waNumberID string) error {
+	// Legacy WA path preserved: delegate to the generalized implementation.
+	return s.UnassignProxyTarget(ctx, TargetWA, waNumberID)
+}
+
+// UnassignProxyTarget clears a proxy from a WA number or MBS session and
+// decrements the shared load counter. Idempotency-safe: returns ErrNotFound
+// when the target doesn't exist or has no proxy.
+func (s *PgStore) UnassignProxyTarget(ctx context.Context, kind ProxyTargetKind, targetID string) error {
+	tbl, idCol, hasAssignedAt, idVal, err := resolveTarget(kind, targetID)
+	if err != nil {
+		return err
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
@@ -334,18 +392,25 @@ func (s *PgStore) UnassignProxy(ctx context.Context, waNumberID string) error {
 	defer tx.Rollback(ctx)
 
 	var proxyID *string
-	err = tx.QueryRow(ctx, "SELECT proxy_id FROM wa_numbers WHERE id=$1 FOR UPDATE", waNumberID).Scan(&proxyID)
+	err = tx.QueryRow(ctx,
+		fmt.Sprintf("SELECT proxy_id FROM %s WHERE %s=$1 FOR UPDATE", tbl, idCol), idVal).Scan(&proxyID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
-		return fmt.Errorf("getting wa_number: %w", err)
+		return fmt.Errorf("getting target %s: %w", tbl, err)
 	}
 	if proxyID == nil {
 		return ErrNotFound
 	}
 
-	if _, err := tx.Exec(ctx, "UPDATE wa_numbers SET proxy_id = NULL WHERE id=$1", waNumberID); err != nil {
+	var clearSQL string
+	if hasAssignedAt {
+		clearSQL = fmt.Sprintf("UPDATE %s SET proxy_id = NULL, proxy_assigned_at = NULL WHERE %s=$1", tbl, idCol)
+	} else {
+		clearSQL = fmt.Sprintf("UPDATE %s SET proxy_id = NULL WHERE %s=$1", tbl, idCol)
+	}
+	if _, err := tx.Exec(ctx, clearSQL, idVal); err != nil {
 		return fmt.Errorf("clearing proxy: %w", err)
 	}
 	if _, err := tx.Exec(ctx, "UPDATE proxies SET assigned_count = GREATEST(assigned_count - 1, 0) WHERE id=$1", *proxyID); err != nil {
@@ -353,6 +418,28 @@ func (s *PgStore) UnassignProxy(ctx context.Context, waNumberID string) error {
 	}
 
 	return tx.Commit(ctx)
+}
+
+// resolveTarget maps a ProxyTargetKind + string id to the table, id column,
+// whether the table has a proxy_assigned_at column, and the bound id value
+// (string UUID for WA, int64 for MBS uid). Centralizes the WA-vs-MBS routing
+// so the assign/unassign paths share one source of truth.
+func resolveTarget(kind ProxyTargetKind, targetID string) (table, idCol string, hasAssignedAt bool, idVal any, err error) {
+	switch kind {
+	case TargetWA:
+		if targetID == "" {
+			return "", "", false, nil, fmt.Errorf("%w: empty wa_number_id", ErrInvalidTarget)
+		}
+		return "wa_numbers", "id", false, targetID, nil
+	case TargetMBS:
+		uid, perr := strconv.ParseInt(targetID, 10, 64)
+		if perr != nil {
+			return "", "", false, nil, fmt.Errorf("%w: mbs uid %q not an int64: %v", ErrInvalidTarget, targetID, perr)
+		}
+		return "mbs_sessions", "uid", true, uid, nil
+	default:
+		return "", "", false, nil, fmt.Errorf("%w: unknown target kind %d", ErrInvalidTarget, kind)
+	}
 }
 
 func (s *PgStore) GetBestProxy(ctx context.Context, tenantID, proxyType string) (*ProxyRow, bool, error) {

@@ -93,7 +93,7 @@ func newResolveHandler(t *testing.T, resolver *fakePhoneResolver) (*Handler, *mo
 	pub := &recordingPublisher{}
 	dek := newTestDEK(t)
 
-	factory := PhoneResolverFactory(func(*auth.Creds) (PhoneResolver, error) {
+	factory := PhoneResolverFactory(func(*auth.Creds, string) (PhoneResolver, error) {
 		return resolver, nil
 	})
 

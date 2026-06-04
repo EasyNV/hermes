@@ -86,6 +86,7 @@ type startFramePayload struct {
 	TotpSecret        string `json:"totpSecret,omitempty"`
 	ForceNewDeviceId  bool   `json:"forceNewDeviceId,omitempty"`
 	PersistTotpSecret bool   `json:"persistTotpSecret,omitempty"`
+	ProxyID           string `json:"proxyId,omitempty"`
 }
 
 type startFrame struct {
@@ -200,6 +201,7 @@ func (a *Adapter) bridgeLoginWS(w http.ResponseWriter, r *http.Request) {
 				TotpSecret:        start.Payload.TotpSecret,
 				ForceNewDeviceId:  start.Payload.ForceNewDeviceId,
 				PersistTotpSecret: start.Payload.PersistTotpSecret,
+				ProxyId:           start.Payload.ProxyID,
 			},
 		},
 	}); err != nil {

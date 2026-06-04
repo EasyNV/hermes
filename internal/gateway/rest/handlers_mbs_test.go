@@ -59,6 +59,7 @@ type fakeMbsRouter struct {
 	lastAssetsReq  *hermesv1.ListSessionAssetsRequest
 	lastBurnReq    *hermesv1.BurnMbsSessionRequest
 	lastRemoveReq  *hermesv1.RemoveMbsSessionRequest
+	lastSetProxyReq *hermesv1.SetMbsSessionProxyRequest
 	lastResolveReq *hermesv1.ResolvePhoneRequest
 	lastSendReq    *hermesv1.MbsSendMessageRequest
 
@@ -122,6 +123,16 @@ func (f *fakeMbsRouter) RemoveMbsSession(ctx context.Context, req *hermesv1.Remo
 		return nil, f.err
 	}
 	return &hermesv1.RemoveMbsSessionResponse{Uid: req.GetUid()}, nil
+}
+
+func (f *fakeMbsRouter) SetMbsSessionProxy(ctx context.Context, req *hermesv1.SetMbsSessionProxyRequest) (*hermesv1.SetMbsSessionProxyResponse, error) {
+	f.lastSetProxyReq = req
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &hermesv1.SetMbsSessionProxyResponse{
+		Session: &hermesv1.MbsSessionInfo{Uid: req.GetUid(), ProxyId: req.GetProxyId()},
+	}, nil
 }
 
 func (f *fakeMbsRouter) ResolveMbsPhone(ctx context.Context, req *hermesv1.ResolvePhoneRequest) (*hermesv1.ResolvePhoneResponse, error) {

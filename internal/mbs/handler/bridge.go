@@ -55,6 +55,11 @@ type DriverOptions struct {
 	Logger          zerolog.Logger
 	Timeout         time.Duration // default 180s
 	Await2FATimeout time.Duration // default 120s
+
+	// ProxyURL, when non-empty, routes the login HTTP (bloks/CAA) through the
+	// session's assigned proxy via messagix.SetProxy — same egress IP as the
+	// MQTT + GraphQL legs (anti-ban). Empty → direct.
+	ProxyURL string
 }
 
 // DriverStartRequest is the first thing the handler sends to a driver

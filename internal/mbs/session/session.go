@@ -158,14 +158,30 @@ type clientI interface {
 	RawClient() *client.Client
 }
 
-// clientFactory builds a clientI from creds. Production path returns
-// a real *client.Client; tests return a fakeClient.
-type clientFactory func(creds *auth.Creds) clientI
+// clientFactory builds a clientI from creds and an optional proxy URL.
+// Production path returns a real *client.Client (with its Dialer set to
+// route through the proxy when proxyURL is non-empty); tests return a
+// fakeClient. An empty proxyURL means direct connection (soft fallback).
+type clientFactory func(creds *auth.Creds, proxyURL string) clientI
 
 // defaultClientFactory wraps client.New and adapts it to clientI by
-// exposing the Inbox channel via InboxChan().
-func defaultClientFactory(creds *auth.Creds) clientI {
+// exposing the Inbox channel via InboxChan(). When proxyURL is non-empty
+// it installs a ProxyDialer so every MQTT leg (warmup, lightspeed, send,
+// receive) rides the one proxied socket; empty → DirectDialer default.
+func defaultClientFactory(creds *auth.Creds, proxyURL string) clientI {
 	c := client.New(creds)
+	if proxyURL != "" {
+		// NewProxyDialer with empty timeout uses the client's dialTimeout
+		// default. A parse error here should not silently fall to direct —
+		// but the factory has no error channel; ProxyDialer returns a
+		// DirectDialer for empty input only, and the Manager validates the
+		// URL is well-formed before calling (resolveProxyURL). Any residual
+		// error leaves Dialer nil → DirectDialer, which the soft policy (D3)
+		// permits and the Manager logs.
+		if d, err := client.NewProxyDialer(proxyURL, 0); err == nil {
+			c.Dialer = d
+		}
+	}
 	return &realClient{Client: c}
 }
 

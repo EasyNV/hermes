@@ -300,7 +300,7 @@ func newIntegrationFixture(t *testing.T, client *integrationFakeClient) integrat
 	// scripted fake so we never touch real mautrix HTTP.
 	factory := bridge.NewDriverFactory(bridge.Deps{
 		Logger: zerolog.Nop(),
-		ClientFactory: func(_ zerolog.Logger, _ bool) (bridge.LoginClient, error) {
+		ClientFactory: func(_ zerolog.Logger, _ bool, _ string) (bridge.LoginClient, error) {
 			return client, nil
 		},
 	})

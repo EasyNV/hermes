@@ -17,8 +17,8 @@ import (
 // can hand it out without re-running productionClientFactory (which
 // would actually try to wire mautrix-meta HTTP). Tests injecting this
 // stay 100% offline.
-func fakeFactoryClient(client *fakeLoginClient) func(zerolog.Logger, bool) (loginClient, error) {
-	return func(_ zerolog.Logger, _ bool) (loginClient, error) {
+func fakeFactoryClient(client *fakeLoginClient) func(zerolog.Logger, bool, string) (loginClient, error) {
+	return func(_ zerolog.Logger, _ bool, _ string) (loginClient, error) {
 		return client, nil
 	}
 }
@@ -149,7 +149,7 @@ func TestMautrixDriver_SubmitAfterCloseReturnsError(t *testing.T) {
 
 func TestMautrixDriver_ClientFactoryError_PropagatesViaRun(t *testing.T) {
 	factory := NewDriverFactory(Deps{
-		ClientFactory: func(_ zerolog.Logger, _ bool) (loginClient, error) {
+		ClientFactory: func(_ zerolog.Logger, _ bool, _ string) (loginClient, error) {
 			return nil, errors.New("bad client factory")
 		},
 	})
@@ -176,7 +176,7 @@ func TestMautrixDriver_RunOnce_SecondCallReturnsCachedError(t *testing.T) {
 	// Inject a factory that always errors, run once → error cached;
 	// run again → should return the same cached error (sync.Once semantics).
 	factory := NewDriverFactory(Deps{
-		ClientFactory: func(_ zerolog.Logger, _ bool) (loginClient, error) {
+		ClientFactory: func(_ zerolog.Logger, _ bool, _ string) (loginClient, error) {
 			return nil, errors.New("boom")
 		},
 	})
@@ -199,7 +199,7 @@ func TestMautrixDriver_CloseCancelsRunningLoop(t *testing.T) {
 	// purpose of the test (we'd be measuring the sleep, not the cancel).
 	blocker := &blockingLoginClient{}
 	factory := NewDriverFactory(Deps{
-		ClientFactory: func(_ zerolog.Logger, _ bool) (loginClient, error) {
+		ClientFactory: func(_ zerolog.Logger, _ bool, _ string) (loginClient, error) {
 			return blocker, nil
 		},
 	})

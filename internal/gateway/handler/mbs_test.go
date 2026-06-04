@@ -121,6 +121,16 @@ func (s *stubMbsClient) RemoveSession(ctx context.Context, in *hermesv1.RemoveMb
 	return &hermesv1.RemoveMbsSessionResponse{Uid: in.GetUid()}, nil
 }
 
+func (s *stubMbsClient) SetSessionProxy(ctx context.Context, in *hermesv1.SetMbsSessionProxyRequest, opts ...grpc.CallOption) (*hermesv1.SetMbsSessionProxyResponse, error) {
+	s.captureMD(ctx)
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &hermesv1.SetMbsSessionProxyResponse{
+		Session: &hermesv1.MbsSessionInfo{Uid: in.GetUid(), ProxyId: in.GetProxyId()},
+	}, nil
+}
+
 func (s *stubMbsClient) ResolvePhone(ctx context.Context, in *hermesv1.ResolvePhoneRequest, opts ...grpc.CallOption) (*hermesv1.ResolvePhoneResponse, error) {
 	s.captureMD(ctx)
 	s.lastResolveReq = in

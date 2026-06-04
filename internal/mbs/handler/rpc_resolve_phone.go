@@ -90,7 +90,7 @@ func (h *Handler) ResolvePhone(ctx context.Context, req *hermesv1.ResolvePhoneRe
 		return nil, mapSessionErr(err) // covers crypto.ErrDecryptFailed → Unauthenticated
 	}
 
-	resolver, err := h.resolverFactory(creds)
+	resolver, err := h.resolverFactory(creds, h.proxyURLForSession(ctx, sessRow))
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "resolver init: %v", err)
 	}

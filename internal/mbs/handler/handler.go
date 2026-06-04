@@ -45,6 +45,15 @@ type Handler struct {
 	publisher       EventPublisher
 	driverFactory   DriverFactory
 	resolverFactory PhoneResolverFactory
+	proxyResolver   session.ProxyResolver // optional; nil → graphql legs connect direct
+	// proxyClient is the raw proxy gRPC client used by the login leg to
+	// pull a proxy from the pool BEFORE the session row exists (the
+	// uid-keyed proxyResolver can't help there). nil → login connects
+	// direct. proxyAutoAssign gates the login-start pull; proxyRequired
+	// hard-fails login when no proxy can be resolved (global PROXY_REQUIRED).
+	proxyClient     session.ProxyClient
+	proxyAutoAssign bool
+	proxyRequired   bool
 	dek             crypto.DataEncryptionKey
 	dedupe          *sendDedupeCache
 	podID           string
@@ -78,6 +87,14 @@ type Options struct {
 
 	// Optional — defaults applied if zero-valued
 	ResolverFactory PhoneResolverFactory // default: graphql.New adapter
+	ProxyResolver   session.ProxyResolver // optional: resolve session proxy URL for graphql legs
+	// ProxyClient + ProxyAutoAssign + ProxyRequired wire the login leg's
+	// proxy pull (login happens before the session row exists, so the
+	// uid-keyed ProxyResolver can't be used there). nil ProxyClient →
+	// login connects direct.
+	ProxyClient     session.ProxyClient
+	ProxyAutoAssign bool
+	ProxyRequired   bool
 	Logger          zerolog.Logger
 	Metrics         *HandlerMetrics
 	MaxConcurrentBridgeLogins int           // default 4
@@ -137,6 +154,10 @@ func NewHandler(opts Options) (*Handler, error) {
 		publisher:            opts.Publisher,
 		driverFactory:        opts.DriverFactory,
 		resolverFactory:      resolverFactory,
+		proxyResolver:        opts.ProxyResolver,
+		proxyClient:          opts.ProxyClient,
+		proxyAutoAssign:      opts.ProxyAutoAssign,
+		proxyRequired:        opts.ProxyRequired,
 		dek:                  opts.DEK,
 		podID:                opts.PodID,
 		log:                  opts.Logger,

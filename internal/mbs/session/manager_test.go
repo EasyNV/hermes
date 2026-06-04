@@ -31,6 +31,7 @@ type fakeClient struct {
 	dead         atomic.Bool // when true, Closed() returns true (simulates dead socket)
 	connectErr   error // injects warmup + lightspeed failure
 	warmupBlocks chan struct{}
+	proxyURL     string // captured from the factory: the resolved proxy URL (anti-ban)
 }
 
 func newFakeClient() *fakeClient {
@@ -88,10 +89,11 @@ func newFakeFactory() *fakeFactory {
 }
 
 func (ff *fakeFactory) factory() clientFactory {
-	return func(creds *auth.Creds) clientI {
+	return func(creds *auth.Creds, proxyURL string) clientI {
 		ff.mu.Lock()
 		defer ff.mu.Unlock()
 		fc := newFakeClient()
+		fc.proxyURL = proxyURL
 		ff.clients[creds.UserID] = fc
 		return fc
 	}
@@ -532,5 +534,96 @@ func TestManager_Subscribe_ChannelClosesOnDisconnect(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for chan close")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Proxy wiring (anti-ban)
+// ─────────────────────────────────────────────────────────────────────
+
+// setupManagerWithProxy mirrors setupManager but injects a ProxyResolver and
+// the ProxyRequired flag, returning the fake factory so tests can inspect the
+// proxy URL handed to the client.
+func setupManagerWithProxy(t *testing.T, uid int64, resolver ProxyResolver, required bool) (*manager, *fakeFactory) {
+	t.Helper()
+	dek := genDEK(t)
+	st := mock.NewStore()
+	ff := newFakeFactory()
+	m := NewManager(Opts{
+		Store:         st,
+		DEK:           dek,
+		PodID:         "hermes-mbs-test",
+		Logger:        zerolog.Nop(),
+		ClientFactory: ff.factory(),
+		ProxyResolver: resolver,
+		ProxyRequired: required,
+	}).(*manager)
+	row, _, _, _ := seedRow(t, dek, uid)
+	row.TenantID = "tenant-A"
+	if err := st.CreateSession(context.Background(), row); err != nil {
+		t.Fatalf("seed CreateSession: %v", err)
+	}
+	if err := st.UpsertAssets(context.Background(), uid, []*store.AssetRow{
+		{UID: uid, PageID: "1219576644562769", PageName: "Firwanata",
+			WabaID: "1147297338458228", WecMailboxID: "1153441357849273", IsPrimary: true},
+	}); err != nil {
+		t.Fatalf("seed UpsertAssets: %v", err)
+	}
+	return m, ff
+}
+
+// The resolved proxy URL must be threaded to the client factory so the MQTT
+// legs ride the proxied socket.
+func TestManager_Connect_ProxyURLReachesFactory(t *testing.T) {
+	const uid = int64(61590134170831)
+	resolver := func(_ context.Context, _ int64, _, _ string) string {
+		return "socks5://1.2.3.4:1080"
+	}
+	m, ff := setupManagerWithProxy(t, uid, resolver, false)
+
+	if _, err := m.GetOrConnect(context.Background(), uid); err != nil {
+		t.Fatalf("GetOrConnect: %v", err)
+	}
+	fc := ff.get(uid)
+	if fc == nil {
+		t.Fatal("no fake client built")
+	}
+	if fc.proxyURL != "socks5://1.2.3.4:1080" {
+		t.Errorf("proxyURL at factory = %q, want socks5://1.2.3.4:1080", fc.proxyURL)
+	}
+}
+
+// PROXY_REQUIRED set + resolver returns "" → connect must hard-fail and NOT
+// build a (direct) client.
+func TestManager_Connect_ProxyRequiredHardFails(t *testing.T) {
+	const uid = int64(61590134170831)
+	resolver := func(_ context.Context, _ int64, _, _ string) string { return "" }
+	m, ff := setupManagerWithProxy(t, uid, resolver, true)
+
+	_, err := m.GetOrConnect(context.Background(), uid)
+	if !errors.Is(err, ErrProxyRequired) {
+		t.Fatalf("expected ErrProxyRequired, got %v", err)
+	}
+	if ff.count() != 0 {
+		t.Errorf("client was built despite PROXY_REQUIRED hard-fail (count=%d)", ff.count())
+	}
+}
+
+// Soft policy: resolver returns "" and ProxyRequired=false → connect proceeds
+// direct (empty proxy URL at factory).
+func TestManager_Connect_SoftFallbackDirect(t *testing.T) {
+	const uid = int64(61590134170831)
+	resolver := func(_ context.Context, _ int64, _, _ string) string { return "" }
+	m, ff := setupManagerWithProxy(t, uid, resolver, false)
+
+	if _, err := m.GetOrConnect(context.Background(), uid); err != nil {
+		t.Fatalf("GetOrConnect (soft): %v", err)
+	}
+	fc := ff.get(uid)
+	if fc == nil {
+		t.Fatal("no fake client built")
+	}
+	if fc.proxyURL != "" {
+		t.Errorf("soft fallback proxyURL = %q, want empty (direct)", fc.proxyURL)
 	}
 }

@@ -55,6 +55,13 @@ type SessionRow struct {
 	BurnedAt     *time.Time
 	BurnedReason string
 
+	// ─── Proxy (anti-ban, sticky pin) ───────────────────────────────
+	// ProxyID references proxies.id (cross-service bare UUID, no hard FK).
+	// nil = no proxy assigned (direct connection under soft policy).
+	// ProxyAssignedAt is when the current proxy was pinned (rotation audit).
+	ProxyID         *string
+	ProxyAssignedAt *time.Time
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

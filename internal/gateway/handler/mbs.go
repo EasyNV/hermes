@@ -175,6 +175,17 @@ func (h *Handler) RemoveMbsSession(ctx context.Context, req *hermesv1.RemoveMbsS
 	return h.mbsClient.RemoveSession(withTenantMetadata(ctx, tenant), req)
 }
 
+func (h *Handler) SetMbsSessionProxy(ctx context.Context, req *hermesv1.SetMbsSessionProxyRequest) (*hermesv1.SetMbsSessionProxyResponse, error) {
+	if h.mbsClient == nil {
+		return nil, status.Error(codes.Unavailable, "mbs service not available")
+	}
+	tenant, err := h.forceTenantFromJWT(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	return h.mbsClient.SetSessionProxy(withTenantMetadata(ctx, tenant), req)
+}
+
 func (h *Handler) ResolveMbsPhone(ctx context.Context, req *hermesv1.ResolvePhoneRequest) (*hermesv1.ResolvePhoneResponse, error) {
 	if h.mbsClient == nil {
 		return nil, status.Error(codes.Unavailable, "mbs service not available")

@@ -49,6 +49,8 @@ type manager struct {
 	log           zerolog.Logger
 	metrics       *observability.Metrics // optional; nil-safe
 	clientFactory clientFactory
+	proxyResolver ProxyResolver // optional; nil → always direct (no proxy)
+	proxyRequired bool          // PROXY_REQUIRED: hard-fail connect if no proxy resolved
 	onDelta       DeltaHook // optional; called once per delta before broadcast
 
 	sessionsMu sync.RWMutex
@@ -57,6 +59,18 @@ type manager struct {
 	drained  atomic.Bool
 	shutdown atomic.Bool
 }
+
+// ProxyResolver resolves a session's pinned proxy_id into a dialable proxy
+// URL (scheme://user:pass@host:port). Returns "" when the session has no
+// proxy (or the proxy can't be resolved) → direct connection under the soft
+// policy. Implementations call the proxy service's GetProxy and format the
+// URL. The Manager calls this on every connect/reconnect, so the sticky pin
+// (mbs_sessions.proxy_id) is re-read each time and the self-heal redial
+// rebuilds the SAME proxy dialer — never silently dropping to direct.
+//
+// proxyID is the value from mbs_sessions.proxy_id (already "" when NULL).
+// tenantID is passed for auto-assign (Phase: step 8) and audit.
+type ProxyResolver func(ctx context.Context, uid int64, tenantID, proxyID string) (proxyURL string)
 
 // Opts bundles manager constructor args. Logger and Metrics may be
 // zero-valued; the manager logs nothing and skips metric updates in
@@ -68,6 +82,17 @@ type Opts struct {
 	Logger        zerolog.Logger
 	Metrics       *observability.Metrics
 	ClientFactory clientFactory // nil → defaultClientFactory
+
+	// ProxyResolver, if set, maps a session's proxy_id → proxy URL so the
+	// MQTT legs route through the assigned proxy. nil → all sessions connect
+	// direct (no proxy). See ProxyResolver docs for the sticky/self-heal
+	// contract.
+	ProxyResolver ProxyResolver
+
+	// ProxyRequired, when true, hard-fails connect (ErrProxyRequired) if the
+	// resolver returns no proxy URL — the PROXY_REQUIRED policy. Default
+	// false = soft (connect direct + WARN when no proxy).
+	ProxyRequired bool
 
 	// OnDelta, if set, is invoked by every per-uid listener EXACTLY ONCE
 	// per InboundDelta, before broadcast to Subscribers. Use case:
@@ -95,6 +120,8 @@ func NewManager(opts Opts) Manager {
 		log:           opts.Logger,
 		metrics:       opts.Metrics,
 		clientFactory: cf,
+		proxyResolver: opts.ProxyResolver,
+		proxyRequired: opts.ProxyRequired,
 		onDelta:       opts.OnDelta,
 		sessions:      make(map[int64]*muxedSession),
 	}
@@ -293,8 +320,37 @@ func (m *manager) connect(ctx context.Context, ms *muxedSession) (*Connected, er
 		creds.WECAccountRegistered = primary.WECAccountRegistered
 	}
 
-	// 6. Build the client and run CONNECT #1 + Lightspeed.
-	c := m.clientFactory(creds)
+	// 6. Resolve the session's sticky proxy (anti-ban). Re-read on EVERY
+	// connect — including the self-heal redial path (reconnectAsync →
+	// GetOrConnect → connect) — so a dead-socket recovery rebuilds the SAME
+	// proxy dialer and never silently drops to a direct connection. Empty
+	// proxyURL = direct (soft policy D3); the resolver logs/handles the
+	// no-proxy and unresolvable cases.
+	proxyURL := ""
+	if m.proxyResolver != nil {
+		pid := ""
+		if row.ProxyID != nil {
+			pid = *row.ProxyID
+		}
+		proxyURL = m.proxyResolver(ctx, uid, row.TenantID, pid)
+		if proxyURL != "" {
+			m.log.Debug().Int64("uid", uid).Msg("session: connecting through assigned proxy")
+		}
+	}
+	// PROXY_REQUIRED (D3 hard): refuse to connect direct when a proxy is
+	// mandated but none could be resolved — never leak the datacenter IP.
+	if m.proxyRequired && proxyURL == "" {
+		releaseOnError()
+		m.log.Error().Int64("uid", uid).Msg("session: PROXY_REQUIRED set but no proxy resolved; refusing direct connect")
+		return nil, ErrProxyRequired
+	}
+	if m.proxyResolver != nil && proxyURL == "" {
+		m.log.Warn().Int64("uid", uid).Msg("session: no proxy resolved, connecting direct (soft policy)")
+	}
+
+	// 7. Build the client (proxy dialer installed when proxyURL != "") and
+	// run CONNECT #1 + Lightspeed.
+	c := m.clientFactory(creds, proxyURL)
 	if err := c.WarmupAnalyticsSession(ctx); err != nil {
 		releaseOnError()
 		_ = c.Close()
@@ -308,10 +364,10 @@ func (m *manager) connect(ctx context.Context, ms *muxedSession) (*Connected, er
 		return nil, fmt.Errorf("session: connect lightspeed: %w", err)
 	}
 
-	// 7. Record successful CONNECT.
+	// 8. Record successful CONNECT.
 	m.recordConnack(uid, "active", int16Ptr(0))
 
-	// 8. Spawn listener goroutine. onDead self-heals the inbound path:
+	// 9. Spawn listener goroutine. onDead self-heals the inbound path:
 	// when the listener's poll detects a dead socket, it triggers an
 	// async reconnect (drop dead client + re-dial + fresh listener) so a
 	// pure-inbound session recovers without waiting for an outbound send.

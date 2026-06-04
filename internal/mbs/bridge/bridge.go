@@ -44,8 +44,9 @@ type Deps struct {
 
 	// ClientFactory builds a fresh loginClient per attempt. Zero →
 	// production wrapper around messagix.NewClient. Tests inject a
-	// fake to bypass HTTP entirely.
-	ClientFactory func(log zerolog.Logger, disableTLS bool) (loginClient, error)
+	// fake to bypass HTTP entirely. proxyURL routes the login HTTP
+	// through the session's assigned proxy ("" = direct).
+	ClientFactory func(log zerolog.Logger, disableTLS bool, proxyURL string) (loginClient, error)
 }
 
 // NewDriverFactory returns a handler.DriverFactory that yields fresh
@@ -85,6 +86,7 @@ func NewDriverFactory(deps Deps) handler.DriverFactory {
 			timeout:         timeout,
 			await2FATimeout: await,
 			disableTLS:      resolved.DisableTLSVerify,
+			proxyURL:        opts.ProxyURL,
 			assetDiscoverer: resolved.AssetDiscoverer,
 			clientFactory:   resolved.ClientFactory,
 			inputs:          make(chan handler.DriverInput, inputChannelBuffer),
@@ -108,8 +110,12 @@ type MautrixDriver struct {
 	timeout         time.Duration
 	await2FATimeout time.Duration
 	disableTLS      bool
+	// proxyURL routes the login HTTP through the session's assigned
+	// proxy. Empty string → direct dial. Resolved by the handler at
+	// BridgeLogin start and passed via DriverOptions.
+	proxyURL        string
 	assetDiscoverer AssetDiscoverer
-	clientFactory   func(log zerolog.Logger, disableTLS bool) (loginClient, error)
+	clientFactory   func(log zerolog.Logger, disableTLS bool, proxyURL string) (loginClient, error)
 
 	// inputs is buffered so handler.BridgeReaderLoop can Submit
 	// without blocking even if the login loop hasn't reached the
@@ -147,7 +153,7 @@ func (d *MautrixDriver) Run(ctx context.Context, req handler.DriverStartRequest)
 			return
 		}
 
-		client, err := d.clientFactory(d.log, d.disableTLS)
+		client, err := d.clientFactory(d.log, d.disableTLS, d.proxyURL)
 		if err != nil {
 			d.runErr = err
 			close(updates)
@@ -231,7 +237,7 @@ func (d *MautrixDriver) Close() error {
 // wire-capture sessions (mitmproxy / Burp) during reverse-engineering.
 //
 // See .hermes/plans/2026-05-29_stage-e1-chunk5-step8-hostile-audit.md F1.
-func productionClientFactory(log zerolog.Logger, disableTLS bool) (loginClient, error) {
+func productionClientFactory(log zerolog.Logger, disableTLS bool, proxyURL string) (loginClient, error) {
 	if disableTLS {
 		log.Warn().
 			Bool("process_wide", true).
@@ -249,6 +255,17 @@ func productionClientFactory(log zerolog.Logger, disableTLS bool) (loginClient, 
 	cli := messagix.NewClient(c, log, &messagix.Config{
 		ClientSettings: exhttp.ClientSettings{},
 	})
+
+	// Route login HTTP through the session's assigned proxy when one is
+	// pinned. messagix.SetProxy handles http/https (http.ProxyURL) and
+	// socks5 (proxy.FromURL) schemes; empty string → direct dial.
+	if proxyURL != "" {
+		if err := cli.SetProxy(proxyURL); err != nil {
+			return nil, err
+		}
+		log.Debug().Bool("proxied", true).Msg("bridge: login HTTP routed through assigned proxy")
+	}
+
 	return &messagixLoginClient{c: cli}, nil
 }
 
@@ -259,7 +276,7 @@ type resolvedDeps struct {
 	DisableTLSVerify bool
 	Timeout          time.Duration
 	Await2FATimeout  time.Duration
-	ClientFactory    func(log zerolog.Logger, disableTLS bool) (loginClient, error)
+	ClientFactory    func(log zerolog.Logger, disableTLS bool, proxyURL string) (loginClient, error)
 }
 
 func resolveDeps(d Deps) resolvedDeps {

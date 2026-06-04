@@ -298,14 +298,21 @@ func (h *Handler) DeleteProxy(ctx context.Context, req *hermesv1.ProxyDeleteRequ
 // ---------------------------------------------------------------------------
 
 func (h *Handler) AssignProxy(ctx context.Context, req *hermesv1.ProxyAssignRequest) (*hermesv1.ProxyAssignResponse, error) {
-	if req.WaNumberId == "" || req.ProxyId == "" {
-		return nil, status.Error(codes.InvalidArgument, "wa_number_id and proxy_id are required")
+	if req.ProxyId == "" {
+		return nil, status.Error(codes.InvalidArgument, "proxy_id is required")
+	}
+	kind, targetID, err := resolveAssignTarget(req.TargetType, req.TargetId, req.WaNumberId)
+	if err != nil {
+		return nil, err
 	}
 
-	row, err := h.store.AssignProxy(ctx, req.WaNumberId, req.ProxyId)
+	row, err := h.store.AssignProxyTarget(ctx, kind, targetID, req.ProxyId)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return nil, status.Error(codes.NotFound, "proxy or WA number not found")
+			return nil, status.Error(codes.NotFound, "proxy or assignment target not found")
+		}
+		if errors.Is(err, ErrInvalidTarget) {
+			return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 		}
 		return nil, status.Errorf(codes.Internal, "assigning proxy: %v", err)
 	}
@@ -313,18 +320,50 @@ func (h *Handler) AssignProxy(ctx context.Context, req *hermesv1.ProxyAssignRequ
 	return &hermesv1.ProxyAssignResponse{Proxy: rowToProto(row), AssignedCount: row.AssignedCount}, nil
 }
 
+// resolveAssignTarget maps the request's target discriminator to a store
+// ProxyTargetKind + id. Precedence: explicit target_type wins; when UNSPECIFIED,
+// fall back to the legacy wa_number_id field (WA). This keeps existing WA-only
+// callers wire-compatible while enabling MBS targets.
+func resolveAssignTarget(tt hermesv1.ProxyTargetType, targetID, legacyWaNumberID string) (ProxyTargetKind, string, error) {
+	switch tt {
+	case hermesv1.ProxyTargetType_PROXY_TARGET_TYPE_MBS:
+		if targetID == "" {
+			return 0, "", status.Error(codes.InvalidArgument, "target_id is required for MBS target")
+		}
+		return TargetMBS, targetID, nil
+	case hermesv1.ProxyTargetType_PROXY_TARGET_TYPE_WA:
+		id := targetID
+		if id == "" {
+			id = legacyWaNumberID
+		}
+		if id == "" {
+			return 0, "", status.Error(codes.InvalidArgument, "target_id (or wa_number_id) is required for WA target")
+		}
+		return TargetWA, id, nil
+	default: // UNSPECIFIED → legacy WA path
+		if legacyWaNumberID == "" {
+			return 0, "", status.Error(codes.InvalidArgument, "wa_number_id (or target_type+target_id) is required")
+		}
+		return TargetWA, legacyWaNumberID, nil
+	}
+}
+
 // ---------------------------------------------------------------------------
 // RPC 7: UnassignProxy
 // ---------------------------------------------------------------------------
 
 func (h *Handler) UnassignProxy(ctx context.Context, req *hermesv1.ProxyUnassignRequest) (*hermesv1.ProxyUnassignResponse, error) {
-	if req.WaNumberId == "" {
-		return nil, status.Error(codes.InvalidArgument, "wa_number_id is required")
+	kind, targetID, err := resolveAssignTarget(req.TargetType, req.TargetId, req.WaNumberId)
+	if err != nil {
+		return nil, err
 	}
 
-	if err := h.store.UnassignProxy(ctx, req.WaNumberId); err != nil {
+	if err := h.store.UnassignProxyTarget(ctx, kind, targetID); err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return nil, status.Error(codes.NotFound, "WA number not found or not assigned to any proxy")
+			return nil, status.Error(codes.NotFound, "target not found or not assigned to any proxy")
+		}
+		if errors.Is(err, ErrInvalidTarget) {
+			return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 		}
 		return nil, status.Errorf(codes.Internal, "unassigning proxy: %v", err)
 	}

@@ -115,6 +115,8 @@ var rpcRoles = map[string][]string{
 	// D3: destructive — admins only (cs_agent excluded).
 	"/hermes.v1.HermesMbs/BurnSession":   {"superadmin", "tenant_admin", "workspace_admin"},
 	"/hermes.v1.HermesMbs/RemoveSession": {"superadmin", "tenant_admin", "workspace_admin"},
+	// Proxy assignment (anti-ban) — admins only (Q1: cs_agent excluded).
+	"/hermes.v1.HermesMbs/SetSessionProxy": {"superadmin", "tenant_admin", "workspace_admin"},
 
 	// --- REST-only routes (no HermesGateway gRPC equivalent) ---
 	// Synthetic "REST:" keys for routes that exist only in the REST adapter

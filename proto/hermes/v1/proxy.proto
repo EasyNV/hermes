@@ -169,10 +169,17 @@ message ProxyDeleteResponse {
 // ======================================================================
 
 message ProxyAssignRequest {
-  // WA number to assign the proxy to.
+  // DEPRECATED: kept for wire-compat. Equivalent to target_type=PROXY_TARGET_TYPE_WA
+  // with target_id=wa_number_id. When target_type is UNSPECIFIED and this is set,
+  // the handler treats it as a WA assignment (legacy behavior, unchanged).
   string wa_number_id = 1;
   // Proxy to assign.
-  string proxy_id = 2;
+  string proxy_id     = 2;
+  // NEW: assignment target channel. UNSPECIFIED falls back to legacy wa_number_id.
+  ProxyTargetType target_type = 3;
+  // NEW: the target identity — wa_number_id (UUID) when target_type=WA, or the
+  // mbs session uid (decimal string) when target_type=MBS.
+  string target_id            = 4;
 }
 
 message ProxyAssignResponse {
@@ -182,7 +189,12 @@ message ProxyAssignResponse {
 }
 
 message ProxyUnassignRequest {
+  // DEPRECATED: kept for wire-compat (legacy WA unassign by wa_number_id).
   string wa_number_id = 1;
+  // NEW: assignment target channel. UNSPECIFIED falls back to legacy wa_number_id.
+  ProxyTargetType target_type = 2;
+  // NEW: target identity (wa_number_id UUID or mbs uid decimal string).
+  string target_id            = 3;
 }
 
 message ProxyUnassignResponse {}

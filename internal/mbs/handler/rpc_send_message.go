@@ -153,7 +153,7 @@ func (h *Handler) resolveRecipient(
 		if err != nil {
 			return "", mapSessionErr(err)
 		}
-		resolver, err := h.resolverFactory(creds)
+		resolver, err := h.resolverFactory(creds, h.proxyURLForUID(ctx, uid))
 		if err != nil {
 			return "", status.Errorf(codes.Internal, "resolver init: %v", err)
 		}

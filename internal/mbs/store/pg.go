@@ -56,6 +56,7 @@ const sessionCols = `
     bridge_envelope,
     last_refreshed_at, last_validated_at, last_connack_rc, last_connack_at,
     burned_at, burned_reason,
+    proxy_id, proxy_assigned_at,
     created_at, updated_at`
 
 // CreateSession inserts a new mbs_sessions row. The caller has already
@@ -713,6 +714,7 @@ func scanSession(row pgx.Row) (*SessionRow, error) {
 		&r.BridgeEnvelope,
 		&r.LastRefreshedAt, &r.LastValidatedAt, &r.LastConnackRC, &r.LastConnackAt,
 		&r.BurnedAt, &r.BurnedReason,
+		&r.ProxyID, &r.ProxyAssignedAt,
 		&r.CreatedAt, &r.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -739,6 +741,7 @@ func scanSessions(rows pgx.Rows) ([]*SessionRow, error) {
 			&r.BridgeEnvelope,
 			&r.LastRefreshedAt, &r.LastValidatedAt, &r.LastConnackRC, &r.LastConnackAt,
 			&r.BurnedAt, &r.BurnedReason,
+			&r.ProxyID, &r.ProxyAssignedAt,
 			&r.CreatedAt, &r.UpdatedAt,
 		)
 		if err != nil {

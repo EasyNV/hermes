@@ -77,7 +77,7 @@ func newSendFixture(t *testing.T, mgr *fakeManager, resolver *fakePhoneResolver)
 	st := mock.NewStore()
 	pub := &recordingPublisher{}
 	dek := newTestDEK(t)
-	factory := PhoneResolverFactory(func(*auth.Creds) (PhoneResolver, error) {
+	factory := PhoneResolverFactory(func(*auth.Creds, string) (PhoneResolver, error) {
 		return resolver, nil
 	})
 	h, err := NewHandler(Options{

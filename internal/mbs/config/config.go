@@ -20,6 +20,18 @@ type Config struct {
 	MetricsPort int
 	PodID       string
 
+	// ─── Proxy service (anti-ban) ──────────────────────────────────────
+	// ProxyServiceAddr is the hermes-proxy gRPC endpoint used to resolve a
+	// session's assigned proxy at connect time. Empty/unreachable → sessions
+	// connect direct (soft policy) unless ProxyRequired is set.
+	ProxyServiceAddr string
+	// ProxyRequired, when true, hard-fails a connect if no proxy can be
+	// resolved (PROXY_REQUIRED). Default false (soft: connect direct + WARN).
+	ProxyRequired bool
+	// ProxyAutoAssign, when true, pulls a best proxy from the pool and pins
+	// it when a session has none at connect time (MBS_PROXY_AUTO_ASSIGN).
+	ProxyAutoAssign bool
+
 	// ─── Database ──────────────────────────────────────────────────────
 	DatabaseURL   string
 	DBSSLMode     string        // disable | prefer | require | verify-ca | verify-full
@@ -86,6 +98,10 @@ func Load() Config {
 		Port:        pkgconfig.GetEnvInt("PORT", 8082),
 		MetricsPort: pkgconfig.GetEnvInt("METRICS_PORT", 9092),
 		PodID:       pkgconfig.GetEnv("POD_ID", "hermes-mbs"),
+
+		ProxyServiceAddr: pkgconfig.GetEnv("PROXY_SERVICE_ADDR", "localhost:9101"),
+		ProxyRequired:    getEnvBool("PROXY_REQUIRED", false),
+		ProxyAutoAssign:  getEnvBool("MBS_PROXY_AUTO_ASSIGN", false),
 
 		DatabaseURL:   pkgconfig.GetEnv("DATABASE_URL", ""),
 		DBSSLMode:     pkgconfig.GetEnv("DB_SSLMODE", "prefer"),

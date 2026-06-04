@@ -6,6 +6,7 @@ import type {
   MbsListSessionAssetsResponse,
   MbsBurnSessionResponse,
   MbsRemoveSessionResponse,
+  MbsSetSessionProxyResponse,
   MbsResolvePhoneResponse,
   MbsSendMessageResponse,
   PageRequest,
@@ -67,6 +68,22 @@ export function removeMbsSession(uid: string) {
 }
 
 /**
+ * Assign (or change) the sticky proxy this session connects through.
+ * Pass proxyId to pin a specific pool proxy; omit it (or pass empty) to
+ * auto-pick the cleanest/least-loaded proxy from the tenant's shared pool.
+ * The chosen proxy is written to mbs_sessions.proxy_id and reused across
+ * reconnect + self-heal. Admins only (enforced at the gateway). The backend
+ * triggers an immediate reconnect through the new proxy; the returned session
+ * carries the resolved proxyId + proxyLabel + proxyStatus for display.
+ */
+export function setMbsSessionProxy(uid: string, proxyId?: string) {
+  return api.post<MbsSetSessionProxyResponse>(
+    `/mbs-sessions/${uid}/proxy`,
+    proxyId ? { proxyId } : undefined,
+  )
+}
+
+/**
  * Resolve a phone number to its MBS messenger thread for a given uid.
  * Returns exists=false when the phone is not in this uid's contact
  * graph (cold-compose UX: caller should surface "not on Messenger"
@@ -123,6 +140,10 @@ export type MbsBridgeClientFrame =
         forceNewDeviceId?: boolean
         // Persist totpSecret encrypted for future unattended re-bridge.
         persistTotpSecret?: boolean
+        // Optional explicit proxy to route login HTTP through + pin onto the
+        // new session. Empty = auto-pick from pool (or direct). The backend
+        // validates + tenant-scopes the id; an invalid id falls back to auto.
+        proxyId?: string
       }
     }
   | { type: 'input'; payload: { fieldId: string; value: string } }

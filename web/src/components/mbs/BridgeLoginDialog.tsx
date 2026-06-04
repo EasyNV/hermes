@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Loader2, CheckCircle2, AlertCircle, XCircle } from 'lucide-react'
 import {
   Dialog,
@@ -11,11 +12,22 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
+} from '@/components/ui/select'
 import { useAuthStore } from '@/stores/auth'
+import { listProxies } from '@/api/proxies'
+import { ProxyType } from '@/api/types'
 import type {
   MbsBridgeClientFrame,
   MbsBridgeServerFrame,
 } from '@/api/mbs'
+
+const PROXY_AUTO = '__auto__'
 
 // ─────────────────────────────────────────────────────────────────────
 // BridgeLoginDialog (Stage E2 chunk 5)
@@ -66,9 +78,19 @@ interface BridgeLoginDialogProps {
 export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLoginDialogProps) {
   const tenantId = useAuthStore((s) => s.tenant?.id) ?? ''
 
+  // Pool proxies for the optional "connect through" selector. Only fetched
+  // while the dialog is open. Default selection is "Auto (best from pool)".
+  const proxiesQuery = useQuery({
+    queryKey: ['proxies', 'list', tenantId],
+    queryFn: () => listProxies({ tenantId, page: 1, pageSize: 100 }),
+    enabled: open && !!tenantId,
+  })
+  const proxies = proxiesQuery.data?.proxies ?? []
+
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [totpSecret, setTotpSecret] = useState('')
+  const [proxyChoice, setProxyChoice] = useState<string>(PROXY_AUTO)
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' })
   const wsRef = useRef<WebSocket | null>(null)
   // Guards the success side-effect so onSuccess + auto-close fire exactly
@@ -97,6 +119,7 @@ export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLogin
       // the secrets.
       setPassword('')
       setTotpSecret('')
+      setProxyChoice(PROXY_AUTO)
       setPhase({ kind: 'idle' })
     }
   }, [open])
@@ -196,6 +219,9 @@ export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLogin
           // empty string would make hermes-mbs try to derive a code
           // from a zero-length secret.
           ...(totpSecret.trim() ? { totpSecret: totpSecret.trim() } : {}),
+          // Only send an explicit proxy when the operator picked one;
+          // omit for "Auto" so the backend auto-picks from the pool.
+          ...(proxyChoice !== PROXY_AUTO ? { proxyId: proxyChoice } : {}),
         },
       })
     }
@@ -310,6 +336,36 @@ export function BridgeLoginDialog({ open, onOpenChange, onSuccess }: BridgeLogin
               If this account has two-factor authentication, paste the base32 secret here and
               codes will be generated automatically. Leave blank to enter codes manually when
               prompted.
+            </p>
+          </div>
+
+          {/* Optional proxy selector. Default "Auto" lets the backend pick the
+              cleanest/least-loaded proxy from the shared pool (or connect direct
+              if none configured). The pick is sticky for the session lifetime. */}
+          <div className="grid gap-2">
+            <Label htmlFor="bridge-proxy">
+              Proxy <span className="text-muted-foreground">(optional)</span>
+            </Label>
+            <Select
+              value={proxyChoice}
+              onValueChange={setProxyChoice}
+              disabled={isBusy || phase.kind === 'success'}
+            >
+              <SelectTrigger id="bridge-proxy">
+                <SelectValue placeholder="Auto (best from pool)" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={PROXY_AUTO}>Auto (best from pool)</SelectItem>
+                {proxies.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.host}:{p.port} ({p.type === ProxyType.HTTP ? 'http' : 'socks5'})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              The login and all session traffic connect through this proxy. Sticky for the
+              session's lifetime. Leave on Auto to pick the cleanest proxy automatically.
             </p>
           </div>
 

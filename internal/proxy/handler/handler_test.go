@@ -26,7 +26,9 @@ type mockStore struct {
 	deleteProxyFn           func(ctx context.Context, id string, force bool) (int32, error)
 	getAssignedNumbersFn    func(ctx context.Context, proxyID string) ([]*WaNumberRow, error)
 	assignProxyFn           func(ctx context.Context, waNumberID, proxyID string) (*ProxyRow, error)
+	assignProxyTargetFn     func(ctx context.Context, kind ProxyTargetKind, targetID, proxyID string) (*ProxyRow, error)
 	unassignProxyFn         func(ctx context.Context, waNumberID string) error
+	unassignProxyTargetFn   func(ctx context.Context, kind ProxyTargetKind, targetID string) error
 	getBestProxyFn          func(ctx context.Context, tenantID, proxyType string) (*ProxyRow, bool, error)
 	flagProxyFn             func(ctx context.Context, id string) (*ProxyRow, error)
 	incrementBanCountFn     func(ctx context.Context, proxyID string) (int32, error)
@@ -82,11 +84,30 @@ func (m *mockStore) AssignProxy(ctx context.Context, waNumberID, proxyID string)
 	}
 	return nil, fmt.Errorf("AssignProxy not mocked")
 }
+func (m *mockStore) AssignProxyTarget(ctx context.Context, kind ProxyTargetKind, targetID, proxyID string) (*ProxyRow, error) {
+	if m.assignProxyTargetFn != nil {
+		return m.assignProxyTargetFn(ctx, kind, targetID, proxyID)
+	}
+	// Fallback: WA targets delegate to the legacy mock so existing tests pass.
+	if kind == TargetWA && m.assignProxyFn != nil {
+		return m.assignProxyFn(ctx, targetID, proxyID)
+	}
+	return nil, fmt.Errorf("AssignProxyTarget not mocked")
+}
 func (m *mockStore) UnassignProxy(ctx context.Context, waNumberID string) error {
 	if m.unassignProxyFn != nil {
 		return m.unassignProxyFn(ctx, waNumberID)
 	}
 	return fmt.Errorf("UnassignProxy not mocked")
+}
+func (m *mockStore) UnassignProxyTarget(ctx context.Context, kind ProxyTargetKind, targetID string) error {
+	if m.unassignProxyTargetFn != nil {
+		return m.unassignProxyTargetFn(ctx, kind, targetID)
+	}
+	if kind == TargetWA && m.unassignProxyFn != nil {
+		return m.unassignProxyFn(ctx, targetID)
+	}
+	return fmt.Errorf("UnassignProxyTarget not mocked")
 }
 func (m *mockStore) GetBestProxy(ctx context.Context, tenantID, proxyType string) (*ProxyRow, bool, error) {
 	if m.getBestProxyFn != nil {
