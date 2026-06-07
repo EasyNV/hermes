@@ -349,6 +349,7 @@ func TestMbsCampaignSendTaskBytes(t *testing.T) {
 		ResolvedBody:   "Hello!",
 		PageIdOverride: "",
 		IdempotencyKey: "camp-1:c-1",
+		PostSendDelayMs: 7500, // anti-ban inter-send spacing (mirror of WA)
 	}
 
 	data, err := proto.Marshal(task)
@@ -372,6 +373,9 @@ func TestMbsCampaignSendTaskBytes(t *testing.T) {
 	}
 	if roundTrip.IdempotencyKey != "camp-1:c-1" {
 		t.Errorf("IdempotencyKey lost: %q", roundTrip.IdempotencyKey)
+	}
+	if roundTrip.PostSendDelayMs != 7500 {
+		t.Errorf("PostSendDelayMs lost in roundtrip: %d want 7500", roundTrip.PostSendDelayMs)
 	}
 }
 

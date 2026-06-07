@@ -65,10 +65,10 @@ const (
 // We pass task.IdempotencyKey as the dedupe id so a redelivered
 // message short-circuits and returns the prior result without
 // double-sending.
-func startCampaignConsumer(js jetStreamSubscriber, h *handler.Handler, log zerolog.Logger) error {
+func startCampaignConsumer(ctx context.Context, js jetStreamSubscriber, h *handler.Handler, log zerolog.Logger) error {
 	if _, err := js.Subscribe(
 		campaignSendSubject,
-		makeSendHandler("campaign", h, log),
+		makeSendHandler(ctx, "campaign", h, log),
 		natsgo.Durable("mbs-campaign-send"),
 		natsgo.ManualAck(),
 		natsgo.AckWait(consumerAckWait),
@@ -88,10 +88,10 @@ func startCampaignConsumer(js jetStreamSubscriber, h *handler.Handler, log zerol
 // v1 — gateway/inbox emit MbsCampaignSendTask with campaign_id="".
 // When manual sends grow agent-attribution fields, add a typed
 // MbsManualSendTask in the proto schema.
-func startManualConsumer(js jetStreamSubscriber, h *handler.Handler, log zerolog.Logger) error {
+func startManualConsumer(ctx context.Context, js jetStreamSubscriber, h *handler.Handler, log zerolog.Logger) error {
 	if _, err := js.Subscribe(
 		manualSendSubject,
-		makeSendHandler("manual", h, log),
+		makeSendHandler(ctx, "manual", h, log),
 		natsgo.Durable("mbs-manual-send"),
 		natsgo.ManualAck(),
 		natsgo.AckWait(consumerAckWait),
@@ -110,7 +110,7 @@ func startManualConsumer(js jetStreamSubscriber, h *handler.Handler, log zerolog
 // MbsCampaignSendTask through h.SendMessage. The `source` label is
 // "campaign" or "manual" — included in every log line so operators
 // can grep one consumer's behavior in isolation.
-func makeSendHandler(source string, h *handler.Handler, log zerolog.Logger) natsgo.MsgHandler {
+func makeSendHandler(rootCtx context.Context, source string, h *handler.Handler, log zerolog.Logger) natsgo.MsgHandler {
 	return func(msg *natsgo.Msg) {
 		tenant, err := tenantFromSubject(msg.Subject)
 		if err != nil {
@@ -179,6 +179,39 @@ func makeSendHandler(source string, h *handler.Handler, log zerolog.Logger) nats
 			return
 		}
 		_ = msg.Ack()
+
+		// Anti-ban inter-send pacing (ack-first-then-sleep). The send already
+		// succeeded, so acking now is correct — the sleep is pure inter-send
+		// spacing. nats.go dispatches a subscription's callbacks serially, so
+		// sleeping here still delays the NEXT task's send. Ack-first keeps
+		// AckWait(60s) safe (sleep-before-ack with a multi-second delay +
+		// the 30s send timeout could exceed AckWait → mid-sleep redelivery →
+		// double send). On shutdown (SIGTERM cancels rootCtx) we abort the
+		// sleep immediately so the pod drains promptly; the next task is an
+		// independent un-acked NATS message, so nothing is lost.
+		//
+		// Manual sends carry PostSendDelayMs=0 (inbox/gateway don't set it),
+		// so agent replies are never artificially delayed — they should look
+		// immediate/human.
+		pacePostSend(rootCtx, task.PostSendDelayMs)
+	}
+}
+
+// pacePostSend blocks for delayMs milliseconds OR until ctx is cancelled,
+// whichever comes first. delayMs <= 0 returns immediately. Extracted so the
+// ack-first pacing (incl. its SIGTERM abort) is unit-testable without a full
+// handler. Returns true if it slept to completion, false if it short-circuited
+// (zero delay) or was aborted by ctx — callers ignore the result in prod; tests
+// assert it.
+func pacePostSend(ctx context.Context, delayMs int32) bool {
+	if delayMs <= 0 {
+		return false
+	}
+	select {
+	case <-time.After(time.Duration(delayMs) * time.Millisecond):
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

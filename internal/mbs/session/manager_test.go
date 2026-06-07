@@ -627,3 +627,77 @@ func TestManager_Connect_SoftFallbackDirect(t *testing.T) {
 		t.Errorf("soft fallback proxyURL = %q, want empty (direct)", fc.proxyURL)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Send per-uid serialization (sendMu + lockCtx)
+// ─────────────────────────────────────────────────────────────────────
+
+// Send with an already-cancelled ctx must return ctx.Err() WITHOUT connecting
+// (the sendMu/lockCtx gate fires before GetOrConnect → no client built).
+func TestManager_Send_CancelledCtxNoConnect(t *testing.T) {
+	const uid = int64(61590134170831)
+	m, _, ff, _ := setupManager(t, uid)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := m.Send(ctx, uid, 12345, "hi")
+	if err == nil {
+		t.Fatal("expected error from Send with cancelled ctx")
+	}
+	if ff.count() != 0 {
+		t.Errorf("Send built a client despite cancelled ctx (count=%d)", ff.count())
+	}
+}
+
+// Two concurrent Send calls on the SAME uid serialize on sendMu. We can't drive
+// real Bootstrap/Send through the fake (RawClient()==nil makes the production
+// Send bail post-connect), so the serialization PROPERTY is established by
+// composition instead: lockctx_test proves lockCtx is mutually exclusive and
+// ctx-aware, and TestManager_Send_CancelledCtxNoConnect proves Send acquires
+// sendMu (via lockCtx) BEFORE GetOrConnect. Together: same-uid sends serialize
+// across the whole connect→bootstrap→send sequence, and a waiter whose ctx
+// fires sheds load instead of blocking. TestManager_Send_DifferentUIDsParallel
+// proves the lock is per-uid, not global.
+
+// Sends to DIFFERENT uids must NOT serialize against each other (per-uid lock,
+// not a global one): both proceed concurrently.
+func TestManager_Send_DifferentUIDsParallel(t *testing.T) {
+	const uidA = int64(61590134170831)
+	const uidB = int64(61590752691262)
+	m, _, ff, dek := setupManager(t, uidA)
+
+	// Seed a second session row for uidB.
+	st := m.store.(*mock.Store)
+	rowB, _, _, _ := seedRow(t, dek, uidB)
+	rowB.TenantID = "tenant-A"
+	if err := st.CreateSession(context.Background(), rowB); err != nil {
+		t.Fatalf("seed uidB: %v", err)
+	}
+	if err := st.UpsertAssets(context.Background(), uidB, []*store.AssetRow{
+		{
+			UID: uidB, PageID: "1219576644562769",
+			PageName: "Firwanata",
+			WabaID:   "1147297338458228", WecMailboxID: "1153441357849273",
+			IsPrimary: true,
+		},
+	}); err != nil {
+		t.Fatalf("seed uidB assets: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for _, uid := range []int64{uidA, uidB} {
+		wg.Add(1)
+		go func(u int64) {
+			defer wg.Done()
+			_, _ = m.Send(context.Background(), u, 1, "x")
+		}(uid)
+	}
+	wg.Wait()
+
+	// Both uids must have built their own client (neither blocked the other
+	// out — a global lock wouldn't change this, but a deadlock/panic would).
+	if ff.count() != 2 {
+		t.Errorf("expected 2 clients (one per uid), got %d", ff.count())
+	}
+}

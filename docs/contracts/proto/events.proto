@@ -435,6 +435,11 @@ message MbsCampaignSendTask {
   string page_id_override = 8;
   // Idempotency key = campaign_id + contact_id (prevents double sends on retry).
   string idempotency_key = 9;
+  // Delay after send in ms (randomized by campaign service within
+  // delay_min/max). Mirror of CampaignSendTask.post_send_delay_ms for the MBS
+  // channel. The mbs send consumer sleeps this long AFTER ack (ack-first) to
+  // pace the session without risking AckWait redelivery. 0 = no delay.
+  int32 post_send_delay_ms = 10;
 }
 
 // ──────────────────────────────────────────────────────────────────

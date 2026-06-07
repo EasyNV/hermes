@@ -197,6 +197,56 @@ Manual agent reply from inbox.
 
 ---
 
+### 4b. `hermes.mbs.send.campaign.{tenant_id}` / `hermes.mbs.send.manual.{tenant_id}`
+
+MBS (Meta Business Suite) send tasks — the MBS-channel sisters of the WA send
+subjects above. One message to one contact on one MBS session.
+
+| Field | Value |
+|---|---|
+| **Subjects** | `hermes.mbs.send.campaign.{tenant_id}`, `hermes.mbs.send.manual.{tenant_id}` |
+| **Payload** | `MbsCampaignSendTask` (proto/events.proto) — manual sends reuse the same type with `campaign_id=""` in v1 |
+| **Publisher** | `hermes-campaign` (campaign), `hermes-gateway`/`hermes-inbox` (manual) |
+| **Consumer** | `hermes-mbs` |
+
+**Consumer Configuration:**
+
+| Consumer | Durable Name | Filter Subject | Ack Policy | Max Deliver | Ack Wait |
+|---|---|---|---|---|---|
+| hermes-mbs | `mbs-campaign-send` | `hermes.mbs.send.campaign.*` | Explicit | 5 | 60s |
+| hermes-mbs | `mbs-manual-send` | `hermes.mbs.send.manual.*` | Explicit | 5 | 60s |
+
+**Processing semantics:**
+- Tenant is parsed from the trusted subject suffix (not metadata) and injected
+  on the context; the consumer calls `handler.SendMessage` directly (reuses
+  tenant cross-check, dedupe cache, metrics).
+- Idempotency: `idempotency_key` (= `campaign_id:contact_id`) is passed as the
+  send dedupe id, so a redelivered task short-circuits without double-sending.
+- **Anti-ban pacing (ack-first-then-sleep):** on a successful send the consumer
+  ACKs **first**, then sleeps `post_send_delay_ms` (randomized by the campaign
+  service within `delay_min_ms`/`delay_max_ms`) before returning. nats.go
+  dispatches a subscription's callbacks serially, so the post-ack sleep still
+  spaces the *next* send. Ack-first (not sleep-before-ack like WA) keeps the
+  60s AckWait safe — sleep-before-ack with a multi-second delay plus the 30s
+  send timeout could exceed AckWait and trigger mid-sleep redelivery (double
+  send). On SIGTERM the sleep aborts immediately so the pod drains promptly.
+  **Do not "fix" this back to sleep-before-ack** without first raising AckWait.
+  Manual sends carry `post_send_delay_ms=0` (publishers don't set it) so agent
+  replies are never artificially delayed.
+- **Per-session serialization:** `hermes-mbs` serializes the full
+  connect→bootstrap→send sequence per `uid` (an in-process per-uid lock), so the
+  campaign consumer, manual consumer, and redelivery retries cannot interleave
+  on a session's single stateful MQTToT socket. A session is pinned to its
+  claiming pod (`pod_id`), so an in-process lock is sufficient.
+- On failure the handler has already published an `mbs.message.outbound`
+  (ok=false), so the campaign engine learns of the failure regardless of
+  Ack/Nak/Term. Redelivery is then about retryability: permanent errors
+  (banned session, bad creds, validation, tenant mismatch, not-found) → `Term`
+  (no redelivery — kills the NAK storm); transient errors (network, timeout,
+  MQTToT close, 5xx) → `Nak` (bounded by Max Deliver = 5).
+
+---
+
 ### 5. `hermes.wa.ban.{tenant_id}`
 
 WA number ban detection.

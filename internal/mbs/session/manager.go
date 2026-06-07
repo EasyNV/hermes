@@ -24,6 +24,16 @@ type muxedSession struct {
 
 	mu sync.Mutex // serializes connect/disconnect for this uid
 
+	// sendMu serializes Bootstrap+Send for this uid across ALL producers
+	// (campaign consumer, manual consumer, retries). Distinct from mu so a
+	// long send never blocks an unrelated connect/health-check/disconnect for
+	// the same uid (and so Send → GetOrConnect, which takes mu internally,
+	// can't self-deadlock). A session's MQTToT socket is single stateful
+	// stream: interleaving Bootstrap(threadA)/Send/Bootstrap(threadB) from two
+	// goroutines corrupts thread context and is an OPSEC hazard. Acquired
+	// ctx-aware (lockCtx) so a wedged session doesn't pile up blocked senders.
+	sendMu sync.Mutex
+
 	connected      *Connected           // nil until connected; guarded by mu
 	client         clientI              // the injected client (real or fake); guarded by mu
 	listenerCtx    context.Context      // nil until connected; guarded by mu
@@ -495,13 +505,25 @@ func (m *manager) Subscribe(uid int64) (<-chan *InboundDelta, func()) {
 }
 
 // Send runs GetOrConnect → Bootstrap(threadID) → Send(text). All three
-// steps must succeed; partial failures propagate to caller. The
-// per-uid mutex inside GetOrConnect serializes connect; Send + Bootstrap
-// run outside the mutex (they're concurrent-safe on the client side).
+// steps must succeed; partial failures propagate to caller.
+//
+// The entire sequence is serialized per uid via ms.sendMu (acquired
+// ctx-aware) so concurrent producers — campaign consumer, manual consumer,
+// and NATS redelivery retries — cannot interleave Bootstrap/Send on the uid's
+// single MQTToT socket. The per-uid connect mutex (mu, inside GetOrConnect) is
+// a DIFFERENT lock, so an in-flight send never blocks connect/health/disconnect
+// for the same uid. If ctx fires while waiting for sendMu, returns ctx.Err()
+// (a wedged session sheds load instead of queueing blocked goroutines).
 //
 // The handler uses this instead of touching Connected.Client directly
 // so that test code can swap in a fake Manager.
 func (m *manager) Send(ctx context.Context, uid, threadID int64, text string) (*client.SendResult, error) {
+	ms := m.getOrCreateMux(uid)
+	if err := lockCtx(ctx, &ms.sendMu); err != nil {
+		return nil, err
+	}
+	defer ms.sendMu.Unlock()
+
 	cn, err := m.GetOrConnect(ctx, uid)
 	if err != nil {
 		return nil, err

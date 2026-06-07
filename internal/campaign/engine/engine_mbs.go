@@ -125,6 +125,14 @@ func (e *Engine) dispatchMbsLoop(ctx context.Context, campaign *handler.Campaign
 
 			_, _ = json.Marshal(vars) // future: include in MbsCampaignSendTask if proto adds the field
 
+			// Anti-ban inter-send spacing — mirror of the WA path
+			// (engine.go:244). Randomized per-send within the campaign's
+			// configured delay window; the mbs send consumer sleeps this long
+			// AFTER acking (ack-first) so the session is paced without risking
+			// AckWait redelivery. Without this, MBS campaigns burst at machine
+			// speed (the 1a50964b incident: 38 sends in ~64ms).
+			postSendMs := randomDelay(campaign.DelayMinMs, campaign.DelayMaxMs)
+
 			// E.164 minus leading "+" per events.proto:431 — the consumer
 			// passes this verbatim to BizInboxWhatsAppCustomerMutation
 			// which expects unprefixed digits.
@@ -145,6 +153,7 @@ func (e *Engine) dispatchMbsLoop(ctx context.Context, campaign *handler.Campaign
 				ResolvedBody:   resolvedBody,
 				PageIdOverride: "", // future: per-campaign page override
 				IdempotencyKey: campaignID + ":" + contact.ContactID,
+				PostSendDelayMs: int32(postSendMs),
 			}
 
 			if e.js != nil {

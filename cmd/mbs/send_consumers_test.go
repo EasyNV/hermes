@@ -1,14 +1,64 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
 
 	hermesv1 "github.com/hermes-waba/hermes/gen/go/hermes/v1"
 )
+
+// ───────────────────────── pacePostSend (anti-ban) ─────────────────────────
+
+// Zero/negative delay must return immediately without sleeping.
+func TestPacePostSend_ZeroDelayNoSleep(t *testing.T) {
+	start := time.Now()
+	if got := pacePostSend(context.Background(), 0); got {
+		t.Error("pacePostSend(0) should report no sleep")
+	}
+	if got := pacePostSend(context.Background(), -5); got {
+		t.Error("pacePostSend(-5) should report no sleep")
+	}
+	if elapsed := time.Since(start); elapsed > 20*time.Millisecond {
+		t.Errorf("zero-delay pacing slept %v, want ~0", elapsed)
+	}
+}
+
+// A positive delay sleeps approximately that long when ctx stays live.
+func TestPacePostSend_SleepsForDelay(t *testing.T) {
+	start := time.Now()
+	if got := pacePostSend(context.Background(), 60); !got {
+		t.Error("pacePostSend(60) should report it slept to completion")
+	}
+	elapsed := time.Since(start)
+	if elapsed < 50*time.Millisecond {
+		t.Errorf("pacing slept %v, want ≥~60ms", elapsed)
+	}
+}
+
+// SIGTERM (ctx cancellation) must abort the post-ack sleep promptly — the Q1
+// shutdown requirement. The sleep returns early (false) well before the full
+// delay elapses.
+func TestPacePostSend_CtxCancelAborts(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	got := pacePostSend(ctx, 5000) // 5s delay, but ctx fires at ~20ms
+	elapsed := time.Since(start)
+	if got {
+		t.Error("pacePostSend should report aborted (false) when ctx cancels")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("ctx-cancel abort took %v, want ~20ms (prompt drain)", elapsed)
+	}
+}
 
 // ───────────────────────── tenantFromSubject ─────────────────────────
 
@@ -190,7 +240,7 @@ func (s *subscribeRecorder) Subscribe(subject string, _ natsgo.MsgHandler, opts 
 
 func TestStartCampaignConsumer_RegistersExpectedSubjectAndOpts(t *testing.T) {
 	rec := &subscribeRecorder{}
-	if err := startCampaignConsumer(rec, nil, zerolog.Nop()); err != nil {
+	if err := startCampaignConsumer(context.Background(), rec, nil, zerolog.Nop()); err != nil {
 		t.Fatalf("startCampaignConsumer: %v", err)
 	}
 
@@ -208,7 +258,7 @@ func TestStartCampaignConsumer_RegistersExpectedSubjectAndOpts(t *testing.T) {
 
 func TestStartManualConsumer_RegistersExpectedSubjectAndOpts(t *testing.T) {
 	rec := &subscribeRecorder{}
-	if err := startManualConsumer(rec, nil, zerolog.Nop()); err != nil {
+	if err := startManualConsumer(context.Background(), rec, nil, zerolog.Nop()); err != nil {
 		t.Fatalf("startManualConsumer: %v", err)
 	}
 

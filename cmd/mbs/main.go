@@ -299,10 +299,10 @@ func main() {
 	reflection.Register(grpcSrv)
 
 	// ── 10. NATS send consumers (campaign + manual)
-	if err := startCampaignConsumer(js, h, log); err != nil {
+	if err := startCampaignConsumer(rootCtx, js, h, log); err != nil {
 		log.Fatal().Err(err).Msg("start campaign consumer failed")
 	}
-	if err := startManualConsumer(js, h, log); err != nil {
+	if err := startManualConsumer(rootCtx, js, h, log); err != nil {
 		log.Fatal().Err(err).Msg("start manual consumer failed")
 	}
 
